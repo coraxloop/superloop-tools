@@ -1152,18 +1152,26 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
             assert!(launcher.wait().expect("launcher exit").code().is_some());
             assert!(!request_socket.exists(), "request socket removed");
             assert!(!control_socket.exists(), "control socket removed");
-            // The attempt cases pin service return and socket cleanup. A task
-            // listing here also depends on procfs teardown after a join, an
-            // event this test does not control. The no-client cases keep the
-            // earlier whole-process count check.
-            if matches!(scenario, ServiceCase::NoClient | ServiceCase::Due) {
-                assert_eq!(
-                    fs::read_dir("/proc/self/task")
-                        .expect("service caller threads after return")
-                        .count(),
-                    threads_before,
-                    "service returned with no control or authority thread"
-                );
+            // A joined thread can remain listed until the kernel finishes its
+            // teardown. The fixture watchdog bounds this event wait, so a
+            // leaked service thread remains a named fixture failure.
+            let mut pending_reported = false;
+            loop {
+                let observed = fs::read_dir("/proc/self/task")
+                    .expect("service caller threads after return")
+                    .count();
+                if observed == threads_before {
+                    break;
+                }
+                if !pending_reported {
+                    writeln!(
+                        std::io::stderr().lock(),
+                        "service thread count pending: baseline={threads_before} observed={observed}"
+                    )
+                    .expect("thread count diagnostic");
+                    pending_reported = true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
             }
             drop(client_runs);
             assert_eq!(

@@ -17,7 +17,7 @@ use super::{
 };
 use crate::error::LaneError;
 use crate::plan::Plan;
-use crate::{build, home, load_plan};
+use crate::{build, home};
 
 fn round_evidence_uid(plan: &Plan) -> Result<u32, LaneError> {
     if home::private_is_active() {
@@ -817,7 +817,8 @@ pub(super) fn inspect_current_round(
     run: &str,
     evidence: Option<(&str, u64)>,
 ) -> Result<Value, LaneError> {
-    let (mut plan, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
+    let (mut plan, _) =
+        crate::load_plan_for_record_with_door(owner_home, loop_name, run, (0, 0), true)?;
     let root = plan
         .driver_dir
         .parent()
@@ -1516,7 +1517,13 @@ fn resume_with_program(
     let config = owner_home.join(".config/loops").join(&request.loop_name);
     let _admission = crate::install::lock_loop_config(&config, true)?;
     admission::ensure_open(&config, caller)?;
-    let (mut plan, settings) = load_plan(owner_home, &request.loop_name, &request.run, (0, 0))?;
+    let (mut plan, settings) = crate::load_plan_for_record_with_door(
+        owner_home,
+        &request.loop_name,
+        &request.run,
+        (0, 0),
+        true,
+    )?;
     let root = plan
         .driver_dir
         .parent()

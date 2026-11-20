@@ -1727,6 +1727,115 @@ mod tests {
         dead_resume_fixture_in(phase, Path::new("/tmp"))
     }
 
+    fn select_recorded_fixture_backend(home: &Path, backend: &str) {
+        let path = home.join(".config/loops/alpha/workers.toml");
+        let settings = std::fs::read_to_string(&path).expect("fixture settings");
+        if backend == "claude" {
+            std::fs::write(&path, settings.replace("codex =", "claude ="))
+                .expect("Claude-only settings");
+        }
+        let path = super::super::reservation_path(home, "R");
+        let mut record = read_reservation(&path)
+            .expect("fixture read")
+            .expect("reservation");
+        record["plan"]["backend"] = json!(backend);
+        super::super::publish_reservation(&path, &record).expect("recorded backend");
+        if backend == "claude" {
+            let (mut plan, _) = crate::load_plan_for_record(home, "alpha", "R", (0, 0))
+                .expect("Claude-only candidate");
+            plan.select_worker_uid(Uid::effective().as_raw())
+                .expect("fixture worker");
+            plan.select_container_program(&home.join("runtime"))
+                .expect("fixture runtime");
+            plan.select_launch_model(&record["model_selection"])
+                .expect("fixture model");
+            record["plan"] = plan.document;
+            super::super::publish_reservation(&path, &record).expect("Claude reservation");
+        }
+    }
+
+    /// # Panics
+    /// Panics if public settlement reconstructs a Codex plan for a Claude reservation.
+    /// ´test:unit:claude-only-settle-reads-recorded-backend´
+    #[test]
+    fn claude_only_settle_reads_recorded_backend() {
+        let (fixture, _, _) = dead_resume_fixture("started");
+        let home = fixture.path();
+        select_recorded_fixture_backend(home, "claude");
+        let request = SettleRequest {
+            loop_name: "alpha".into(),
+            run: "R".into(),
+            step: "work-1".into(),
+            dry_run: true,
+            expect_digest: None,
+        };
+        let (plan, _) = crate::load_plan_for_record(home, "alpha", "R", (0, 0))
+            .expect("Claude-only saved plan");
+        assert_eq!(plan.document["backend"], "claude");
+        PUBLIC_SETTLE_PROGRAM
+            .with(|program| program.replace(Some(home.join("runtime").display().to_string())));
+        let result = run_with_host_root(
+            home,
+            &request,
+            home,
+            Uid::effective().as_raw(),
+            &std::env::current_exe().expect("test image"),
+            &mut |_| {},
+        );
+        PUBLIC_SETTLE_PROGRAM.with(|program| program.replace(None));
+        let error = result.expect_err("fixture runtime has no settlement reply");
+        assert_eq!(error.kind, "settle-private", "{error:?}");
+        assert!(error.detail.contains("no thread or reply"), "{error:?}");
+    }
+
+    /// # Panics
+    /// Panics if resumed-round inspection selects a missing Codex program.
+    /// ´test:unit:claude-only-resume-reads-recorded-backend´
+    #[test]
+    fn claude_only_resume_reads_recorded_backend() {
+        let (fixture, _, request) = dead_resume_fixture("started");
+        let home = fixture.path();
+        select_recorded_fixture_backend(home, "claude");
+        let (plan, _) = crate::load_plan_for_record_with_door(home, "alpha", "R", (0, 0), true)
+            .expect("Claude-only saved round plan");
+        assert_eq!(plan.document["backend"], "claude");
+        let result = super::super::run_with_host_root_and_proxy(
+            home,
+            &request,
+            home,
+            Uid::effective().as_raw(),
+            |_| Ok(("active".into(), "fixture-invocation".into())),
+        );
+        let preview = result.expect("Claude-only resumed-round preview");
+        assert_eq!(
+            preview["interrupted_settlement"]["state"],
+            "would-complete-interrupted-settlement"
+        );
+    }
+
+    /// # Panics
+    /// Panics if a Codex-only saved run or a legacy record loses its Codex selection.
+    /// ´test:unit:codex-only-record-readers-keep-the-default´
+    #[test]
+    fn codex_only_record_readers_keep_the_default() {
+        let (fixture, _, _) = dead_resume_fixture("started");
+        let home = fixture.path();
+        for legacy in [false, true] {
+            let path = super::super::reservation_path(home, "R");
+            let mut record = read_reservation(&path).expect("read").expect("record");
+            if legacy {
+                record["plan"]
+                    .as_object_mut()
+                    .expect("plan")
+                    .remove("backend");
+                super::super::publish_reservation(&path, &record).expect("legacy record");
+            }
+            let (plan, _) = crate::load_plan_for_record(home, "alpha", "R", (0, 0))
+                .expect("Codex-only saved plan");
+            assert_eq!(plan.document["backend"], "codex");
+        }
+    }
+
     #[allow(clippy::too_many_lines)]
     fn dead_resume_fixture_in(
         phase: &str,

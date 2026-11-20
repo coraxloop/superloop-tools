@@ -1546,6 +1546,7 @@ impl Plan {
     /// # Errors
     ///
     /// Refuses invalid settings, registry fields, or other plan inputs.
+    #[cfg(test)]
     pub(crate) fn build_for_record(
         home_root: &Path,
         loop_name: &str,
