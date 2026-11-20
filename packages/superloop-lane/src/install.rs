@@ -1012,6 +1012,43 @@ fn publish_generation(path: &Path, generation: &Value) -> Result<(), LaneError> 
         })
 }
 
+struct GenerationRecord<'a> {
+    image_digest: &'a str,
+    codex_sha256: &'a str,
+    codex_host_sha256: &'a str,
+    tools_commit: &'a str,
+    template_dir: &'a Path,
+    socket_dir: &'a Path,
+    unit_dir: &'a Path,
+    proxy_bin: &'a Path,
+    proxy_sha256: &'a str,
+    init_sha256: &'a str,
+    codex_image_program: &'a str,
+    source_fingerprint: &'a str,
+    payloads: &'a [crate::build::payload::InstallPayload],
+    loop_home: &'a Path,
+    image_hash: &'a str,
+}
+
+fn preparing_generation(fields: &GenerationRecord<'_>) -> Result<Value, LaneError> {
+    let mut generation = json!({
+        "schema":1,"phase":"preparing","image_digest":fields.image_digest,
+        "codex_sha256":fields.codex_sha256,"codex_host_sha256":fields.codex_host_sha256,
+        "tools_commit":fields.tools_commit,"template_dir":fields.template_dir,
+        "socket_dir":fields.socket_dir,"unit_dir":fields.unit_dir,
+        "proxy_bin":fields.proxy_bin,"proxy_sha256":fields.proxy_sha256,
+        "init_sha256":fields.init_sha256,"codex_image_program":fields.codex_image_program,
+        "source_fingerprint":fields.source_fingerprint
+    });
+    vendor_generation_fields(
+        &mut generation,
+        fields.payloads,
+        fields.loop_home,
+        fields.image_hash,
+    )?;
+    Ok(generation)
+}
+
 #[cfg(test)]
 pub(crate) fn fixture_publish_claude_generation(
     path: &Path,
@@ -1022,21 +1059,37 @@ pub(crate) fn fixture_publish_claude_generation(
     source_fingerprint: &str,
     init_sha256: &str,
 ) -> Result<Value, LaneError> {
-    let mut generation = json!({"schema":1,"phase":"preparing","image_digest":image_digest,
-        "tools_commit":"fixture","source_fingerprint":source_fingerprint,
-        "init_sha256":init_sha256});
     let hash = image_digest.strip_prefix("sha256:").ok_or_else(|| {
         LaneError::input(
             "install-generation",
             "fixture image digest has no algorithm",
         )
     })?;
-    vendor_generation_fields(
-        &mut generation,
-        std::slice::from_ref(payload),
-        &owner_home.join(".var/loops").join(loop_name),
-        hash,
-    )?;
+    let loop_home = owner_home.join(".var/loops").join(loop_name);
+    let template = payload.template(&loop_home, hash);
+    let socket = owner_home.join("sockets");
+    let unit = owner_home.join(".config/systemd/user");
+    let proxy = owner_home.join("proxy-fixture");
+    fs::copy("/usr/bin/true", &proxy)
+        .map_err(|error| LaneError::operation("install-generation", error.to_string()))?;
+    let proxy_sha256 = crate::build::sha256(&proxy)?;
+    let generation = preparing_generation(&GenerationRecord {
+        image_digest,
+        codex_sha256: "",
+        codex_host_sha256: "",
+        tools_commit: "fixture",
+        template_dir: &template,
+        socket_dir: &socket,
+        unit_dir: &unit,
+        proxy_bin: &proxy,
+        proxy_sha256: &proxy_sha256,
+        init_sha256,
+        codex_image_program: "",
+        source_fingerprint,
+        payloads: std::slice::from_ref(payload),
+        loop_home: &loop_home,
+        image_hash: hash,
+    })?;
     publish_generation(path, &generation)?;
     Ok(generation)
 }
@@ -2065,8 +2118,23 @@ fn run_with_lane_bin_inner(
             json!({"schema":1,"command":"install","pilot":request.pilot,"installed_backends":installed_backends,"dry_run":true,"changed":changed,"change_counts":change_counts,"allocation":allocation,"unit_dir":unit_dir,"destinations":destinations,"sign_in_metadata":private["sign_in"],"proxy_bin":request.proxy_bin,"proxy_sha256":proxy_sha256,"hash_checks":hash_checks,"private_hash_checks":private["hash_checks"],"private_preflight":preflight_spec.preview(),"private_install":install_spec.preview(),"activation":["systemctl --user daemon-reload",format!("systemctl --user start superloop-lane-vendor@{}.service", request.loop_name)],"wall_seconds":started.elapsed().as_secs_f64()}),
         );
     }
-    let mut generation = json!({"schema":1,"phase":"preparing","image_digest":image_digest,"codex_sha256":codex_sha256,"codex_host_sha256":codex_host_sha256,"tools_commit":tools_commit,"template_dir":template_dir,"socket_dir":socket_dir,"unit_dir":unit_dir,"proxy_bin":request.proxy_bin,"proxy_sha256":proxy_sha256,"init_sha256":init_sha256,"codex_image_program":image_program,"source_fingerprint":measured_source});
-    vendor_generation_fields(&mut generation, &payloads, &row.home, hash)?;
+    let mut generation = preparing_generation(&GenerationRecord {
+        image_digest,
+        codex_sha256,
+        codex_host_sha256,
+        tools_commit,
+        template_dir: &template_dir,
+        socket_dir: &socket_dir,
+        unit_dir: &unit_dir,
+        proxy_bin: &request.proxy_bin,
+        proxy_sha256: &proxy_sha256,
+        init_sha256,
+        codex_image_program: image_program,
+        source_fingerprint: measured_source,
+        payloads: &payloads,
+        loop_home: &row.home,
+        image_hash: hash,
+    })?;
     let refresh_needed = private["charter_refresh"] == true;
     let private_mutation = private["destinations"]
         .as_array()

@@ -571,6 +571,21 @@ fn install_service_template(
         template.display().to_string()
     );
     assert_eq!(generation["claude_sha256"], manifest["claude_sha256"]);
+    assert_eq!(generation["template_dir"], template.display().to_string());
+    assert_eq!(
+        generation["socket_dir"],
+        owner.join("sockets").display().to_string()
+    );
+    assert_eq!(
+        generation["unit_dir"],
+        owner.join(".config/systemd/user").display().to_string()
+    );
+    let proxy = owner.join("proxy-fixture");
+    assert_eq!(generation["proxy_bin"], proxy.display().to_string());
+    assert_eq!(
+        generation["proxy_sha256"],
+        crate::build::sha256(&proxy).expect("proxy digest")
+    );
     template
 }
 
