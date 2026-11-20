@@ -498,6 +498,21 @@ fn install_service_template(
     let loop_root = owner.join(".var/loops/alpha");
     fs::create_dir_all(&loop_root).expect("loop install root");
     let config = owner.join(".config/loops/alpha");
+    let settings = config.join("workers.toml");
+    let mut document: toml::Table =
+        toml::from_str(&fs::read_to_string(&settings).expect("fixture settings"))
+            .expect("fixture settings TOML");
+    let template = payload.template(
+        &loop_root,
+        image.strip_prefix("sha256:").expect("image digest"),
+    );
+    document["template_dir"] = toml::Value::String(template.display().to_string());
+    document["socket_dir"] = toml::Value::String(loop_root.join("sockets").display().to_string());
+    fs::write(
+        &settings,
+        toml::to_string(&document).expect("fixture settings text"),
+    )
+    .expect("fixture installed settings");
     fs::remove_file(config.join("install-generation.json"))
         .expect("replace staged transaction generation with installer generation");
     let held = fs::File::open(&config).expect("install directory");
@@ -574,7 +589,7 @@ fn install_service_template(
     assert_eq!(generation["template_dir"], template.display().to_string());
     assert_eq!(
         generation["socket_dir"],
-        owner.join("sockets").display().to_string()
+        loop_root.join("sockets").display().to_string()
     );
     assert_eq!(
         generation["unit_dir"],

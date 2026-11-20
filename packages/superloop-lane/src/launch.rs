@@ -7239,6 +7239,7 @@ pub(crate) fn pinned_plan_from_record_admitted(
 #[allow(clippy::too_many_lines)]
 pub fn private_prepare_runtime(
     owner_home: &Path,
+    runs_root: &Path,
     loop_name: &str,
     run: &str,
     podman: &Path,
@@ -7254,14 +7255,8 @@ pub fn private_prepare_runtime(
         return Err(LaneError::input("run-name", format!("bad run name: {run}")));
     }
     crate::pinned::owner_executable(podman, Uid::effective().as_raw())?;
-    let (initial, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
-    let driver_dir = initial.driver_dir;
-    let reservation = reservation_path(
-        driver_dir
-            .parent()
-            .ok_or_else(|| LaneError::input("plan-read", "run has no runs root"))?,
-        run,
-    );
+    let driver_dir = runs_root.join(run);
+    let reservation = reservation_path(runs_root, run);
     let record = read_reservation(&reservation)?.ok_or_else(|| {
         LaneError::input(
             "launch-reservation",
@@ -7275,6 +7270,12 @@ pub fn private_prepare_runtime(
         ));
     }
     let (plan, settings) = pinned_plan_from_record(owner_home, loop_name, run, podman, &record)?;
+    if plan.driver_dir != driver_dir {
+        return Err(LaneError::input(
+            "launch-reservation",
+            "verified runs root differs from the registry plan",
+        ));
+    }
     let observed = plan.document["vendor_mode"].is_string();
     if observed
         && settings

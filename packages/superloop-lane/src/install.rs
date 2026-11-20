@@ -1067,7 +1067,7 @@ pub(crate) fn fixture_publish_claude_generation(
     })?;
     let loop_home = owner_home.join(".var/loops").join(loop_name);
     let template = payload.template(&loop_home, hash);
-    let socket = owner_home.join("sockets");
+    let socket = loop_home.join("sockets");
     let unit = owner_home.join(".config/systemd/user");
     let proxy = owner_home.join("proxy-fixture");
     fs::copy("/usr/bin/true", &proxy)

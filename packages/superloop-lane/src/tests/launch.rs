@@ -2751,7 +2751,7 @@ fn proxy_refresh_preserves_live_helper_pins() {
         return;
     }
     crate::container_helper::fixture_reserved_program_attempt(home, &runs.join("R"));
-    let before = crate::container_helper::fixture_pinned_request(home, "R", &podman)
+    let before = crate::container_helper::fixture_pinned_request(home, &runs, "R", &podman)
         .expect("helper before refresh");
     let mut install = crate::install::InstallRequest {
         loop_name: "alpha".into(),
@@ -2805,7 +2805,7 @@ fn proxy_refresh_preserves_live_helper_pins() {
     let refreshed = invoke(&install).expect("record-only refresh beside live launchers");
     assert_eq!(refreshed["changed"], 1);
     assert_eq!(refreshed["blocked"], false);
-    let after = crate::container_helper::fixture_pinned_request(home, "R", &podman)
+    let after = crate::container_helper::fixture_pinned_request(home, &runs, "R", &podman)
         .expect("later helper request accepts refreshed generation");
     assert_eq!(before, after, "the run's pins remain unchanged");
     let record: serde_json::Value =
@@ -2926,7 +2926,7 @@ fn proxy_refresh_preserves_live_helper_pins() {
         serde_json::to_vec(&record).expect("restore pins"),
     )
     .expect("restore both pins");
-    assert!(crate::container_helper::fixture_pinned_request(home, "S", &podman).is_ok());
+    assert!(crate::container_helper::fixture_pinned_request(home, &runs, "S", &podman).is_ok());
     let defaults = crate::install::InstallRequest::parse(&[
         "--pilot".into(),
         "--refresh-proxy".into(),
@@ -3020,8 +3020,8 @@ fn proxy_refresh_preserves_live_helper_pins() {
         crate::install::read_generation(&generation_path).expect("unchanged generation"),
         Some(expected)
     );
-    assert!(crate::container_helper::fixture_pinned_request(home, "R", &podman).is_ok());
-    assert!(crate::container_helper::fixture_pinned_request(home, "S", &podman).is_ok());
+    assert!(crate::container_helper::fixture_pinned_request(home, &runs, "R", &podman).is_ok());
+    assert!(crate::container_helper::fixture_pinned_request(home, &runs, "S", &podman).is_ok());
     drop(first);
     drop(second);
     fs::remove_file(runs.join(".reservation-R.json")).expect("release R");

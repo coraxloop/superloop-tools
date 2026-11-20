@@ -502,7 +502,7 @@ fn pin_for_backend(
 /// Panics if host custody or the synthetic role replacement fails.
 #[cfg(test)]
 pub(crate) fn fixture_claude_helper_bundle(home: &Path, runs: &Path) -> Bundle {
-    fixture_claude_helper_bundle_with_podman(home, runs, Path::new("/usr/bin/podman"))
+    fixture_claude_helper_bundle_with_podman(home, runs, Path::new("/usr/bin/false"))
 }
 
 /// Use the production helper roles while pinning a fixture's pre-existing Podman stand-in.

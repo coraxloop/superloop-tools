@@ -288,6 +288,7 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             "plan-link",
             "plan-mode",
             "plan-large",
+            "reservation-claude-only",
             "home-runs-alias",
             "letter-runs",
             "execute-held",
@@ -308,6 +309,9 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             if case.starts_with("execute-") && entry != "runtime" {
                 continue;
             }
+            if case == "reservation-claude-only" && entry != "runtime" {
+                continue;
+            }
             let runs_path = if case == "home-runs-alias" {
                 home.to_path_buf()
             } else {
@@ -320,6 +324,25 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
             };
             if case.starts_with("plan-") {
                 seed_held_settings(home, case);
+            }
+            if case == "reservation-claude-only" {
+                seed_held_settings(home, "plan-held");
+                let path = home.join(".config/loops/alpha/workers.toml");
+                let source = fs::read_to_string(&path).expect("Claude-only settings");
+                fs::write(&path, source.replace("codex=", "claude=")).expect("Claude-only backend");
+                fs::remove_file(home.join("runs/.reservation-lane-a.json"))
+                    .expect("leave the verified reservation absent");
+            }
+            if entry == "runtime" && case != "reservation-claude-only" {
+                let reservation = home.join("runs/.reservation-lane-a.json");
+                let record = serde_json::json!({
+                    "schema": 1, "phase": "preparing", "worker_uid": 64010,
+                    "loop": "alpha", "run": "lane-a",
+                    "plan": {"backend": "codex", "driver_dir": home.join("runs/lane-a")}
+                });
+                fs::write(&reservation, record.to_string()).expect("runtime reservation");
+                fs::set_permissions(&reservation, fs::Permissions::from_mode(0o600))
+                    .expect("runtime reservation mode");
             }
             if case.starts_with("claude-") {
                 seed_held_settings(home, "plan-held");
@@ -462,6 +485,10 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                     .expect("restore held configuration");
                 fs::remove_dir_all(home.join(".config/loops/alpha")).expect("remove held settings");
             }
+            if case == "reservation-claude-only" {
+                fs::remove_dir_all(home.join(".config/loops/alpha"))
+                    .expect("remove Claude-only settings");
+            }
             if case.starts_with("execute-") {
                 fs::remove_dir_all(home.join(".config/loops/alpha")).expect("remove hash settings");
                 fs::remove_dir_all(home.join("hash-template")).expect("remove hash fixture");
@@ -527,6 +554,11 @@ for path,uid,mode in [(home/'.var',0,0o711),(home/'.var/loops',0,0o711),(home/'.
                     );
                 }
                 "plan-large" => assert!(report.contains("settings-size"), "{report}"),
+                "reservation-claude-only" => assert!(
+                    report.contains("launch-reservation:")
+                        && report.contains(".reservation-lane-a.json is absent"),
+                    "Claude-only settings reach the verified reservation: {report}"
+                ),
                 "home-runs-alias" => assert!(
                     report.contains("anchor-declaration") && report.contains("purpose=runs-root"),
                     "{report}"

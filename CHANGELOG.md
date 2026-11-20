@@ -12,6 +12,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Refuse named vendor credential variables in a box plan, owner sign-in binds at launch, and recognized credential files in image and install inputs as `credential-environment`, `credential-mount` and `credential-image-input`; pin the Claude periodic cutover refusal at its production entry (``inv:superlooplane:box-inputs-exclude-recognized-credentials``). Compatibility: the production Claude gate remains closed; Codex plans, builds and installs now refuse the same recognized credential inputs, while ordinary Codex boxes and harvest keep their existing forms.
 
+### Fixed
+
+- Carry the verified runs root into helper service and private runtime preparation instead of selecting a Codex plan to find the reservation; align the Claude fixture's installed paths with the loop root and default its held runtime to a stand-in (``test:unit:helper-service-plan-readers-keep-wrapped-gate``; ``test:unit:helper-service-refuses-a-run-outside-registry-runs-root``; ``test:crate:claude-service-fixture-defaults-to-held-standin-runtime``). Compatibility: the production Claude gate stays closed, and no refusal kind changes for a Codex loop: the helper service already reported a broken `backend_argv.codex` inside `helper-pin`, and private preparation still reports it as `missing-setting`, now after reading the run's reservation, so a preparation without a reservation reports `launch-reservation` first. No reservation or install record changes.
+
 ## [0.8.2] - 2026-11-20
 
 ### Fixed
