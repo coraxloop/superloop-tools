@@ -2670,18 +2670,31 @@ pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
 }
 
 fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), LaneError> {
+    serve_admitted_at(&caller_home()?, run_dir, admission)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_serve_admitted_at(
+    owner_home: &Path,
+    run_dir: &Path,
+    admission: &RuntimeAdmission,
+) -> Result<(), LaneError> {
+    serve_admitted_at(owner_home, run_dir, admission)
+}
+
+fn serve_admitted_at(
+    owner_home: &Path,
+    run_dir: &Path,
+    admission: &RuntimeAdmission,
+) -> Result<(), LaneError> {
     if !Uid::effective().is_root() {
         return Err(LaneError::input(
             "helper-identity",
             "rootless namespace owner is required",
         ));
     }
-    let (owner_home, loop_name, run, podman, runs_root) = run_identity_at_admitted(
-        &caller_home()?,
-        run_dir,
-        Uid::effective().as_raw(),
-        admission,
-    )?;
+    let (owner_home, loop_name, run, podman, runs_root) =
+        run_identity_at_admitted(owner_home, run_dir, Uid::effective().as_raw(), admission)?;
     let initial = pinned_request_admitted(
         &owner_home,
         &loop_name,

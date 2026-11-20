@@ -122,6 +122,13 @@ fn launch_with_builder(name: &str, builder: bool) -> Host {
         .expect("host-created enclosure");
     let program = builder.then(|| PathBuf::from("/usr/bin/bash"));
     let (root, bundle) = claude_standin_host_with_root(enclosing, program.as_deref());
+    if name.starts_with("claude_fixture_service_round_") {
+        fs::write(
+            root.path().join("owner/.config/loops/allocations.toml"),
+            "mail_uid=64001\n[alpha]\nuids={base=3000,count=2}\nmail_gids={base=64020,count=3}\n",
+        )
+        .expect("service fixture allocation before transfer");
+    }
     if builder {
         fixture_builder_scripts(&root.path().join("owner"));
     }
@@ -502,12 +509,13 @@ fn install_service_template(
     let mut document: toml::Table =
         toml::from_str(&fs::read_to_string(&settings).expect("fixture settings"))
             .expect("fixture settings TOML");
-    let template = payload.template(
+    let (template, socket_dir) = crate::install::install_paths(
         &loop_root,
+        payload,
         image.strip_prefix("sha256:").expect("image digest"),
     );
     document["template_dir"] = toml::Value::String(template.display().to_string());
-    document["socket_dir"] = toml::Value::String(loop_root.join("sockets").display().to_string());
+    document["socket_dir"] = toml::Value::String(socket_dir.display().to_string());
     fs::write(
         &settings,
         toml::to_string(&document).expect("fixture settings text"),
@@ -570,8 +578,6 @@ fn install_service_template(
     .expect("installer act");
     crate::install::fixture_complete_claude_generation(&generation_path, &mut generation)
         .expect("installer complete generation");
-    let image_hash = image.strip_prefix("sha256:").expect("image digest");
-    let template = payload.template(&loop_root, image_hash);
     let manifest: Value =
         serde_json::from_slice(&fs::read(template.join("manifest")).expect("installed manifest"))
             .expect("manifest JSON");
@@ -587,10 +593,7 @@ fn install_service_template(
     );
     assert_eq!(generation["claude_sha256"], manifest["claude_sha256"]);
     assert_eq!(generation["template_dir"], template.display().to_string());
-    assert_eq!(
-        generation["socket_dir"],
-        loop_root.join("sockets").display().to_string()
-    );
+    assert_eq!(generation["socket_dir"], socket_dir.display().to_string());
     assert_eq!(
         generation["unit_dir"],
         owner.join(".config/systemd/user").display().to_string()
@@ -642,6 +645,80 @@ fn claude_fixture_service_installer_materializes_template() {
     assert!(!path.exists());
 }
 
+fn service_installed_inputs(root: &FixtureRoot, owner: &Path) -> PathBuf {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let mut digest = String::new();
+    for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
+        write!(&mut digest, "{byte:02x}").expect("digest");
+    }
+    let settings = owner.join(".config/loops/alpha/workers.toml");
+    let mut source = fs::read_to_string(&settings).expect("settings");
+    source.push_str("backend_argv = { claude = ['/usr/libexec/superloop/claude'] }\n");
+    fs::write(&settings, source).expect("configured Claude");
+    let request = crate::build::BuildRequest {
+        loop_name: "alpha".into(),
+        claude: Some(crate::build::payload::ProgramInput {
+            bin: PathBuf::from("/usr/bin/true"),
+            version: "0.1.0".into(),
+            sha256: digest.clone(),
+            source: "https://example.invalid/claude".into(),
+        }),
+        base_image: format!("registry.invalid/base@sha256:{}", "a".repeat(64)),
+        codex_bin: PathBuf::new(),
+        codex_host_bin: PathBuf::new(),
+        codex_version: String::new(),
+        codex_sha256: String::new(),
+        codex_host_sha256: String::new(),
+        codex_source: String::new(),
+        podman_bin: PathBuf::from(
+            std::env::var_os("CLAUDE_FIXTURE_BUILDER").expect("held builder path"),
+        ),
+        template_dir: crate::build::default_template_dir(),
+        dry_run: false,
+    };
+    let result = crate::build::run(owner, &request).expect("production image build");
+    let report: Value = serde_json::from_slice(
+        &fs::read(owner.join(".config/loops/alpha/image-build.json")).expect("image report"),
+    )
+    .expect("image report JSON");
+    assert_eq!(result["image_digest"], format!("sha256:{}", "b".repeat(64)));
+    assert_eq!(report["image_digest"], result["image_digest"]);
+    assert_eq!(report["claude_sha256"], digest);
+    assert_eq!(
+        report["claude_image_program"],
+        "/usr/libexec/superloop/claude"
+    );
+    let installed = crate::settings::Settings::read(&settings).expect("builder-updated settings");
+    let payloads = crate::build::payload::install_payloads(&report, &installed)
+        .expect("builder-produced install payload");
+    assert_eq!(payloads.len(), 1);
+    let template = install_service_template(
+        root,
+        owner,
+        &payloads[0],
+        result["image_digest"].as_str().expect("built image"),
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(template.join("manifest")).expect("installed manifest"))
+            .expect("manifest JSON");
+    let generation: Value = serde_json::from_slice(
+        &fs::read(owner.join(".config/loops/alpha/install-generation.json"))
+            .expect("installed generation"),
+    )
+    .expect("generation JSON");
+    crate::launch::check_backend_pin_records(
+        BoxBackend::Claude,
+        &manifest,
+        &report,
+        &generation,
+        &template,
+    )
+    .expect("selected build and install pins agree");
+    assert_eq!(generation["init_sha256"], report["init_sha256"]);
+    template
+}
+
 /// # Panics
 /// Panics if the held builder cannot publish the selected image report.
 /// ´test:unit:claude-fixture-service-builder-publishes-image-report´
@@ -651,79 +728,7 @@ fn claude_fixture_service_builder_publishes_image_report() {
         "claude_fixture_service_builder_publishes_image_report",
         |enclosing| {
             transaction_body(enclosing, |root, owner, _, _, _, _, _| {
-                use sha2::{Digest as _, Sha256};
-                use std::fmt::Write as _;
-                let mut digest = String::new();
-                for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
-                    write!(&mut digest, "{byte:02x}").expect("digest");
-                }
-                let settings = owner.join(".config/loops/alpha/workers.toml");
-                let mut source = fs::read_to_string(&settings).expect("settings");
-                source.push_str("backend_argv = { claude = ['/usr/libexec/superloop/claude'] }\n");
-                fs::write(&settings, source).expect("configured Claude");
-                let request = crate::build::BuildRequest {
-                    loop_name: "alpha".into(),
-                    claude: Some(crate::build::payload::ProgramInput {
-                        bin: PathBuf::from("/usr/bin/true"),
-                        version: "0.1.0".into(),
-                        sha256: digest.clone(),
-                        source: "https://example.invalid/claude".into(),
-                    }),
-                    base_image: format!("registry.invalid/base@sha256:{}", "a".repeat(64)),
-                    codex_bin: PathBuf::new(),
-                    codex_host_bin: PathBuf::new(),
-                    codex_version: String::new(),
-                    codex_sha256: String::new(),
-                    codex_host_sha256: String::new(),
-                    codex_source: String::new(),
-                    podman_bin: PathBuf::from(
-                        std::env::var_os("CLAUDE_FIXTURE_BUILDER").expect("held builder path"),
-                    ),
-                    template_dir: crate::build::default_template_dir(),
-                    dry_run: false,
-                };
-                let result = crate::build::run(owner, &request).expect("production image build");
-                let report: Value = serde_json::from_slice(
-                    &fs::read(owner.join(".config/loops/alpha/image-build.json"))
-                        .expect("image report"),
-                )
-                .expect("image report JSON");
-                assert_eq!(result["image_digest"], format!("sha256:{}", "b".repeat(64)));
-                assert_eq!(report["image_digest"], result["image_digest"]);
-                assert_eq!(report["claude_sha256"], digest);
-                assert_eq!(
-                    report["claude_image_program"],
-                    "/usr/libexec/superloop/claude"
-                );
-                let installed =
-                    crate::settings::Settings::read(&settings).expect("builder-updated settings");
-                let payloads = crate::build::payload::install_payloads(&report, &installed)
-                    .expect("builder-produced install payload");
-                assert_eq!(payloads.len(), 1);
-                let template = install_service_template(
-                    root,
-                    owner,
-                    &payloads[0],
-                    result["image_digest"].as_str().expect("built image"),
-                );
-                let manifest: Value = serde_json::from_slice(
-                    &fs::read(template.join("manifest")).expect("installed manifest"),
-                )
-                .expect("manifest JSON");
-                let generation: Value = serde_json::from_slice(
-                    &fs::read(owner.join(".config/loops/alpha/install-generation.json"))
-                        .expect("installed generation"),
-                )
-                .expect("generation JSON");
-                crate::launch::check_backend_pin_records(
-                    BoxBackend::Claude,
-                    &manifest,
-                    &report,
-                    &generation,
-                    &template,
-                )
-                .expect("selected build and install pins agree");
-                assert_eq!(generation["init_sha256"], report["init_sha256"]);
+                let _template = service_installed_inputs(root, owner);
             });
         },
     ) {
@@ -731,6 +736,279 @@ fn claude_fixture_service_builder_publishes_image_report() {
     }
     let mut host = launch_with_builder(
         "claude_fixture_service_builder_publishes_image_report",
+        true,
+    );
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+#[allow(clippy::too_many_lines)]
+fn service_round_body(enclosing: &Path, due: bool) {
+    transaction_body(
+        enclosing,
+        |root, owner, runs, worker, _, admission, document| {
+            let _template = service_installed_inputs(root, owner);
+            let identity = runs.join(".launch-R");
+            for (name, bytes) in [
+                ("passwd", "worker:x:3000:3000::/home/worker:/bin/sh\n"),
+                ("group", "worker:x:3000:\nloop:x:64000:worker\n"),
+            ] {
+                let path = identity.join(name);
+                fs::write(&path, bytes).expect("fixture home identity");
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o440))
+                    .expect("identity mode");
+                nix::unistd::chown(&path, Some(Uid::from_raw(0)), Some(Gid::from_raw(64000)))
+                    .expect("identity group");
+            }
+            let (mut plan, _) = crate::load_launch_plan_admitted(
+                owner,
+                "alpha",
+                "R",
+                (0, 0),
+                Some(BoxBackend::Claude),
+                admission,
+            )
+            .expect("admitted service plan after production install");
+            plan.select_worker_uid(3000).expect("selected worker");
+            plan.select_container_program(Path::new("/usr/bin/bash"))
+                .expect("held runtime program");
+            let selection = json!({
+                "model":"claude-sonnet-4-5","effort":"high",
+                "model_source":"letter","effort_source":"letter"
+            });
+            plan.select_launch_model(&selection)
+                .expect("selected letter model");
+            let mail_name = plan.document["mail"]["identity"]["name"]
+                .as_str()
+                .expect("selected mail identity");
+            let mail = owner
+                .join(".var/loops/alpha/workers")
+                .join(mail_name)
+                .join("mail");
+            fs::create_dir_all(&mail).expect("fixture mail endpoint");
+            fs::set_permissions(&mail, fs::Permissions::from_mode(0o700)).expect("mail mode");
+            let socket = owner.join(".var/loops/alpha/sockets/vendor/proxy.sock");
+            fs::create_dir_all(socket.parent().expect("vendor socket directory"))
+                .expect("vendor socket parent");
+            let prior_cwd = std::env::current_dir().expect("fixture cwd");
+            std::env::set_current_dir(owner.join(".var/loops/alpha"))
+                .expect("short vendor socket address");
+            let _vendor = std::os::unix::net::UnixListener::bind("sockets/vendor/proxy.sock")
+                .expect("fixture vendor socket");
+            std::env::set_current_dir(prior_cwd).expect("restore fixture cwd");
+            fs::set_permissions(&socket, fs::Permissions::from_mode(0o660))
+                .expect("vendor socket mode");
+            let letter = owner.join("service-letter.txt");
+            fs::write(&letter, b"Model: claude-sonnet-4-5\nEffort: high\n")
+                .expect("fixture service letter");
+
+            let home = claude_sign_in_dir(owner, "alpha");
+            fs::write(home.join(".fixture-refresh-sentinel-arm"), b"armed")
+                .expect("owner program sentinel arm");
+            let source_path = home.join(".credentials.json");
+            if due {
+                let expiry = now_seconds().expect("clock") + 300;
+                fs::write(&source_path, claude_document(expiry * 1000).to_string())
+                    .expect("due source");
+                fs::set_permissions(&source_path, fs::Permissions::from_mode(0o600))
+                    .expect("source mode");
+            }
+            let source_bytes = fs::read(&source_path).expect("owner source before service");
+            let source_meta = fs::metadata(&source_path).expect("owner source metadata");
+
+            let parent = std::env::var_os("CLAUDE_PARENT_MOUNT_NAMESPACE");
+            mount_service_procfs(parent.as_deref()).expect("isolated service procfs");
+            assert_eq!(
+                fs::read_link("/proc/self")
+                    .expect("namespace proc identity")
+                    .to_str()
+                    .expect("numeric proc identity")
+                    .parse::<u32>()
+                    .expect("PID"),
+                std::process::id(),
+                "service caller uses the fresh procfs"
+            );
+            let mut launcher = Command::new("/bin/sh")
+                .args(["-c", "read -r ignored"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("namespace-local launcher");
+            let launcher_pid = launcher.id();
+            let launcher_start = crate::container_helper::process_start(launcher_pid)
+                .expect("namespace-local launcher start");
+            let reservation = runs.join(".reservation-R.json");
+            let record = json!({
+                "schema":1,"phase":"preparing","loop":"alpha","run":"R",
+                "worker_uid":3000,"launcher_pid":launcher_pid,"launcher_start":launcher_start,
+                "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}],
+                "plan":plan.document,"model_selection":selection,"letter_source":letter
+            });
+            crate::launch::publish_reservation(&reservation, &record)
+                .expect("preparing service reservation");
+            let before = fs::read(&reservation).expect("reservation before service");
+            let worker_file = worker.join(".claude/.credentials.json");
+            let prior_worker = fs::read(&worker_file).ok();
+            let request_socket =
+                crate::container_helper::socket_path(&runs.join("R")).expect("request socket path");
+            let control_socket = crate::container_helper::control_socket_path(&runs.join("R"))
+                .expect("control socket path");
+            let evidence_path = runs.join(".launch-R/credential-refresh.json");
+            let threads_before = fs::read_dir("/proc/self/task")
+                .expect("service caller threads before entry")
+                .count();
+
+            let release = if due {
+                None
+            } else {
+                let input = launcher.stdin.take().expect("launcher input");
+                let evidence = evidence_path.clone();
+                let request = request_socket.clone();
+                let control = control_socket.clone();
+                Some(std::thread::spawn(move || {
+                    let deadline = std::time::Instant::now() + Duration::from_secs(90);
+                    while !(evidence.exists() && request.exists() && control.exists()) {
+                        assert!(
+                            std::time::Instant::now() < deadline,
+                            "service readiness and first periodic evidence did not arrive"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    drop(input);
+                }))
+            };
+            let outcome = crate::container_helper::fixture_serve_admitted_at(
+                owner,
+                &runs.join("R"),
+                admission,
+            );
+            if let Some(release) = release {
+                release.join().expect("readiness release");
+                outcome.expect("no-client service ends after launcher exit");
+            } else {
+                let error = outcome.expect_err("due owner source refuses at service entry");
+                assert_eq!(error.kind, "credential-read-due", "{error:?}");
+                assert_eq!(
+                    fs::read(&reservation).expect("reservation after refusal"),
+                    before
+                );
+                assert_eq!(fs::read(&worker_file).ok(), prior_worker);
+                assert!(
+                    !evidence_path.exists(),
+                    "no periodic thread starts after refusal"
+                );
+            }
+            drop(launcher.stdin.take());
+            assert!(launcher.wait().expect("launcher exit").code().is_some());
+            assert!(!request_socket.exists(), "request socket removed");
+            assert!(!control_socket.exists(), "control socket removed");
+            assert_eq!(
+                fs::read_dir("/proc/self/task")
+                    .expect("service caller threads after return")
+                    .count(),
+                threads_before,
+                "service returned with no control or authority thread"
+            );
+            assert_eq!(
+                fs::read(&source_path).expect("owner source after service"),
+                source_bytes
+            );
+            let after = fs::metadata(&source_path).expect("owner source after metadata");
+            assert_eq!(
+                after.ino(),
+                source_meta.ino(),
+                "owner source inode is unchanged"
+            );
+            assert_eq!(
+                after.modified().expect("mtime"),
+                source_meta.modified().expect("mtime")
+            );
+            assert!(
+                !home.join(".fixture-refresh-sentinel").exists(),
+                "read-mode service never runs the owner program"
+            );
+            if !due {
+                let saved: Value =
+                    serde_json::from_slice(&fs::read(&reservation).expect("published reservation"))
+                        .expect("reservation JSON");
+                let receipt = saved["rounds"][0]["credential_publication"]
+                    .as_object()
+                    .expect("round receipt");
+                assert_eq!(receipt.len(), 2, "report reader accepts exactly two keys");
+                assert_eq!(receipt["source_inode"], source_meta.ino());
+                assert!(receipt["published_unix_ns"].as_u64().is_some());
+                let metadata = fs::metadata(&worker_file).expect("worker projection");
+                assert_eq!(
+                    (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
+                    (3000, 3000, 0o600)
+                );
+                let projected: Value =
+                    serde_json::from_slice(&fs::read(&worker_file).expect("worker bytes"))
+                        .expect("worker JSON");
+                assert_eq!(projected.as_object().expect("worker object").len(), 1);
+                let fields = projected["claudeAiOauth"]
+                    .as_object()
+                    .expect("OAuth fields");
+                assert_eq!(fields.len(), 6);
+                for field in [
+                    "accessToken",
+                    "expiresAt",
+                    "scopes",
+                    "subscriptionType",
+                    "subscriptionTypeSource",
+                    "rateLimitTier",
+                ] {
+                    assert_eq!(fields.get(field), document["claudeAiOauth"].get(field));
+                }
+                let evidence: Value = serde_json::from_slice(
+                    &fs::read(&evidence_path).expect("first periodic evidence"),
+                )
+                .expect("evidence JSON");
+                assert_eq!(evidence["state"], "current", "{evidence}");
+                assert_eq!(evidence["backend"], "claude", "{evidence}");
+            }
+        },
+    );
+}
+
+/// # Panics
+/// Panics if no-client service fails to publish its read-mode round or leave clean resources.
+/// ´test:unit:claude-fixture-service-round-publishes-read-mode´
+#[test]
+fn claude_fixture_service_round_publishes_read_mode() {
+    if enter(
+        "claude_fixture_service_round_publishes_read_mode",
+        |enclosing| {
+            service_round_body(enclosing, false);
+        },
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder("claude_fixture_service_round_publishes_read_mode", true);
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if a due read leaves an altered reservation, worker file or service resources.
+/// ´test:unit:claude-fixture-service-round-due-refuses-without-publication´
+#[test]
+fn claude_fixture_service_round_due_refuses_without_publication() {
+    if enter(
+        "claude_fixture_service_round_due_refuses_without_publication",
+        |enclosing| {
+            service_round_body(enclosing, true);
+        },
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder(
+        "claude_fixture_service_round_due_refuses_without_publication",
         true,
     );
     let path = host.root.as_ref().expect("enclosure").path().to_owned();
@@ -756,16 +1034,6 @@ fn claude_fixture_service_procfs_keeps_host_handoff() {
     host.cleanup();
     assert!(!path.exists());
 }
-
-type TransactionAction = fn(
-    &FixtureRoot,
-    &Path,
-    &Path,
-    &Path,
-    &mut Value,
-    &crate::runtime_admission::RuntimeAdmission,
-    &Value,
-);
 
 fn round_body(enclosing: &Path) {
     transaction_body(
@@ -868,7 +1136,18 @@ fn assert_round_refusal_preserves_worker(
     );
 }
 
-fn transaction_body(enclosing: &Path, action: TransactionAction) {
+fn transaction_body(
+    enclosing: &Path,
+    action: impl FnOnce(
+        &FixtureRoot,
+        &Path,
+        &Path,
+        &Path,
+        &mut Value,
+        &crate::runtime_admission::RuntimeAdmission,
+        &Value,
+    ),
+) {
     use sha2::{Digest as _, Sha256};
     use std::fmt::Write as _;
     let _endpoint = fixture_service_endpoint("http://127.0.0.1:1/unused".into());

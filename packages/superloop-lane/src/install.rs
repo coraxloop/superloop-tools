@@ -1049,6 +1049,17 @@ fn preparing_generation(fields: &GenerationRecord<'_>) -> Result<Value, LaneErro
     Ok(generation)
 }
 
+pub(crate) fn install_paths(
+    loop_home: &Path,
+    payload: &crate::build::payload::InstallPayload,
+    image_hash: &str,
+) -> (PathBuf, PathBuf) {
+    (
+        payload.template(loop_home, image_hash),
+        loop_home.join("sockets"),
+    )
+}
+
 #[cfg(test)]
 pub(crate) fn fixture_publish_claude_generation(
     path: &Path,
@@ -1066,8 +1077,7 @@ pub(crate) fn fixture_publish_claude_generation(
         )
     })?;
     let loop_home = owner_home.join(".var/loops").join(loop_name);
-    let template = payload.template(&loop_home, hash);
-    let socket = loop_home.join("sockets");
+    let (template, socket) = install_paths(&loop_home, payload, hash);
     let unit = owner_home.join(".config/systemd/user");
     let proxy = owner_home.join("proxy-fixture");
     fs::copy("/usr/bin/true", &proxy)
@@ -1670,8 +1680,7 @@ fn run_with_lane_bin_inner(
     let hash = image_digest
         .strip_prefix("sha256:")
         .ok_or_else(|| LaneError::input("build-report", "image ID is not a sha256 value"))?;
-    let template_dir = primary.template(&row.home, hash);
-    let socket_dir = row.home.join("sockets");
+    let (template_dir, socket_dir) = install_paths(&row.home, primary, hash);
     crate::pinned::owner_executable_word(
         &request.proxy_bin,
         nix::unistd::Uid::effective().as_raw(),
