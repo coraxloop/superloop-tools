@@ -1217,6 +1217,25 @@ mod workspace {
     }
 
     impl WorkspaceRequest {
+        /// Compose the existing door agent call with lossless workspace evidence.
+        ///
+        /// # Errors
+        /// Refuses an envelope that no longer matches its protected grant.
+        pub fn agent_input(
+            &self,
+            reasons: &[String],
+            rubric: &str,
+        ) -> Result<execute_command::rubric::DoorInput, LaneError> {
+            let request =
+                execute_command::workspace::agent_input(&self.envelope, &self.grant, reasons)
+                    .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            Ok(execute_command::rubric::DoorInput {
+                request,
+                class: "compute".into(),
+                rubric: rubric.into(),
+            })
+        }
+
         /// Select a miss's wait after any allowance is checked against this exact request.
         ///
         /// A miss with no learned or recorded allowance waits in allow, audit and enforce.

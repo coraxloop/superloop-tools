@@ -259,6 +259,25 @@ fn workspace_unanswered_miss_waits_in_every_door_mode() {
     }
 }
 
+/// ´test:unit:workspace-agent-input-uses-the-existing-door-call-envelope´
+#[test]
+fn workspace_agent_input_uses_the_existing_door_call_envelope() {
+    let fixture = prepared_fixture();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let input = request
+        .agent_input(&["fictional miss".into()], "fictional rubric")
+        .unwrap();
+    let encoded: Value = serde_json::from_slice(&input.encode().unwrap()).unwrap();
+    assert_eq!(encoded["capability_class"], "compute");
+    assert_eq!(encoded["reviewed_rubric"], "fictional rubric");
+    assert_eq!(encoded["request"]["execution"], json!(envelope.execution));
+    assert_eq!(
+        encoded["request"]["miss_reasons"],
+        json!(["fictional miss"])
+    );
+}
+
 /// ´test:unit:workspace-judgement-allowance-refuses-envelope-replays´
 #[test]
 fn workspace_judgement_allowance_refuses_envelope_replays() {
