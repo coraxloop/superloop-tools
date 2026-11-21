@@ -21,6 +21,21 @@ pub mod mounts;
 #[path = "exercise_network.rs"]
 pub mod network;
 
+/// Give every probe box the same core limit as a helper-started round box.
+/// The exercise command owns this limit; its child inherits it before exec.
+pub(in crate::launch) fn run_probe_box(
+    program: &Path,
+    argv: Vec<String>,
+    environment: &std::collections::BTreeMap<String, String>,
+    cwd: &Path,
+    timeout_seconds: u64,
+    name: &'static str,
+) -> Result<String, LaneError> {
+    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)
+        .map_err(|error| LaneError::operation("exercise-core-limit", error.to_string()))?;
+    build::run_checked(program, argv, environment, cwd, timeout_seconds, name)
+}
+
 /// Return the command status for one case report.
 ///
 /// # Errors
@@ -1312,6 +1327,63 @@ fn measure_claude(
 
 #[cfg(test)]
 mod tests {
+    /// # Panics
+    /// Panics if an isolated probe child lacks the lowered limit or the test stage differs.
+    /// ´test:unit:exercise-probe-box-inherits-zero-core-limit´
+    #[test]
+    fn exercise_probe_box_inherits_zero_core_limit() {
+        const STAGE: &str = "SUPERLOOP_TEST_PROBE_CORE_STAGE";
+        const SELECTOR: &str =
+            "launch::exercise::tests::exercise_probe_box_inherits_zero_core_limit";
+        let (soft, hard) = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE)
+            .expect("core limit");
+        match std::env::var(STAGE).ok().as_deref() {
+            Some("box") => assert_eq!((soft, hard), (0, 0), "probe inherited core limit"),
+            Some("exercise") => {
+                assert_ne!(hard, 0, "exercise child needs a nonzero initial limit");
+                let command = crate::fixture_exec::test_image_command(SELECTOR);
+                let argv = command
+                    .get_args()
+                    .map(|word| word.to_string_lossy().into_owned())
+                    .collect();
+                let environment = std::collections::BTreeMap::from([
+                    (STAGE.to_owned(), "box".to_owned()),
+                    ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                ]);
+                let output = super::run_probe_box(
+                    command.get_program().as_ref(),
+                    argv,
+                    &environment,
+                    std::path::Path::new("/"),
+                    10,
+                    "exercise-probe-box",
+                )
+                .expect("bounded probe child");
+                assert!(output.contains("1 passed"), "{output}");
+            }
+            None => {
+                assert_ne!(hard, 0, "test needs a nonzero initial hard limit");
+                let output = crate::fixture_exec::test_image_command(SELECTOR)
+                    .env(STAGE, "exercise")
+                    .output()
+                    .expect("isolated exercise process");
+                assert!(
+                    output.status.success(),
+                    "exercise child: {}{}",
+                    String::from_utf8_lossy(&output.stdout),
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                assert_eq!(
+                    nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE)
+                        .expect("shared test runner limit"),
+                    (soft, hard),
+                    "the test must not lower the shared runner's core limit"
+                );
+            }
+            Some(other) => panic!("unknown probe test stage {other}"),
+        }
+    }
+
     use super::*;
 
     /// # Panics

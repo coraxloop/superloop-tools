@@ -9,7 +9,6 @@ use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
 use nix::sys::stat::{SFlag, fstat};
 use serde_json::{Value, json};
 
-use crate::build;
 use crate::error::LaneError;
 use crate::plan::Plan;
 use crate::settings::Settings;
@@ -334,7 +333,7 @@ pub(in crate::launch) fn measure(
     )?;
     let probe_name = super::probe::name(&words, "superloop-resource-probe-")?;
     let environment = super::launch_environment(owner_home)?;
-    let output = build::run_checked(
+    let output = super::exercise::run_probe_box(
         Path::new("/usr/bin/podman"),
         words[1..].to_vec(),
         &environment,

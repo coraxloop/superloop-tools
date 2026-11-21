@@ -338,7 +338,7 @@ pub fn private_measure(
     }
     let probe_name =
         crate::launch::probe::name(&argv, &super::mounts::probe_name_prefix("door-shape"))?;
-    let output = build::run_checked(
+    let output = super::run_probe_box(
         program,
         argv[1..].to_vec(),
         &environment,

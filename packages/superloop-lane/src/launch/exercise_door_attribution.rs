@@ -347,7 +347,7 @@ pub fn private_measure(
     let watcher_run = run.to_owned();
     let watcher =
         thread::spawn(move || watch_requests(&store, &watcher_run, &seen, &watcher_finished));
-    let output = build::run_checked(
+    let output = super::run_probe_box(
         program,
         argv[1..].to_vec(),
         &environment,
