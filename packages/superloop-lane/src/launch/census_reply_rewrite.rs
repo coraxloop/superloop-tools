@@ -134,15 +134,27 @@ fn eligible(record: &Value, run: &str, retired: bool, loop_name: &str) -> Result
             )));
         }
     } else {
-        if !["settled", "failed"].contains(&record["phase"].as_str().unwrap_or_default()) {
+        if record.get("retirement_absence_plan").is_some() {
+            let flags = record["retirement_absence_plan"]["flags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let options = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" {flags}")
+            };
             return Err(refusal(format!(
-                "run {run}: round is live or uncertain; settle it, then repeat {}",
+                "run {run}: finish its pending retire with superloop-lane retire {loop_name} {run}{options} --dry-run, then --expect-digest HEX from its preview; repeat {}",
                 command(loop_name, None)
             )));
         }
-        if record.get("retirement_absence_plan").is_some() {
+        if !["settled", "failed"].contains(&record["phase"].as_str().unwrap_or_default()) {
             return Err(refusal(format!(
-                "run {run}: finish its pending retire preview and digest-bound apply, then repeat {}",
+                "run {run}: round is live or uncertain; settle it, then repeat {}",
                 command(loop_name, None)
             )));
         }
@@ -378,6 +390,17 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
         .as_deref()
         .ok_or_else(|| refusal("runs_root is absent"))?;
     let _runs = lock_runs_root(root, true, owner)?;
+    let pending_path = root.join(PENDING);
+    let pending = protected_json(&pending_path)?;
+    if let Some(journal) = &pending {
+        let (_, digest) = validate_journal(journal, loop_name)?;
+        if expected.is_some_and(|expected| expected != digest) {
+            return Err(refusal(format!(
+                "a conversion is pending; resume {}",
+                command(loop_name, Some(digest))
+            )));
+        }
+    }
     if let Some(digest) = expected
         && let Some(complete_dir) = completed_dir(root, owner, false)?
     {
@@ -396,16 +419,8 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
             );
         }
     }
-    let pending_path = root.join(PENDING);
-    let pending = protected_json(&pending_path)?;
     let (plan, digest, resuming) = if let Some(journal) = &pending {
         let (plan, digest) = validate_journal(journal, loop_name)?;
-        if expected.is_some_and(|expected| expected != digest) {
-            return Err(refusal(format!(
-                "a conversion is pending; resume {}",
-                command(loop_name, Some(digest))
-            )));
-        }
         (plan.clone(), digest.to_owned(), true)
     } else {
         let plan = inventory(root, loop_name, owner)?;
@@ -492,6 +507,9 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
         completed_dir(root, owner, true)?;
         fs::rename(&pending_path, root.join(completed_name(&digest)))
             .map_err(|error| refusal(format!("completed journal rename: {error}")))?;
+        fs::File::open(root.join(COMPLETE_DIR))
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| refusal(format!("completed journal directory sync: {error}")))?;
         fs::File::open(root)
             .and_then(|directory| directory.sync_all())
             .map_err(|error| refusal(format!("completed journal sync: {error}")))?;
@@ -649,6 +667,22 @@ mod tests {
         let second = preview(home);
         assert_eq!(second["plan"]["changed_rows"], 1);
         assert_ne!(digest(&second), first);
+        publish_reservation(
+            &root.join(PENDING),
+            &json!({"schema":1,"phase":"pending","loop":"alpha",
+                "plan":second["plan"],"preview_sha256":digest(&second),"published":0}),
+        )
+        .expect("second pending conversion");
+        let replay = run(
+            home,
+            &["alpha".into(), "--expect-digest".into(), first.clone()],
+        )
+        .expect_err("older completed digest must not hide pending conversion");
+        assert!(
+            replay
+                .line()
+                .contains(&command("alpha", Some(digest(&second))))
+        );
         apply(home, digest(&second));
         assert!(root.join(completed_name(&first)).exists());
         assert_ne!(completed_bytes, b"{corrupt historical evidence");
@@ -771,7 +805,7 @@ mod tests {
                 .line()
                 .contains("live or uncertain")
         );
-        changed["phase"] = json!("settled");
+        changed["phase"] = json!("retiring");
         changed["retirement_absence_plan"] =
             json!({"before":{},"flags":["--confirm-missing-lease"]});
         publish_reservation(&live, &changed).expect("absence plan");
@@ -779,7 +813,7 @@ mod tests {
             run(home, &["alpha".into(), "--dry-run".into()])
                 .expect_err("absence plan")
                 .line()
-                .contains("pending retire")
+                .contains("superloop-lane retire alpha R --confirm-missing-lease --dry-run")
         );
     }
 

@@ -1741,6 +1741,40 @@ fn apply(fixture: &Fixture, digest: &str) -> Output {
     fixture.invoke(&["census", "rewrite", "alpha", "R", "--expect-digest", digest])
 }
 
+/// ´test:integration:reply-row-rewrite-entry-pauses-previews-applies-and-recounts´
+#[test]
+fn reply_row_rewrite_entry_pauses_previews_applies_and_recounts() {
+    let fixture = Fixture::new();
+    for run in ["R", "S"] {
+        let path = fixture.runs.join(format!(".reservation-{run}.json"));
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&path).expect("reservation")).expect("JSON");
+        record["phase"] = json!("settled");
+        record["rounds"] = json!([{"step":"dispatch"}]);
+        write(&path, record.to_string());
+    }
+    let refused = fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]);
+    assert_eq!(refused.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("superloop-lane pause alpha"));
+    success(&fixture.invoke(&["pause", "alpha"]));
+    let preview = success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+    assert_eq!(preview["plan"]["changed_rows"], 2);
+    let digest = preview["preview_sha256"].as_str().expect("preview digest");
+    let applied = success(&fixture.invoke(&[
+        "census",
+        "rewrite-replies",
+        "alpha",
+        "--expect-digest",
+        digest,
+    ]));
+    assert_eq!(applied["complete"], true);
+    let census = success(&fixture.command());
+    assert_eq!(
+        census["reply_designation_readiness"]["rows_without_member"],
+        json!({"live":0,"retired":0})
+    );
+}
+
 /// ´test:integration:retirement-root-rewrite-entry-precedes-reconciliation´
 #[test]
 fn retirement_root_rewrite_entry_precedes_reconciliation() {
