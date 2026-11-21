@@ -29,6 +29,10 @@ owner = "LOOPHOME"
 target = "TOOLS"
 
 [[may_cite]]
+owner = "LOOPHOME"
+target = "ORCHESTRATION"
+
+[[may_cite]]
 owner = "SUPERLOOPLANE"
 target = "EXECUTECOMMAND"
 
