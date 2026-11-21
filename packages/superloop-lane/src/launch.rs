@@ -1037,6 +1037,17 @@ pub(crate) fn door_registration_from_record(
     crate::door::Registration::from_row(row, loop_name, run, peer_uid, scope)
 }
 
+/// Read one door reservation through the same protected descriptor path used by registration.
+/// # Errors
+/// Refuses a missing, replaced or unprotected reservation.
+pub(crate) fn door_reservation(
+    runs: &std::os::fd::OwnedFd,
+    run: &str,
+    owner: u32,
+) -> Result<Value, LaneError> {
+    checkout::read_record_bound(runs, run, owner).map(|(record, _)| record)
+}
+
 pub(crate) fn door_probe_registration(
     runs: &std::os::fd::OwnedFd,
     row: &Value,
