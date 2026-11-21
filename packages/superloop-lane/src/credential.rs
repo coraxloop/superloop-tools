@@ -1772,10 +1772,8 @@ pub(crate) fn withdraw_worker_projection(
     worker_uid: u32,
     backend: BoxBackend,
 ) -> Result<(), LaneError> {
-    let (directory, name) = match backend {
-        BoxBackend::Codex => (home.join(".codex"), "auth.json"),
-        BoxBackend::Claude => (home.join(".claude"), ".credentials.json"),
-    };
+    let directory = home.join(backend.state_leaf());
+    let name = backend.worker_projection_name();
     let fd = open_dir(&directory, owner_identity().0, worker_uid, 0o700)?;
     let stat = match fstatat(&fd, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
         Ok(stat) => stat,

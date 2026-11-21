@@ -79,6 +79,22 @@ impl BoxBackend {
         }
     }
 
+    /// The worker credential entry within the selected state leaf.
+    pub(crate) const fn worker_projection_name(self) -> &'static str {
+        match self {
+            Self::Codex => "auth.json",
+            Self::Claude => ".credentials.json",
+        }
+    }
+
+    /// Operator-facing expiry condition measured by the credential exercise.
+    pub(crate) const fn exercise_refresh_trigger(self) -> &'static str {
+        match self {
+            Self::Codex => "access JWT within ten minutes of expiry",
+            Self::Claude => "recorded expiresAt within ten minutes of expiry",
+        }
+    }
+
     /// Configuration root used by the selected program inside the box.
     pub(crate) const fn state_home(self) -> &'static str {
         match self {
@@ -696,6 +712,36 @@ fn configured_driver(table: &toml::Table) -> Result<Vec<String>, LaneError> {
 #[cfg(test)]
 mod tests {
     use super::{Resources, bounded_cpu_shares, page_aligned_memory, split_local_policies};
+
+    /// ´test:unit:backend-worker-projection-metadata-is-exhaustive´
+    #[test]
+    fn backend_worker_projection_metadata_is_exhaustive() {
+        use super::BoxBackend;
+        assert_eq!(
+            (
+                BoxBackend::Codex.state_leaf(),
+                BoxBackend::Codex.worker_projection_name(),
+                BoxBackend::Codex.exercise_refresh_trigger(),
+            ),
+            (
+                ".codex",
+                "auth.json",
+                "access JWT within ten minutes of expiry",
+            )
+        );
+        assert_eq!(
+            (
+                BoxBackend::Claude.state_leaf(),
+                BoxBackend::Claude.worker_projection_name(),
+                BoxBackend::Claude.exercise_refresh_trigger(),
+            ),
+            (
+                ".claude",
+                ".credentials.json",
+                "recorded expiresAt within ten minutes of expiry",
+            )
+        );
+    }
 
     /// ´test:unit:saved-backend-reader-keeps-legacy-codex-default´
     #[test]

@@ -724,10 +724,8 @@ fn measured_worker_file(
         .to_str()
         .ok_or_else(|| LaneError::input("exercise-path", "worker home name is not UTF-8"))?;
     let home = checked_worker_directory(&held, home_name, owner, 0o750)?;
-    let (state, filename) = match backend {
-        BoxBackend::Codex => (".codex", "auth.json"),
-        BoxBackend::Claude => (".claude", ".credentials.json"),
-    };
+    let state = backend.state_leaf();
+    let filename = backend.worker_projection_name();
     let vendor = checked_worker_directory(&home, state, worker, 0o700)?;
     let opened = nix::fcntl::openat2(
         &vendor,
@@ -966,10 +964,7 @@ fn run_with(
         .map(|record| record["run"].clone())
         .collect::<Vec<_>>();
     let scan_wall = wall()?;
-    let refresh_trigger = match backend {
-        BoxBackend::Codex => "access JWT within ten minutes of expiry",
-        BoxBackend::Claude => "recorded expiresAt within ten minutes of expiry",
-    };
+    let refresh_trigger = backend.exercise_refresh_trigger();
     if dry_run {
         return Ok(json!({
             "schema":1, "command":"exercise", "backend":backend.name(), "loop":loop_name,

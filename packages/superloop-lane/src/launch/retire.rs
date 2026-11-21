@@ -1197,10 +1197,9 @@ fn retire_record_confirmed_with(
     }
     if dry_run {
         let backend = crate::settings::BoxBackend::from_saved_plan(&saved["plan"])?;
-        let projection = match backend {
-            crate::settings::BoxBackend::Codex => worker_home.join(".codex/auth.json"),
-            crate::settings::BoxBackend::Claude => worker_home.join(".claude/.credentials.json"),
-        };
+        let projection = worker_home
+            .join(backend.state_leaf())
+            .join(backend.worker_projection_name());
         let projection_custody = match fs::symlink_metadata(&projection) {
             Ok(metadata) => {
                 json!({"present":true,"regular":metadata.file_type().is_file(),"uid":metadata.uid(),"mode":metadata.mode() & 0o7777})
