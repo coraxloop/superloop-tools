@@ -255,6 +255,7 @@ fn the_repository_owner_surface_reconciles_in_both_directions() {
         ("SUPERLOOPLANE".to_owned(), IMPORTED_OWNER.to_owned()),
         ("SUPERLOOPCLAUDEHOOK".to_owned(), IMPORTED_OWNER.to_owned()),
         ("LANELIFECYCLE".to_owned(), IMPORTED_OWNER.to_owned()),
+        ("LOOPHOME".to_owned(), IMPORTED_OWNER.to_owned()),
         ("SUPERLOOPGATESUBMIT".to_owned(), IMPORTED_OWNER.to_owned()),
         ("SUPERLOOPLINT".to_owned(), IMPORTED_OWNER.to_owned()),
         ("PERMISSIONTRIAGE".to_owned(), IMPORTED_OWNER.to_owned()),

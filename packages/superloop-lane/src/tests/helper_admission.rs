@@ -7,6 +7,7 @@ use crate::settings::BoxBackend;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
 use std::fs;
+use std::os::unix::fs::MetadataExt as _;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -132,6 +133,28 @@ fn refused(error: crate::error::LaneError, field: &str) {
         format!("{}: refuses {field}", fixture::SENTINEL)
     );
     drop(error);
+}
+
+/// # Panics
+/// Panics only if the fixture pins the account's container runtime by default.
+/// ´test:crate:claude-service-fixture-defaults-to-held-standin-runtime´
+#[test]
+fn claude_service_fixture_defaults_to_held_standin_runtime() {
+    let fixture = Fixture::new();
+    let bundle =
+        crate::container_entry::fixture_claude_helper_bundle(&fixture.owner, &fixture.runs);
+    let manifest: loop_home::anchor::Manifest =
+        serde_json::from_str(&bundle.manifest).expect("bundle manifest");
+    let runtime = manifest
+        .records
+        .iter()
+        .find(|record| record.purpose == "podman-executable")
+        .expect("runtime role");
+    let standin = fs::metadata("/usr/bin/false").expect("stand-in runtime");
+    assert_eq!(
+        (runtime.device, runtime.inode),
+        (standin.dev(), standin.ino())
+    );
 }
 
 /// ´test:crate:fixture-admission-constructor-never-unlocks-live-authority´

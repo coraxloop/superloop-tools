@@ -516,6 +516,178 @@ fn refresh_request(installed: &InstallRequest) -> InstallRequest {
     }
 }
 
+fn pilot_sign_in_fixture_child() -> bool {
+    let Some(path) = std::env::var_os("SUPERLOOP_PILOT_SIGNIN_HOME") else {
+        return false;
+    };
+    let home = Path::new(&path);
+    let dry = std::env::var_os("SUPERLOOP_PILOT_SIGNIN_DRY").is_some();
+    let base_path = if home.join("private-payload").exists() {
+        "private-target.json"
+    } else {
+        "private-current.json"
+    };
+    let base: serde_json::Value = serde_json::from_slice(
+        &fs::read(home.join(base_path)).expect("fictional private template report"),
+    )
+    .expect("template report JSON");
+    let sign_in = crate::sign_in::converge(
+        home,
+        "alpha",
+        nix::unistd::Uid::effective().as_raw(),
+        nix::unistd::Gid::effective().as_raw(),
+        3000,
+        dry,
+    )
+    .expect("production sign-in metadata walk");
+    let report = crate::install_private::with_sign_in(base, sign_in)
+        .expect("production private change accounting");
+    write_json(&home.join("pilot-sign-in-report.json"), &report);
+    true
+}
+
+fn pilot_sign_in_fixture(
+    fixture: &TempDir,
+    request: &InstallRequest,
+    selector: &str,
+) -> std::path::PathBuf {
+    let home = fixture.path();
+    let sign_in = home.join(".config/loops/alpha/lanes/codex");
+    fs::create_dir_all(&sign_in).expect("fictional sign-in directory");
+    fs::set_permissions(
+        sign_in.parent().expect("lanes"),
+        fs::Permissions::from_mode(0o700),
+    )
+    .expect("lanes mode");
+    fs::set_permissions(&sign_in, fs::Permissions::from_mode(0o700)).expect("sign-in mode");
+    executable(
+        request.podman_bin.as_deref().expect("fixture runtime"),
+        &format!(
+            "#!/bin/sh\nset -eu\ncase \" $* \" in *' --dry-run '*) export SUPERLOOP_PILOT_SIGNIN_DRY=1 ;; *) unset SUPERLOOP_PILOT_SIGNIN_DRY ;; esac\nexport SUPERLOOP_PILOT_SIGNIN_HOME='{}'\n'{}' --exact '{}' >&2\nif test -z \"${{SUPERLOOP_PILOT_SIGNIN_DRY-}}\"; then cp '{}/private-target.json' '{}/private-current.json'; printf 'installed\\n' > '{}/private-payload'; fi\ncat '{}/pilot-sign-in-report.json'\n",
+            home.display(),
+            std::env::current_exe().expect("test executable").display(),
+            selector,
+            home.display(),
+            home.display(),
+            home.display(),
+            home.display()
+        ),
+    );
+    sign_in
+}
+
+/// ´test:crate:pilot-install-reports-large-fictional-sign-in-walk-in-preview-and-act´
+#[test]
+fn pilot_install_reports_large_fictional_sign_in_walk_in_preview_and_act() {
+    if pilot_sign_in_fixture_child() {
+        return;
+    }
+    let (fixture, mut request) = refresh_fixture();
+    let home = fixture.path();
+    let sign_in = pilot_sign_in_fixture(
+        &fixture,
+        &request,
+        "tests::install::pilot_install_reports_large_fictional_sign_in_walk_in_preview_and_act",
+    );
+    let cache = sign_in.join("plugins/cache");
+    fs::create_dir_all(&cache).expect("fictional vendor cache");
+    for index in 0..600 {
+        let file = cache.join(format!("fictional-entry-{index:03}.json"));
+        fs::write(&file, b"fictional cache entry").expect("fixture entry");
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o644)).expect("metadata drift");
+    }
+    request.dry_run = true;
+    let preview = run(home, &request).expect("first pilot preview with large sign-in tree");
+    let changes = preview["sign_in_metadata"]["changes"]
+        .as_array()
+        .expect("per-entry preview");
+    assert!(changes.len() >= 600);
+    let report_bytes = fs::metadata(home.join("pilot-sign-in-report.json"))
+        .expect("private report")
+        .len();
+    assert!(
+        report_bytes > 65_536 && report_bytes <= 1_048_576,
+        "{report_bytes}"
+    );
+    request.dry_run = false;
+    let acted = run(home, &request).expect("first pilot act with large sign-in tree");
+    assert_eq!(
+        acted["sign_in_metadata"]["changes"]
+            .as_array()
+            .map(Vec::len),
+        Some(changes.len())
+    );
+    request.dry_run = true;
+    assert_eq!(
+        run(home, &request).expect("installed preview")["changed"],
+        0
+    );
+    for index in 0..600 {
+        fs::set_permissions(
+            cache.join(format!("fictional-entry-{index:03}.json")),
+            fs::Permissions::from_mode(0o644),
+        )
+        .expect("installed metadata drift");
+    }
+    let refresh = run(home, &request).expect("installed pilot preview with large sign-in tree");
+    assert!(
+        refresh["sign_in_metadata"]["changes"]
+            .as_array()
+            .is_some_and(|rows| rows.len() >= 600)
+    );
+    request.dry_run = false;
+    let refreshed = run(home, &request).expect("installed pilot act with large sign-in tree");
+    assert_eq!(
+        refreshed["sign_in_metadata"]["changes"]
+            .as_array()
+            .map(Vec::len),
+        Some(600)
+    );
+}
+
+/// ´test:crate:pilot-install-preserves-arg0-linux-dispatch-links´
+#[test]
+fn pilot_install_preserves_arg0_linux_dispatch_links() {
+    if pilot_sign_in_fixture_child() {
+        return;
+    }
+    let (fixture, mut request) = refresh_fixture();
+    let home = fixture.path();
+    let sign_in = pilot_sign_in_fixture(
+        &fixture,
+        &request,
+        "tests::install::pilot_install_preserves_arg0_linux_dispatch_links",
+    );
+    let scratch = sign_in.join("tmp/arg0-linux/dead");
+    fs::create_dir_all(&scratch).expect("dead dispatch scratch");
+    let link = scratch.join("executable");
+    std::os::unix::fs::symlink("/usr/bin/true", &link).expect("fictional executable link");
+    request.dry_run = true;
+    run(home, &request).expect("pilot preview skips dispatch contents");
+    request.dry_run = false;
+    run(home, &request).expect("pilot act skips dispatch contents");
+    assert!(
+        fs::symlink_metadata(&link)
+            .expect("link kept")
+            .file_type()
+            .is_symlink()
+    );
+    let outside = sign_in.join("tmp/other-dispatch");
+    std::os::unix::fs::symlink("/usr/bin/true", &outside).expect("unrecognized link");
+    request.dry_run = true;
+    let error = run(home, &request).expect_err("link outside exact scratch names refuses");
+    assert_eq!(error.kind, "install-private");
+    assert!(error.detail.contains("sign-in-path"), "{error:?}");
+    assert!(
+        error.detail.contains(&outside.display().to_string()),
+        "{error:?}"
+    );
+    assert!(
+        error.detail.contains("restore a regular entry"),
+        "{error:?}"
+    );
+}
+
 // This unprivileged fixture drives public install with a stubbed template report.
 // It proves real sign-in metadata convergence, public preview/act count parity,
 // repeat-zero behavior and the named refusal for a mismatched act count. It does
@@ -649,6 +821,14 @@ fn assert_refresh_directory_custody(error: &crate::error::LaneError, path: &Path
     assert!(error.detail.starts_with(&expected), "{error:?}");
 }
 
+fn assert_oversized_private_report_refusal(error: &crate::error::LaneError) {
+    assert!(error.detail.contains("lanes/codex"), "{error:?}");
+    assert!(
+        error.detail.contains("keep credential files in place"),
+        "{error:?}"
+    );
+}
+
 /// ´test:crate:refresh-refusal-sites-execute-against-installed-fixture´
 #[test]
 fn refresh_refusal_sites_execute_against_installed_fixture() {
@@ -726,7 +906,7 @@ fn refresh_refusal_sites_execute_against_installed_fixture() {
                 "retired"
             }
             "oversized" => {
-                fs::write(&private_path, "x".repeat(65537)).expect("oversized report");
+                fs::write(&private_path, "x".repeat(1_048_577)).expect("oversized report");
                 "private report exceeds"
             }
             "invalid" => {
@@ -746,6 +926,9 @@ fn refresh_refusal_sites_execute_against_installed_fixture() {
             assert_refresh_directory_custody(&error, &path);
         } else {
             assert!(error.detail.contains(expected), "{case}: {error:?}");
+            if case == "oversized" {
+                assert_oversized_private_report_refusal(&error);
+            }
         }
     }
 }

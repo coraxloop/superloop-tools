@@ -17,7 +17,7 @@ use super::checkout;
 use super::{LaunchRequest, MAX_RESERVATION_BYTES};
 #[cfg(test)]
 use super::{lock_mailbox, publish_reservation, read_reservation, reservation_path};
-use crate::{build, error::LaneError, home, load_plan, valid_run_name};
+use crate::{build, error::LaneError, home, valid_run_name};
 
 const MAX_ROTATION_ATTEMPTS: usize = 8;
 static NEXT_INTENT_PUBLICATION: AtomicU64 = AtomicU64::new(0);
@@ -1702,7 +1702,8 @@ pub fn private_handover(
     }
     let runs = home::pin_parent(runs_root, 0)?;
     let record = bound_private_record(&runs, run, 0, expected_identity)?;
-    let (plan, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
+    let (plan, _) =
+        crate::load_plan_for_record_with_door(owner_home, loop_name, run, (0, 0), true)?;
     let root = plan
         .driver_dir
         .parent()
@@ -2255,7 +2256,13 @@ pub(crate) fn run_with_host_root(
     root_uid: u32,
 ) -> Result<Value, LaneError> {
     let caller = Uid::effective().as_raw();
-    let (plan, settings) = load_plan(owner_home, &request.loop_name, &request.run, (caller, 0))?;
+    let (plan, settings) = crate::load_plan_for_record_with_door(
+        owner_home,
+        &request.loop_name,
+        &request.run,
+        (caller, 0),
+        true,
+    )?;
     let root = plan
         .driver_dir
         .parent()

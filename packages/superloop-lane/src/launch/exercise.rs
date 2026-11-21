@@ -55,9 +55,15 @@ pub fn run_case(
         return Err(LaneError::input("exercise-run", "run is not a plain word"));
     }
     if matches!(case, "door-shape" | "door-attribution" | "door-extensions")
-        && !load_plan(owner_home, loop_name, run, (Uid::effective().as_raw(), 0))?
-            .0
-            .document["door"]
+        && !crate::load_plan_for_record_with_door(
+            owner_home,
+            loop_name,
+            run,
+            (Uid::effective().as_raw(), 0),
+            true,
+        )?
+        .0
+        .document["door"]
             .is_object()
     {
         return Err(LaneError::input(
@@ -96,7 +102,7 @@ pub fn run_case(
     ) {
         crate::load_plan_for_record(owner_home, loop_name, run, (caller, 0))?
     } else {
-        load_plan(owner_home, loop_name, run, (caller, 0))?
+        crate::load_plan_for_record_with_door(owner_home, loop_name, run, (caller, 0), true)?
     };
     let root = settings
         .runs_root

@@ -675,7 +675,14 @@ pub fn serve(args: &[String]) -> Result<serde_json::Value, LaneError> {
         hash,
     );
     let _configuration = custody.activate_configuration(Path::new(home), OPERATION);
-    crate::launch::private_prepare_runtime(Path::new(home), scope, run, Path::new(podman), &custody)
+    crate::launch::private_prepare_runtime(
+        Path::new(home),
+        Path::new(runs),
+        scope,
+        run,
+        Path::new(podman),
+        &custody,
+    )
 }
 
 /// Describe custody that is pinned only by the changing launch.

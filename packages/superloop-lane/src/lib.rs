@@ -251,6 +251,18 @@ pub(crate) fn load_launch_plan(
     )
 }
 
+/// Build a launch candidate without opening runtime admission. Only the
+/// read-only dry-run branch may use this loader.
+pub(crate) fn load_launch_preview_plan(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    requested: Option<settings::BoxBackend>,
+) -> Result<(Plan, Settings), LaneError> {
+    load_launch_plan_core(home, loop_name, run, caller, requested, None)
+}
+
 pub(crate) fn load_launch_plan_admitted(
     home: &Path,
     loop_name: &str,
@@ -259,14 +271,31 @@ pub(crate) fn load_launch_plan_admitted(
     backend: Option<settings::BoxBackend>,
     admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<(Plan, Settings), LaneError> {
+    load_launch_plan_core(home, loop_name, run, caller, backend, Some(admission))
+}
+
+fn load_launch_plan_core(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    requested: Option<settings::BoxBackend>,
+    admission: Option<&crate::runtime_admission::RuntimeAdmission>,
+) -> Result<(Plan, Settings), LaneError> {
     let settings = read_plan_settings(home, loop_name, run)?;
-    let backend = settings.launch_backend(backend)?;
-    admission.check(backend)?;
+    let backend = settings.launch_backend(requested)?;
+    if let Some(admission) = admission {
+        admission.check(backend)?;
+    }
     #[cfg(test)]
-    admission.scope_names(home, loop_name, run)?;
+    if let Some(admission) = admission {
+        admission.scope_names(home, loop_name, run)?;
+    }
     let loaded = load_plan_with_settings(home, loop_name, run, caller, true, settings, backend)?;
     #[cfg(test)]
-    admission.scope_plan(&loaded.0.document)?;
+    if let Some(admission) = admission {
+        admission.scope_plan(&loaded.0.document)?;
+    }
     Ok(loaded)
 }
 
@@ -281,7 +310,48 @@ pub(crate) fn load_plan_for_record(
     run: &str,
     caller: (u32, u32),
 ) -> Result<(Plan, Settings), LaneError> {
-    load_plan_with_door(home, loop_name, run, caller, false)
+    load_plan_for_record_with_door(home, loop_name, run, caller, false)
+}
+
+pub(crate) fn load_plan_for_record_with_door(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    include_door: bool,
+) -> Result<(Plan, Settings), LaneError> {
+    let settings = read_plan_settings(home, loop_name, run)?;
+    let registry = read_plan_registry(home).or_else(|error| {
+        // With no registry there can be no saved run. Keep the legacy Codex
+        // setting refusal ahead of that registry refusal.
+        settings.launch_backend(Some(settings::BoxBackend::Codex))?;
+        Err(error)
+    })?;
+    settings.validate_grant(home, loop_name)?;
+    let backend = if let Some(root) = registry.runs_root(loop_name) {
+        let path = launch::reservation_path(root, run);
+        if let Some(record) = launch::read_reservation(&path)? {
+            if record["plan"]["backend"].is_null() {
+                settings::BoxBackend::Codex
+            } else {
+                settings::BoxBackend::from_plan(&record["plan"])?
+            }
+        } else {
+            settings::BoxBackend::Codex
+        }
+    } else {
+        settings::BoxBackend::Codex
+    };
+    let backend = settings.launch_backend(Some(backend))?;
+    load_plan_with_settings(
+        home,
+        loop_name,
+        run,
+        caller,
+        include_door,
+        settings,
+        backend,
+    )
 }
 
 fn load_plan_with_door(
@@ -292,8 +362,9 @@ fn load_plan_with_door(
     include_door: bool,
 ) -> Result<(Plan, Settings), LaneError> {
     let settings = read_plan_settings(home, loop_name, run)?;
-    // These legacy readers reconstruct the deployed Codex form, not a new launch.
-    let backend = settings.launch_backend(Some(settings::BoxBackend::Codex))?;
+    // Before a reservation exists, select the configured backend without
+    // opening production launch admission.
+    let backend = settings.launch_backend(None)?;
     load_plan_with_settings(
         home,
         loop_name,
@@ -371,7 +442,7 @@ fn load_plan_with_settings(
             Some(backend),
         )?
     } else {
-        Plan::build_for_record(
+        Plan::build_with_door(
             home,
             loop_name,
             run,
@@ -379,6 +450,8 @@ fn load_plan_with_settings(
             &registry,
             worker_block,
             caller,
+            false,
+            Some(backend),
         )?
     };
     // Read-only legacy plans remain inspectable before mail provisioning.

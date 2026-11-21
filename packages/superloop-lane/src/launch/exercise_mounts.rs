@@ -11,7 +11,7 @@ use crate::error::LaneError;
 use crate::home;
 use crate::plan::verify_box_attestation;
 use crate::settings::Settings;
-use crate::{load_plan, valid_run_name};
+use crate::valid_run_name;
 
 use super::{checkout, launch_environment, private_podman_environment};
 
@@ -132,7 +132,7 @@ pub fn private_measure(
             "bound private namespace is absent",
         ));
     }
-    let (_plan, settings) = load_plan(owner_home, loop_name, run, (0, 0))?;
+    let (_plan, settings) = crate::load_plan_for_record(owner_home, loop_name, run, (0, 0))?;
     let root = settings
         .runs_root
         .as_deref()

@@ -355,7 +355,7 @@ impl Drop for ProbeGuard<'_> {
     }
 }
 
-fn opened(parent: &OwnedFd, name: &Path) -> Result<OwnedFd, LaneError> {
+fn opened(parent: &OwnedFd, name: &Path, displayed: &Path) -> Result<OwnedFd, LaneError> {
     openat2(
         parent,
         name,
@@ -363,7 +363,17 @@ fn opened(parent: &OwnedFd, name: &Path) -> Result<OwnedFd, LaneError> {
             .flags(OFlag::O_PATH | OFlag::O_CLOEXEC)
             .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
     )
-    .map_err(|error| LaneError::input("sign-in-path", format!("{}: {error}", name.display())))
+    .map_err(|error| {
+        let remedy = if error == nix::errno::Errno::ELOOP {
+            "; links outside the recognized dispatch scratch directories are refused; inspect the link and restore a regular entry before retrying install"
+        } else {
+            ""
+        };
+        LaneError::input(
+            "sign-in-path",
+            format!("{}: {error}{remedy}", displayed.display()),
+        )
+    })
 }
 
 #[allow(unsafe_code)]
@@ -415,7 +425,7 @@ fn visit(
     let regular = (stat.st_mode & libc::S_IFMT) == libc::S_IFREG;
     let dispatch_scratch = path
         .strip_prefix(root)
-        .is_ok_and(|path| path == Path::new("tmp/arg0"));
+        .is_ok_and(|path| path == Path::new("tmp/arg0") || path == Path::new("tmp/arg0-linux"));
     if dispatch_scratch && !directory {
         return Err(LaneError::input(
             "sign-in-path",
@@ -443,8 +453,8 @@ fn visit(
                 LaneError::input("sign-in-path", format!("{}: {error}", path.display()))
             })?;
             let name = entry.file_name();
-            let child = opened(fd, Path::new(&name))?;
             let child_path = path.join(&name);
+            let child = opened(fd, Path::new(&name), &child_path)?;
             if path == root && probe_name(&name) {
                 let child_stat = fstat(&child).map_err(|error| {
                     LaneError::input(
@@ -552,7 +562,7 @@ fn probe_with_script(
                 format!("worker could not create {}: {status}", target.display()),
             ));
         }
-        let child = opened(root, Path::new(&name))?;
+        let child = opened(root, Path::new(&name), &target)?;
         let stat = fstat(&child).map_err(|error| {
             LaneError::operation("sign-in-probe", format!("{}: {error}", target.display()))
         })?;
@@ -580,7 +590,7 @@ fn probe_with_script(
 }
 
 /// Converge names and metadata only; never open a sign-in file for reading.
-/// Dispatch scratch contents beneath the validated `tmp/arg0` directory are not visited.
+/// Dispatch scratch contents beneath validated `tmp/arg0` and `tmp/arg0-linux` are not visited.
 ///
 /// # Errors
 ///

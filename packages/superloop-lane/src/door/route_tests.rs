@@ -5,6 +5,87 @@ use std::io::Write as _;
 use std::sync::Arc;
 
 use super::*;
+use crate::door::workspace_request;
+use std::fs::File;
+use std::os::fd::OwnedFd;
+
+/// ´test:unit:door-workspace-request-binds-protected-grant-and-raw-wire´
+#[test]
+fn door_workspace_request_binds_protected_grant_and_raw_wire() {
+    use execute_command::workspace::Envelope;
+    let fixture = tempfile::tempdir().expect("workspace reservation fixture");
+    let runs: OwnedFd = File::open(fixture.path()).expect("runs root").into();
+    let registration = Registration {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        worker_uid: 3000,
+        loop_uid: 41000,
+        scope: Scope::Work,
+        mirror_ref: "refs/heads/lane/R".into(),
+    };
+    let owner = nix::unistd::Uid::effective().as_raw();
+    let path = crate::launch::reservation_path(fixture.path(), "R");
+    let mut saved = json!({"schema":1,"phase":"started","loop":"alpha","run":"R",
+        "worker_uid":3000,"door_scope":"work","plan":{"loop":"alpha","run":"R",
+        "compute_workspace":crate::plan::fixture_workspace_snapshot()}});
+    crate::launch::publish_reservation(&path, &saved).expect("protected reservation");
+    let grant = crate::plan::workspace_snapshot(&saved["plan"])
+        .expect("snapshot")
+        .expect("grant")
+        .grant;
+    let envelope = Envelope::decode(json!({"schema":3,"grant_digest":grant.digest().unwrap(),
+        "cwd":[],"execution":{"kind":"Argv","words":[b"/usr/bin/true".to_vec()]},
+        "env_additions":[],"deadline_ms":1000}))
+    .expect("fictional envelope");
+    let wire = serde_json::to_vec(&envelope).expect("wire");
+    let admitted = workspace_request(&runs, &registration, owner, "fixture-node", &wire)
+        .expect("bound request");
+    assert_eq!(admitted.envelope, envelope);
+    assert_eq!(admitted.grant, grant);
+
+    let mut changed = envelope;
+    changed.grant_digest = "0".repeat(64);
+    let changed_wire = serde_json::to_vec(&changed).expect("changed wire");
+    assert_eq!(
+        workspace_request(&runs, &registration, owner, "fixture-node", &changed_wire)
+            .err()
+            .expect("digest mismatch")
+            .kind,
+        "door-workspace-context-differs"
+    );
+    assert_eq!(
+        workspace_request(&runs, &registration, owner, "other-node", &wire)
+            .err()
+            .expect("node mismatch")
+            .kind,
+        "door-workspace-context-differs"
+    );
+    assert_eq!(
+        workspace_request(
+            &runs,
+            &registration,
+            owner,
+            "fixture-node",
+            b"{\"schema\":3,\"schema\":3}"
+        )
+        .err()
+        .expect("duplicate field")
+        .kind,
+        "door-workspace-protocol-refusal"
+    );
+    saved["plan"]
+        .as_object_mut()
+        .expect("plan")
+        .remove("compute_workspace");
+    crate::launch::publish_reservation(&path, &saved).expect("undeclared run");
+    assert_eq!(
+        workspace_request(&runs, &registration, owner, "fixture-node", &wire)
+            .err()
+            .expect("no grant")
+            .kind,
+        "door-workspace-unregistered"
+    );
+}
 
 fn route_wait<T>(
     deadline: Instant,

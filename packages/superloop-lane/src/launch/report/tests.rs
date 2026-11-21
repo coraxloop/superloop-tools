@@ -558,6 +558,37 @@ fn launch_binding_advice_withholds_unadmitted_settlement() {
     );
     writeln!(std::io::stdout().lock(), "BIND-OBSERVER-REPORT {result}")
         .expect("binding report evidence");
+
+    record["reply_candidate_observation"] = json!({
+        "window":{"start_utc":"2026-01-01T00:00:00.000Z","end_utc":"2026-01-01T00:00:01.000Z"},
+        "candidate_count":0,"candidate_deliveries":[]
+    });
+    let observed = super::settlement_result(
+        &Err(crate::error::LaneError::input("readback", "binding absent")),
+        "alpha",
+        "R",
+        "dispatch",
+        &record,
+    )
+    .expect("zero-candidate refusal");
+    assert_eq!(observed["candidate_count"], 0);
+    assert_eq!(
+        observed["candidate_commands"]
+            .as_array()
+            .expect("commands")
+            .len(),
+        0
+    );
+    let guidance = observed["guidance"].as_str().expect("guidance");
+    assert!(guidance.contains("found 0 candidate(s)"));
+    assert!(guidance.contains("read the box's outbox report by hand"));
+    assert!(guidance.contains("does not currently admit a settlement preview"));
+    assert!(!guidance.contains("preview null-readback recovery with"));
+    writeln!(
+        std::io::stdout().lock(),
+        "BIND-OBSERVER-ZERO-REPORT {observed}"
+    )
+    .expect("zero-candidate report evidence");
 }
 
 /// # Panics
@@ -567,6 +598,10 @@ fn launch_binding_advice_withholds_unadmitted_settlement() {
 fn launch_nonbinding_refusal_prescribes_settle_preview() {
     let mut record = refused_record("review");
     record["rounds"][0]["settlement_error"] = json!("readback: reply custody differs");
+    record["reply_candidate_observation"] = json!({
+        "window":{"start_utc":"2026-01-01T00:00:00.000Z","end_utc":"2026-01-01T00:00:01.000Z"},
+        "candidate_count":1,"candidate_deliveries":["2026-01-01T00:00:00.500Z"]
+    });
     assert!(super::super::settle::recovery_record_basis(&record, "review").is_ok());
     let result = super::settlement_result(
         &Err(crate::error::LaneError::input(
@@ -584,6 +619,14 @@ fn launch_nonbinding_refusal_prescribes_settle_preview() {
         "settle alpha R --round review --dry-run"
     );
     assert_eq!(result["recorded_cause"], "readback: reply custody differs");
+    assert!(result["candidate_count"].is_null());
+    assert_eq!(
+        result["candidate_commands"]
+            .as_array()
+            .expect("commands")
+            .len(),
+        0
+    );
     assert!(result["guidance"].as_str().expect("guidance").contains(
         "preview settlement with superloop-lane settle alpha R --round review --dry-run"
     ));

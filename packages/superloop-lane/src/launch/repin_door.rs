@@ -3,7 +3,9 @@
 use super::{
     compare_pinned_plan, lock_runs_root, publish_reservation, read_reservation, reservation_path,
 };
-use crate::{error::LaneError, load_plan};
+use crate::error::LaneError;
+#[cfg(test)]
+use crate::load_plan;
 use nix::unistd::Uid;
 use serde_json::{Value, json};
 use sha2::{Digest as _, Sha256};
@@ -532,7 +534,13 @@ fn run_with_observer(
     if record["plan"].get("door").is_none_or(Value::is_null) {
         return Err(no_door());
     }
-    let (mut plan, _) = load_plan(owner_home, &request.loop_name, &request.run, (0, 0))?;
+    let (mut plan, _) = crate::load_plan_for_record_with_door(
+        owner_home,
+        &request.loop_name,
+        &request.run,
+        (0, 0),
+        true,
+    )?;
     let _lease =
         super::retire::lock_retirement_lease(&root, &request.run, owner, &request.loop_name)
             .map_err(|error| presence_error(&error))?;

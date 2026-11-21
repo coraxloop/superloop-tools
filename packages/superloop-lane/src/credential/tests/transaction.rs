@@ -73,13 +73,67 @@ impl Drop for Host {
     }
 }
 
+fn fixture_builder_scripts(owner: &Path) {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let mut digest = String::new();
+    for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
+        write!(&mut digest, "{byte:02x}").expect("digest");
+    }
+    let mut help = String::new();
+    for option in crate::build::payload::CLAUDE_EXEC_OPTIONS {
+        writeln!(&mut help, "  {option}").expect("synthetic help");
+    }
+    help.push_str("  stream-json bypassPermissions acceptEdits plan\n");
+    let probe = json!({
+        "sha256":digest,"version":"0.1.0 (Claude Code)","help":help,
+        "interpreter":{"path":"/usr/bin/node","sha256":"a".repeat(64)},
+        "libraries":[{"path":"/usr/lib/libc.so","sha256":"a".repeat(64)}]
+    });
+    for (name, source) in [
+        ("build", "exit 0\n".to_owned()),
+        (
+            "image",
+            format!(
+                "case \"$1\" in exists) exit 0 ;; inspect) printf '%s\\n' '{}' ;; *) exit 99 ;; esac\n",
+                "b".repeat(64)
+            ),
+        ),
+        (
+            "run",
+            format!(
+                "case \"$1\" in ps) exit 0 ;; esac\ncase \" $* \" in *python3*) printf '%s\\n' '{probe}' ;; *--name=*) cat >/dev/null; printf 'fixture-attempt\\n'; exit 7 ;; *) printf 'git 2\\n' ;; esac\n"
+            ),
+        ),
+    ] {
+        fs::write(owner.join(name), source).expect("builder command source");
+    }
+}
+
 fn launch(name: &str) -> Host {
+    launch_with_builder(name, false)
+}
+
+fn launch_with_builder(name: &str, builder: bool) -> Host {
     use std::os::unix::process::CommandExt as _;
     let enclosing = tempfile::Builder::new()
         .prefix("lane-claude-transaction-")
         .tempdir()
         .expect("host-created enclosure");
-    let (root, bundle) = claude_standin_host_with_root(enclosing);
+    let program = builder.then(|| PathBuf::from("/usr/bin/bash"));
+    let (root, bundle) = claude_standin_host_with_root(enclosing, program.as_deref());
+    if name.starts_with("claude_fixture_service_round_")
+        || name.starts_with("claude_fixture_service_attempt_")
+    {
+        fs::write(
+            root.path().join("owner/.config/loops/allocations.toml"),
+            "mail_uid=64001\n[alpha]\nuids={base=3000,count=2}\nmail_gids={base=64020,count=3}\n",
+        )
+        .expect("service fixture allocation before transfer");
+    }
+    if builder {
+        fixture_builder_scripts(&root.path().join("owner"));
+    }
     fs::create_dir(root.path().join("live")).expect("modeled live runs");
     let held = fs::OpenOptions::new()
         .read(true)
@@ -118,6 +172,7 @@ fn launch(name: &str) -> Host {
         .env("CLAUDE_TRANSACTION_ROOT", enclosing)
         .env("CLAUDE_TRANSACTION_ACCOUNT", account.dir)
         .env("CLAUDE_STANDIN_MANIFEST", &bundle.manifest)
+        .envs(program.iter().map(|path| ("CLAUDE_FIXTURE_BUILDER", path)))
         .env(
             "CLAUDE_NAMESPACE_IDENTITY",
             enclosing.join("namespace-init"),
@@ -156,6 +211,66 @@ fn enter(name: &str, body: fn(&Path)) -> bool {
     true
 }
 
+fn mount_service_procfs(parent: Option<&std::ffi::OsStr>) -> Result<(), LaneError> {
+    use nix::mount::{MsFlags, mount};
+    let parent = parent.ok_or_else(|| {
+        LaneError::input(
+            "fixture-mount-namespace",
+            "parent mount namespace is absent",
+        )
+    })?;
+    // SAFETY: the fixed mount-namespace flag contains no pointers. The mount
+    // below is unreachable unless this thread has entered its own namespace.
+    #[allow(unsafe_code)]
+    let unshare_result = unsafe { libc::unshare(libc::CLONE_NEWNS) };
+    if unshare_result != 0 {
+        return Err(LaneError::operation(
+            "fixture-mount-namespace",
+            std::io::Error::last_os_error().to_string(),
+        ));
+    }
+    mount(
+        None::<&str>,
+        "/",
+        None::<&str>,
+        MsFlags::MS_REC | MsFlags::MS_PRIVATE,
+        None::<&str>,
+    )
+    .map_err(|error| LaneError::operation("fixture-mount-propagation", error.to_string()))?;
+    let current = fs::read_link("/proc/self/ns/mnt")
+        .map_err(|error| LaneError::input("fixture-mount-namespace", error.to_string()))?;
+    if current == Path::new(parent) {
+        return Err(LaneError::input(
+            "fixture-mount-namespace",
+            "service fixture still shares its parent's mount namespace",
+        ));
+    }
+    mount(
+        Some("proc"),
+        "/proc",
+        Some("proc"),
+        MsFlags::empty(),
+        None::<&str>,
+    )
+    .map_err(|error| LaneError::operation("fixture-procfs", error.to_string()))?;
+    Ok(())
+}
+
+/// # Panics
+/// Panics if a missing parent identity reaches the namespace or mount calls.
+/// ´test:unit:claude-fixture-service-refuses-unproved-mount-namespace´
+#[test]
+fn claude_fixture_service_refuses_unproved_mount_namespace() {
+    let before = fs::read_link("/proc/self/ns/mnt").expect("current mount namespace");
+    let error = mount_service_procfs(None).expect_err("unproved namespace refuses");
+    assert_eq!(error.kind, "fixture-mount-namespace", "{error:?}");
+    assert_eq!(
+        fs::read_link("/proc/self/ns/mnt").expect("mount namespace after refusal"),
+        before,
+        "unproved fixture must not enter a mount namespace"
+    );
+}
+
 // The namespace init ignores a signal it sends itself; its exit ends every member. The
 // deadline follows the host's 180-second watchdog, so a living host reports first.
 #[allow(clippy::exit)]
@@ -188,6 +303,10 @@ fn wait_event(host: &mut Host, name: &str) {
     }
 }
 fn fail_with_output(host: &mut Host, event: &str) -> ! {
+    let readiness = host
+        .root
+        .as_ref()
+        .and_then(|root| fs::read_to_string(root.path().join("service-readiness-missing")).ok());
     let mut child = host.child.take().expect("diagnostic child");
     let stopped = child.stop();
     if !stopped && let Some(root) = host.root.take() {
@@ -196,7 +315,8 @@ fn fail_with_output(host: &mut Host, event: &str) -> ! {
     }
     let output = child.wait_with_output().expect("failed child output");
     panic!(
-        "{event}; namespace stopped={stopped}\nstdout:\n{}\nstderr:\n{}",
+        "{event}; namespace stopped={stopped}; readiness missing={}\nstdout:\n{}\nstderr:\n{}",
+        readiness.as_deref().unwrap_or("unmeasured"),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
@@ -324,15 +444,903 @@ fn claude_fixture_admitted_round() {
     assert!(!path.exists());
 }
 
-type TransactionAction = fn(
-    &FixtureRoot,
-    &Path,
-    &Path,
-    &Path,
-    &mut Value,
-    &crate::runtime_admission::RuntimeAdmission,
-    &Value,
-);
+fn service_procfs_body(enclosing: &Path) {
+    transaction_body(enclosing, |_, _, _, _, record, admission, _| {
+        let enclosing =
+            PathBuf::from(std::env::var_os("CLAUDE_TRANSACTION_ROOT").expect("enclosing root"));
+        let handed: Value = serde_json::from_slice(
+            &fs::read(enclosing.join("namespace-init")).expect("host-view identity handoff"),
+        )
+        .expect("host-view identity JSON");
+        assert_eq!(handed["pid"], record["helper_pid"]);
+        assert_eq!(handed["start"], record["helper_start"]);
+        let parent = std::env::var_os("CLAUDE_PARENT_MOUNT_NAMESPACE");
+        mount_service_procfs(parent.as_deref()).expect("isolated procfs mount");
+        let namespace_pid: u32 = fs::read_link("/proc/self")
+            .expect("namespace proc identity")
+            .to_str()
+            .expect("numeric proc identity")
+            .parse()
+            .expect("namespace PID");
+        assert_eq!(namespace_pid, std::process::id());
+        assert_ne!(
+            u64::from(namespace_pid),
+            handed["pid"].as_u64().expect("host PID")
+        );
+        let local_start = crate::container_helper::process_start(namespace_pid)
+            .expect("namespace-local start tick");
+        assert!(crate::container_helper::process_alive(
+            namespace_pid,
+            local_start
+        ));
+        let mut foreign = record.clone();
+        foreign["plan"]["run"] = json!("foreign");
+        let error = admission
+            .scope_record(&foreign)
+            .expect_err("foreign fixture run");
+        assert_eq!(error.kind, "fixture-scope", "{error:?}");
+    });
+}
+
+#[allow(clippy::too_many_lines)]
+fn install_service_template(
+    root: &FixtureRoot,
+    owner: &Path,
+    payload: &crate::build::payload::InstallPayload,
+    image: &str,
+) -> PathBuf {
+    let data = root.path().join("install-inputs");
+    fs::create_dir(&data).expect("install source directory");
+    for (name, bytes, mode) in [
+        ("claude-settings.json", b"{}\n".as_slice(), 0o600),
+        (
+            "worker-AGENTS.md",
+            b"synthetic fixture charter\n".as_slice(),
+            0o600,
+        ),
+        ("box-init", b"#!/bin/sh\nexit 0\n".as_slice(), 0o700),
+    ] {
+        let path = data.join(name);
+        fs::write(&path, bytes).expect("install source");
+        fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("source mode");
+    }
+    fs::copy(
+        crate::build::default_template_dir().join("box-init"),
+        data.join("box-init"),
+    )
+    .expect("production init source");
+    let loop_root = owner.join(".var/loops/alpha");
+    fs::create_dir_all(&loop_root).expect("loop install root");
+    let config = owner.join(".config/loops/alpha");
+    let settings = config.join("workers.toml");
+    let mut document: toml::Table =
+        toml::from_str(&fs::read_to_string(&settings).expect("fixture settings"))
+            .expect("fixture settings TOML");
+    let (template, socket_dir) = crate::install::install_paths(
+        &loop_root,
+        payload,
+        image.strip_prefix("sha256:").expect("image digest"),
+    );
+    document["template_dir"] = toml::Value::String(template.display().to_string());
+    document["socket_dir"] = toml::Value::String(socket_dir.display().to_string());
+    fs::write(
+        &settings,
+        toml::to_string(&document).expect("fixture settings text"),
+    )
+    .expect("fixture installed settings");
+    fs::remove_file(config.join("install-generation.json"))
+        .expect("replace staged transaction generation with installer generation");
+    let held = fs::File::open(&config).expect("install directory");
+    let guard = crate::install::InstallGuard::from_transferred(&config, held.into())
+        .expect("fixture install lock");
+    let payloads = std::slice::from_ref(payload);
+    let preview = crate::install_private::run_payloads(
+        owner,
+        "alpha",
+        64000,
+        (0, 0),
+        &data,
+        payloads,
+        image,
+        "fixture",
+        None,
+        true,
+        false,
+        &guard,
+    )
+    .expect("installer preview");
+    let source = preview["source_fingerprint"]
+        .as_str()
+        .expect("measured sources");
+    let init_digest = crate::build::sha256_bytes(
+        &fs::read(data.join("box-init")).expect("init source"),
+        &data,
+    )
+    .expect("init digest");
+    let generation_path = config.join("install-generation.json");
+    let mut generation = crate::install::fixture_publish_claude_generation(
+        &generation_path,
+        owner,
+        "alpha",
+        payload,
+        image,
+        source,
+        &init_digest,
+    )
+    .expect("installer pending generation");
+    crate::install_private::run_payloads(
+        owner,
+        "alpha",
+        64000,
+        (0, 0),
+        &data,
+        payloads,
+        image,
+        "fixture",
+        Some(source),
+        false,
+        false,
+        &guard,
+    )
+    .expect("installer act");
+    crate::install::fixture_complete_claude_generation(&generation_path, &mut generation)
+        .expect("installer complete generation");
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(template.join("manifest")).expect("installed manifest"))
+            .expect("manifest JSON");
+    assert_eq!(manifest["image_digest"], image);
+    assert_eq!(manifest["claude_sha256"], payload.sha256);
+    let generation: Value =
+        serde_json::from_slice(&fs::read(&generation_path).expect("complete generation"))
+            .expect("generation JSON");
+    assert_eq!(generation["phase"], "complete");
+    assert_eq!(
+        generation["claude_template_dir"],
+        template.display().to_string()
+    );
+    assert_eq!(generation["claude_sha256"], manifest["claude_sha256"]);
+    assert_eq!(generation["template_dir"], template.display().to_string());
+    assert_eq!(generation["socket_dir"], socket_dir.display().to_string());
+    assert_eq!(
+        generation["unit_dir"],
+        owner.join(".config/systemd/user").display().to_string()
+    );
+    let proxy = owner.join("proxy-fixture");
+    assert_eq!(generation["proxy_bin"], proxy.display().to_string());
+    assert_eq!(
+        generation["proxy_sha256"],
+        crate::build::sha256(&proxy).expect("proxy digest")
+    );
+    template
+}
+
+/// # Panics
+/// Panics if the private installer does not materialize the Claude template and measured manifest.
+/// ´test:unit:claude-fixture-service-installer-materializes-template´
+#[test]
+fn claude_fixture_service_installer_materializes_template() {
+    if enter(
+        "claude_fixture_service_installer_materializes_template",
+        |enclosing| {
+            transaction_body(enclosing, |root, owner, _, _, _, _, _| {
+                use sha2::{Digest as _, Sha256};
+                use std::fmt::Write as _;
+                let mut digest = String::new();
+                for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
+                    write!(&mut digest, "{byte:02x}").expect("digest");
+                }
+                let payload = crate::build::payload::InstallPayload {
+                    vendor: crate::build::payload::CLAUDE,
+                    bin: PathBuf::from("/usr/bin/true"),
+                    sha256: digest,
+                    image_program: crate::build::payload::CLAUDE_IMAGE_PROGRAM.into(),
+                    companion: None,
+                };
+                let image = format!("sha256:{}", "a".repeat(64));
+                let template = install_service_template(root, owner, &payload, &image);
+                assert!(template.join("bin/claude").is_file());
+                assert!(template.join("libexec/box-init").is_file());
+            });
+        },
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_service_installer_materializes_template");
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+fn service_installed_inputs(root: &FixtureRoot, owner: &Path) -> PathBuf {
+    use sha2::{Digest as _, Sha256};
+    use std::fmt::Write as _;
+    let mut digest = String::new();
+    for byte in Sha256::digest(fs::read("/usr/bin/true").expect("stand-in bytes")) {
+        write!(&mut digest, "{byte:02x}").expect("digest");
+    }
+    let settings = owner.join(".config/loops/alpha/workers.toml");
+    let mut source = fs::read_to_string(&settings).expect("settings");
+    source.push_str("backend_argv = { claude = ['/usr/libexec/superloop/claude'] }\n");
+    fs::write(&settings, source).expect("configured Claude");
+    let request = crate::build::BuildRequest {
+        loop_name: "alpha".into(),
+        claude: Some(crate::build::payload::ProgramInput {
+            bin: PathBuf::from("/usr/bin/true"),
+            version: "0.1.0".into(),
+            sha256: digest.clone(),
+            source: "https://example.invalid/claude".into(),
+        }),
+        base_image: format!("registry.invalid/base@sha256:{}", "a".repeat(64)),
+        codex_bin: PathBuf::new(),
+        codex_host_bin: PathBuf::new(),
+        codex_version: String::new(),
+        codex_sha256: String::new(),
+        codex_host_sha256: String::new(),
+        codex_source: String::new(),
+        podman_bin: PathBuf::from(
+            std::env::var_os("CLAUDE_FIXTURE_BUILDER").expect("held builder path"),
+        ),
+        template_dir: crate::build::default_template_dir(),
+        dry_run: false,
+    };
+    let result = crate::build::run(owner, &request).expect("production image build");
+    let report: Value = serde_json::from_slice(
+        &fs::read(owner.join(".config/loops/alpha/image-build.json")).expect("image report"),
+    )
+    .expect("image report JSON");
+    assert_eq!(result["image_digest"], format!("sha256:{}", "b".repeat(64)));
+    assert_eq!(report["image_digest"], result["image_digest"]);
+    assert_eq!(report["claude_sha256"], digest);
+    assert_eq!(
+        report["claude_image_program"],
+        "/usr/libexec/superloop/claude"
+    );
+    let installed = crate::settings::Settings::read(&settings).expect("builder-updated settings");
+    let payloads = crate::build::payload::install_payloads(&report, &installed)
+        .expect("builder-produced install payload");
+    assert_eq!(payloads.len(), 1);
+    let template = install_service_template(
+        root,
+        owner,
+        &payloads[0],
+        result["image_digest"].as_str().expect("built image"),
+    );
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(template.join("manifest")).expect("installed manifest"))
+            .expect("manifest JSON");
+    let generation: Value = serde_json::from_slice(
+        &fs::read(owner.join(".config/loops/alpha/install-generation.json"))
+            .expect("installed generation"),
+    )
+    .expect("generation JSON");
+    crate::launch::check_backend_pin_records(
+        BoxBackend::Claude,
+        &manifest,
+        &report,
+        &generation,
+        &template,
+    )
+    .expect("selected build and install pins agree");
+    assert_eq!(generation["init_sha256"], report["init_sha256"]);
+    template
+}
+
+/// # Panics
+/// Panics if the held builder cannot publish the selected image report.
+/// ´test:unit:claude-fixture-service-builder-publishes-image-report´
+#[test]
+fn claude_fixture_service_builder_publishes_image_report() {
+    if enter(
+        "claude_fixture_service_builder_publishes_image_report",
+        |enclosing| {
+            transaction_body(enclosing, |root, owner, _, _, _, _, _| {
+                let _template = service_installed_inputs(root, owner);
+            });
+        },
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder(
+        "claude_fixture_service_builder_publishes_image_report",
+        true,
+    );
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ServiceCase {
+    NoClient,
+    Due,
+    Attempt,
+    OutsideSession,
+}
+
+#[allow(clippy::too_many_lines)]
+fn service_client_or_driver_entry() -> bool {
+    use std::io::{Read as _, Write as _};
+    let Some(run) = std::env::var_os("CLAUDE_FIXTURE_CLIENT_RUN") else {
+        return false;
+    };
+    let run = PathBuf::from(run);
+    if std::env::var_os("CLAUDE_FIXTURE_DRIVER_ENTRY").is_some() {
+        let mut start = [0_u8];
+        if std::io::stdin().read_exact(&mut start).is_err() {
+            return true;
+        }
+        assert_eq!(start, *b"G");
+        let mut client = Command::new(std::env::current_exe().expect("client test image"))
+            .args([
+                "--exact",
+                std::env::var("CLAUDE_FIXTURE_ENTRY_NAME")
+                    .expect("entry selector")
+                    .as_str(),
+                "--nocapture",
+                "--test-threads=1",
+            ])
+            .env_remove("CLAUDE_FIXTURE_DRIVER_ENTRY")
+            .env("CLAUDE_FIXTURE_CLIENT_ENTRY", "1")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("driver starts client");
+        client
+            .stdin
+            .take()
+            .expect("client prompt")
+            .write_all(crate::FIRST_DISPATCH_PROMPT.as_bytes())
+            .expect("client prompt frame input");
+        let output = client.wait_with_output().expect("client result");
+        assert!(
+            output.status.success(),
+            "client failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let result = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            result.contains("fixture-attempt"),
+            "client output: {result}"
+        );
+        assert!(
+            result.contains("CLIENT-STATUS=7"),
+            "client status: {result}"
+        );
+        writeln!(std::io::stdout().lock(), "DRIVER-CLIENT-RESULT={result}")
+            .expect("driver client record");
+        return true;
+    }
+    assert!(std::env::var_os("CLAUDE_FIXTURE_CLIENT_ENTRY").is_some());
+    nix::unistd::setgid(Gid::from_raw(64000)).expect("loop group");
+    nix::unistd::setuid(Uid::from_raw(64000)).expect("loop uid");
+    assert_eq!(owner_identity(), (64000, 64000));
+    let result = crate::container_helper::client(&run);
+    if std::env::var_os("CLAUDE_FIXTURE_OUTSIDE_SESSION").is_some() {
+        let error = result.expect_err("foreign client is refused");
+        writeln!(std::io::stdout().lock(), "CLIENT-REFUSAL={}", error.kind)
+            .expect("client refusal record");
+    } else {
+        let status = result.expect("production client attempt");
+        writeln!(std::io::stdout().lock(), "CLIENT-STATUS={status}").expect("client status record");
+    }
+    true
+}
+
+#[allow(clippy::too_many_lines)]
+fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
+    use std::io::Write as _;
+    transaction_body(
+        enclosing,
+        |root, owner, runs, worker, _, admission, document| {
+            let _template = service_installed_inputs(root, owner);
+            let identity = runs.join(".launch-R");
+            for (name, bytes) in [
+                ("passwd", "worker:x:3000:3000::/home/worker:/bin/sh\n"),
+                ("group", "worker:x:3000:\nloop:x:64000:worker\n"),
+            ] {
+                let path = identity.join(name);
+                fs::write(&path, bytes).expect("fixture home identity");
+                fs::set_permissions(&path, fs::Permissions::from_mode(0o440))
+                    .expect("identity mode");
+                nix::unistd::chown(&path, Some(Uid::from_raw(0)), Some(Gid::from_raw(64000)))
+                    .expect("identity group");
+            }
+            let (mut plan, _) = crate::load_launch_plan_admitted(
+                owner,
+                "alpha",
+                "R",
+                (0, 0),
+                Some(BoxBackend::Claude),
+                admission,
+            )
+            .expect("admitted service plan after production install");
+            plan.select_worker_uid(3000).expect("selected worker");
+            plan.select_container_program(Path::new("/usr/bin/bash"))
+                .expect("held runtime program");
+            let selection = json!({
+                "model":"claude-sonnet-4-5","effort":"high",
+                "model_source":"letter","effort_source":"letter"
+            });
+            plan.select_launch_model(&selection)
+                .expect("selected letter model");
+            let mail_name = plan.document["mail"]["identity"]["name"]
+                .as_str()
+                .expect("selected mail identity");
+            let mail = owner
+                .join(".var/loops/alpha/workers")
+                .join(mail_name)
+                .join("mail");
+            fs::create_dir_all(&mail).expect("fixture mail endpoint");
+            fs::set_permissions(&mail, fs::Permissions::from_mode(0o700)).expect("mail mode");
+            let socket = owner.join(".var/loops/alpha/sockets/vendor/proxy.sock");
+            fs::create_dir_all(socket.parent().expect("vendor socket directory"))
+                .expect("vendor socket parent");
+            let prior_cwd = std::env::current_dir().expect("fixture cwd");
+            std::env::set_current_dir(owner.join(".var/loops/alpha"))
+                .expect("short vendor socket address");
+            let _vendor = std::os::unix::net::UnixListener::bind("sockets/vendor/proxy.sock")
+                .expect("fixture vendor socket");
+            std::env::set_current_dir(prior_cwd).expect("restore fixture cwd");
+            fs::set_permissions(&socket, fs::Permissions::from_mode(0o660))
+                .expect("vendor socket mode");
+            let letter = owner.join("service-letter.txt");
+            fs::write(&letter, b"Model: claude-sonnet-4-5\nEffort: high\n")
+                .expect("fixture service letter");
+
+            let home = claude_sign_in_dir(owner, "alpha");
+            fs::write(home.join(".fixture-refresh-sentinel-arm"), b"armed")
+                .expect("owner program sentinel arm");
+            let source_path = home.join(".credentials.json");
+            if scenario == ServiceCase::Due {
+                let expiry = now_seconds().expect("clock") + 300;
+                fs::write(&source_path, claude_document(expiry * 1000).to_string())
+                    .expect("due source");
+                fs::set_permissions(&source_path, fs::Permissions::from_mode(0o600))
+                    .expect("source mode");
+            }
+            let source_bytes = fs::read(&source_path).expect("owner source before service");
+            let source_meta = fs::metadata(&source_path).expect("owner source metadata");
+
+            let parent = std::env::var_os("CLAUDE_PARENT_MOUNT_NAMESPACE");
+            mount_service_procfs(parent.as_deref()).expect("isolated service procfs");
+            let client_runs =
+                if matches!(scenario, ServiceCase::Attempt | ServiceCase::OutsideSession) {
+                    let alias = tempfile::Builder::new()
+                        .prefix("lane-claude-client-runs-")
+                        .tempdir_in("/tmp")
+                        .expect("client runs mountpoint");
+                    fs::set_permissions(alias.path(), fs::Permissions::from_mode(0o711))
+                        .expect("client runs traversal");
+                    Some(alias)
+                } else {
+                    None
+                };
+            assert_eq!(
+                fs::read_link("/proc/self")
+                    .expect("namespace proc identity")
+                    .to_str()
+                    .expect("numeric proc identity")
+                    .parse::<u32>()
+                    .expect("PID"),
+                std::process::id(),
+                "service caller uses the fresh procfs"
+            );
+            let mut launcher = Command::new("/bin/sh")
+                .args(["-c", "read -r ignored"])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn()
+                .expect("namespace-local launcher");
+            let launcher_pid = launcher.id();
+            let launcher_start = crate::container_helper::process_start(launcher_pid)
+                .expect("namespace-local launcher start");
+            let reservation = runs.join(".reservation-R.json");
+            let record = json!({
+                "schema":1,"phase":"preparing","loop":"alpha","run":"R",
+                "worker_uid":3000,"launcher_pid":launcher_pid,"launcher_start":launcher_start,
+                "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}],
+                "plan":plan.document,"model_selection":selection,"letter_source":letter
+            });
+            crate::launch::publish_reservation(&reservation, &record)
+                .expect("preparing service reservation");
+            let before = fs::read(&reservation).expect("reservation before service");
+            let worker_file = worker.join(".claude/.credentials.json");
+            let prior_worker = fs::read(&worker_file).ok();
+            let request_socket =
+                crate::container_helper::socket_path(&runs.join("R")).expect("request socket path");
+            let control_socket = crate::container_helper::control_socket_path(&runs.join("R"))
+                .expect("control socket path");
+            let evidence_path = runs.join(".launch-R/credential-refresh.json");
+            let threads_before = fs::read_dir("/proc/self/task")
+                .expect("service caller threads before entry")
+                .count();
+            let service_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
+
+            let release = if scenario == ServiceCase::Due {
+                None
+            } else {
+                let input = launcher.stdin.take().expect("launcher input");
+                let evidence = evidence_path.clone();
+                let request = request_socket.clone();
+                let control = control_socket.clone();
+                let diagnostic = enclosing.join("service-readiness-missing");
+                let run_dir = client_runs
+                    .as_ref()
+                    .map_or(runs, tempfile::TempDir::path)
+                    .join("R");
+                let reservation = reservation.clone();
+                let root_meta =
+                    fs::metadata(client_runs.as_ref().map_or(runs, tempfile::TempDir::path))
+                        .expect("client runs root identity");
+                let client_socket = client_runs
+                    .as_ref()
+                    .map(|root| root.path().join(".container-R.sock"));
+                let selector = match scenario {
+                    ServiceCase::Attempt => {
+                        "credential::tests::transaction::claude_fixture_service_attempt_admits_driver_client"
+                    }
+                    ServiceCase::OutsideSession => {
+                        "credential::tests::transaction::claude_fixture_service_attempt_refuses_outside_session"
+                    }
+                    _ => "",
+                };
+                let done = Arc::clone(&service_done);
+                Some(std::thread::spawn(move || {
+                    while !(evidence.exists() && request.exists() && control.exists()) {
+                        if done.load(std::sync::atomic::Ordering::Acquire) {
+                            return "service returned before readiness".to_owned();
+                        }
+                        let missing = [
+                            (!evidence.exists()).then_some("first periodic evidence"),
+                            (!request.exists()).then_some("request socket"),
+                            (!control.exists()).then_some("control socket"),
+                        ]
+                        .into_iter()
+                        .flatten()
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                        fs::write(&diagnostic, missing).expect("readiness diagnostic");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    let mut result = String::new();
+                    if matches!(scenario, ServiceCase::Attempt | ServiceCase::OutsideSession) {
+                        let alias_socket = client_socket.as_ref().expect("client socket alias");
+                        fs::write(alias_socket, b"").expect("client socket mountpoint");
+                        nix::mount::mount(
+                            Some(request.as_path()),
+                            alias_socket,
+                            None::<&str>,
+                            nix::mount::MsFlags::MS_BIND,
+                            None::<&str>,
+                        )
+                        .expect("private bind of admitted request socket");
+                        let original = fs::metadata(&request).expect("service request socket");
+                        let bound = fs::metadata(alias_socket).expect("bound request socket");
+                        assert_eq!(
+                            (bound.dev(), bound.ino()),
+                            (original.dev(), original.ino()),
+                            "client reaches the service's socket inode"
+                        );
+                        let mut driver =
+                            Command::new(std::env::current_exe().expect("driver image"))
+                                .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+                                .env("CLAUDE_FIXTURE_CLIENT_RUN", &run_dir)
+                                .env("CLAUDE_FIXTURE_ENTRY_NAME", selector)
+                                .env("CLAUDE_FIXTURE_DRIVER_ENTRY", "1")
+                                .env("SUPERLOOP_CLIENT_ROOT_DEV", root_meta.dev().to_string())
+                                .env("SUPERLOOP_CLIENT_ROOT_INO", root_meta.ino().to_string())
+                                .env("SUPERLOOP_CLIENT_SOCKET_NAME", ".container-R.sock")
+                                .stdin(Stdio::piped())
+                                .stdout(Stdio::piped())
+                                .stderr(Stdio::piped())
+                                .spawn()
+                                .expect("dedicated driver entry");
+                        let mut saved: Value = serde_json::from_slice(
+                            &fs::read(&reservation).expect("reservation for driver entry"),
+                        )
+                        .expect("reservation JSON");
+                        saved["driver_entry_pid"] = json!(driver.id());
+                        saved["driver_entry_start"] = json!(
+                            crate::container_helper::process_start(driver.id())
+                                .expect("driver entry start")
+                        );
+                        crate::launch::publish_reservation(&reservation, &saved)
+                            .expect("record driver entry before client");
+                        if scenario == ServiceCase::Attempt {
+                            driver
+                                .stdin
+                                .take()
+                                .expect("driver start input")
+                                .write_all(b"G")
+                                .expect("start driver client");
+                        } else {
+                            let mut foreign = Command::new(
+                                std::env::current_exe().expect("outside client image"),
+                            )
+                            .args(["--exact", selector, "--nocapture", "--test-threads=1"])
+                            .env("CLAUDE_FIXTURE_CLIENT_RUN", &run_dir)
+                            .env("CLAUDE_FIXTURE_ENTRY_NAME", selector)
+                            .env("CLAUDE_FIXTURE_CLIENT_ENTRY", "1")
+                            .env("CLAUDE_FIXTURE_OUTSIDE_SESSION", "1")
+                            .env("SUPERLOOP_CLIENT_ROOT_DEV", root_meta.dev().to_string())
+                            .env("SUPERLOOP_CLIENT_ROOT_INO", root_meta.ino().to_string())
+                            .env("SUPERLOOP_CLIENT_SOCKET_NAME", ".container-R.sock")
+                            .stdin(Stdio::piped())
+                            .stdout(Stdio::piped())
+                            .stderr(Stdio::piped())
+                            .spawn()
+                            .expect("outside driver-session client");
+                            foreign
+                                .stdin
+                                .take()
+                                .expect("foreign prompt")
+                                .write_all(crate::FIRST_DISPATCH_PROMPT.as_bytes())
+                                .expect("foreign prompt input");
+                            let output = foreign.wait_with_output().expect("foreign client exit");
+                            assert!(
+                                output.status.success(),
+                                "foreign client: {}",
+                                String::from_utf8_lossy(&output.stderr)
+                            );
+                            result = String::from_utf8_lossy(&output.stdout).into_owned();
+                        }
+                        drop(driver.stdin.take());
+                        let output = driver.wait_with_output().expect("driver entry exit");
+                        assert!(
+                            output.status.success(),
+                            "driver entry: {}",
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        result.push_str(&String::from_utf8_lossy(&output.stdout));
+                        nix::mount::umount(alias_socket).expect("unmount client socket alias");
+                        fs::remove_file(alias_socket).expect("remove client socket mountpoint");
+                    }
+                    drop(input);
+                    result
+                }))
+            };
+            let outcome = crate::container_helper::fixture_serve_admitted_at(
+                owner,
+                &runs.join("R"),
+                admission,
+            );
+            service_done.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(release) = release {
+                let result = release.join().expect("readiness release");
+                assert_ne!(result, "service returned before readiness", "{outcome:?}");
+                if scenario == ServiceCase::OutsideSession {
+                    let error = outcome.expect_err("outside-session peer refuses");
+                    assert_eq!(error.kind, "helper-peer", "{error:?}");
+                    assert_eq!(
+                        error.detail,
+                        "request is outside the launched driver session"
+                    );
+                    assert!(result.contains("CLIENT-REFUSAL="), "{result}");
+                } else {
+                    outcome.expect("service ends after launcher exit");
+                }
+                if scenario == ServiceCase::Attempt {
+                    assert!(result.contains("CLIENT-STATUS=7"), "{result}");
+                    assert!(result.contains("fixture-attempt"), "{result}");
+                    let evidence: Value = serde_json::from_slice(
+                        &fs::read(runs.join("R/container-attempt-1.status.json"))
+                            .expect("service attempt status"),
+                    )
+                    .expect("attempt status JSON");
+                    assert_eq!(evidence["status"], 7, "{evidence}");
+                    assert_eq!(evidence["bounded"], true, "{evidence}");
+                    assert_eq!(evidence["attempt"], 1, "{evidence}");
+                }
+            } else {
+                let error = outcome.expect_err("due owner source refuses at service entry");
+                assert_eq!(error.kind, "credential-read-due", "{error:?}");
+                assert_eq!(
+                    fs::read(&reservation).expect("reservation after refusal"),
+                    before
+                );
+                assert_eq!(fs::read(&worker_file).ok(), prior_worker);
+                assert!(
+                    !evidence_path.exists(),
+                    "no periodic thread starts after refusal"
+                );
+            }
+            drop(launcher.stdin.take());
+            assert!(launcher.wait().expect("launcher exit").code().is_some());
+            assert!(!request_socket.exists(), "request socket removed");
+            assert!(!control_socket.exists(), "control socket removed");
+            // A joined thread can remain listed until the kernel finishes its
+            // teardown. The fixture watchdog bounds this event wait, so a
+            // leaked service thread remains a named fixture failure.
+            let mut pending_reported = false;
+            loop {
+                let observed = fs::read_dir("/proc/self/task")
+                    .expect("service caller threads after return")
+                    .count();
+                if observed == threads_before {
+                    break;
+                }
+                if !pending_reported {
+                    writeln!(
+                        std::io::stderr().lock(),
+                        "service thread count pending: baseline={threads_before} observed={observed}"
+                    )
+                    .expect("thread count diagnostic");
+                    pending_reported = true;
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            drop(client_runs);
+            assert_eq!(
+                fs::read(&source_path).expect("owner source after service"),
+                source_bytes
+            );
+            let after = fs::metadata(&source_path).expect("owner source after metadata");
+            assert_eq!(
+                after.ino(),
+                source_meta.ino(),
+                "owner source inode is unchanged"
+            );
+            assert_eq!(
+                after.modified().expect("mtime"),
+                source_meta.modified().expect("mtime")
+            );
+            assert!(
+                !home.join(".fixture-refresh-sentinel").exists(),
+                "read-mode service never runs the owner program"
+            );
+            if scenario != ServiceCase::Due {
+                let saved: Value =
+                    serde_json::from_slice(&fs::read(&reservation).expect("published reservation"))
+                        .expect("reservation JSON");
+                let receipt = saved["rounds"][0]["credential_publication"]
+                    .as_object()
+                    .expect("round receipt");
+                assert_eq!(receipt.len(), 2, "report reader accepts exactly two keys");
+                assert_eq!(receipt["source_inode"], source_meta.ino());
+                assert!(receipt["published_unix_ns"].as_u64().is_some());
+                let metadata = fs::metadata(&worker_file).expect("worker projection");
+                assert_eq!(
+                    (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
+                    (3000, 3000, 0o600)
+                );
+                let projected: Value =
+                    serde_json::from_slice(&fs::read(&worker_file).expect("worker bytes"))
+                        .expect("worker JSON");
+                assert_eq!(projected.as_object().expect("worker object").len(), 1);
+                let fields = projected["claudeAiOauth"]
+                    .as_object()
+                    .expect("OAuth fields");
+                assert_eq!(fields.len(), 6);
+                for field in [
+                    "accessToken",
+                    "expiresAt",
+                    "scopes",
+                    "subscriptionType",
+                    "subscriptionTypeSource",
+                    "rateLimitTier",
+                ] {
+                    assert_eq!(fields.get(field), document["claudeAiOauth"].get(field));
+                }
+                let evidence: Value = serde_json::from_slice(
+                    &fs::read(&evidence_path).expect("first periodic evidence"),
+                )
+                .expect("evidence JSON");
+                assert_eq!(evidence["state"], "current", "{evidence}");
+                assert_eq!(evidence["backend"], "claude", "{evidence}");
+            }
+        },
+    );
+}
+
+/// # Panics
+/// Panics if no-client service fails to publish its read-mode round or leave clean resources.
+/// ´test:unit:claude-fixture-service-round-publishes-read-mode´
+#[test]
+fn claude_fixture_service_round_publishes_read_mode() {
+    if enter(
+        "claude_fixture_service_round_publishes_read_mode",
+        |enclosing| {
+            service_round_body(enclosing, ServiceCase::NoClient);
+        },
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder("claude_fixture_service_round_publishes_read_mode", true);
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if a due read leaves an altered reservation, worker file or service resources.
+/// ´test:unit:claude-fixture-service-round-due-refuses-without-publication´
+#[test]
+fn claude_fixture_service_round_due_refuses_without_publication() {
+    if enter(
+        "claude_fixture_service_round_due_refuses_without_publication",
+        |enclosing| {
+            service_round_body(enclosing, ServiceCase::Due);
+        },
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder(
+        "claude_fixture_service_round_due_refuses_without_publication",
+        true,
+    );
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if the loop-uid production client cannot receive the bounded attempt result.
+/// ´test:unit:claude-fixture-service-attempt-admits-driver-client´
+#[test]
+fn claude_fixture_service_attempt_admits_driver_client() {
+    if service_client_or_driver_entry() {
+        return;
+    }
+    if enter(
+        "claude_fixture_service_attempt_admits_driver_client",
+        |enclosing| service_round_body(enclosing, ServiceCase::Attempt),
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder("claude_fixture_service_attempt_admits_driver_client", true);
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if a loop-uid client outside the recorded driver session is admitted.
+/// ´test:unit:claude-fixture-service-attempt-refuses-outside-session´
+#[test]
+fn claude_fixture_service_attempt_refuses_outside_session() {
+    if service_client_or_driver_entry() {
+        return;
+    }
+    if enter(
+        "claude_fixture_service_attempt_refuses_outside_session",
+        |enclosing| service_round_body(enclosing, ServiceCase::OutsideSession),
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder(
+        "claude_fixture_service_attempt_refuses_outside_session",
+        true,
+    );
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if private procfs disagrees with the namespace or loses the host identity handoff.
+/// ´test:unit:claude-fixture-service-procfs-keeps-host-handoff´
+#[test]
+fn claude_fixture_service_procfs_keeps_host_handoff() {
+    if enter(
+        "claude_fixture_service_procfs_keeps_host_handoff",
+        service_procfs_body,
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_service_procfs_keeps_host_handoff");
+    let path = host.root.as_ref().expect("E").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
 
 fn round_body(enclosing: &Path) {
     transaction_body(
@@ -343,7 +1351,110 @@ fn round_body(enclosing: &Path) {
     );
 }
 
-fn transaction_body(enclosing: &Path, action: TransactionAction) {
+/// # Panics
+/// Panics if a mapped round bypasses the closed cutover gate or changes its prior worker file.
+/// ´test:unit:claude-fixture-cutover-refuses-at-round-entry´
+#[test]
+fn claude_fixture_cutover_refuses_at_round_entry() {
+    if enter(
+        "claude_fixture_cutover_refuses_at_round_entry",
+        |enclosing| {
+            transaction_body(enclosing, |_, owner, _, worker, record, admission, _| {
+                let home = claude_sign_in_dir(owner, "alpha");
+                let marker = home.join(".boxed-refresh-mode");
+                fs::write(&marker, b"refresh\n").expect("cutover request");
+                fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))
+                    .expect("marker mode");
+                assert_round_refusal_preserves_worker(
+                    owner,
+                    worker,
+                    record,
+                    admission,
+                    "credential-cutover-gate",
+                );
+            });
+        },
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_cutover_refuses_at_round_entry");
+    finish(&mut host, true);
+    host.cleanup();
+}
+
+/// # Panics
+/// Panics if due authority reaches a mapped worker or invokes the owner program.
+/// ´test:unit:claude-fixture-due-refuses-at-round-entry´
+#[test]
+fn claude_fixture_due_refuses_at_round_entry() {
+    if enter("claude_fixture_due_refuses_at_round_entry", |enclosing| {
+        transaction_body(enclosing, |_, owner, _, worker, record, admission, _| {
+            let home = claude_sign_in_dir(owner, "alpha");
+            let expiry = now_seconds().expect("clock") + 300;
+            let source = home.join(".credentials.json");
+            fs::write(&source, claude_document(expiry * 1000).to_string()).expect("due source");
+            fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).expect("source mode");
+            assert_round_refusal_preserves_worker(
+                owner,
+                worker,
+                record,
+                admission,
+                "credential-read-due",
+            );
+        });
+    }) {
+        return;
+    }
+    let mut host = launch("claude_fixture_due_refuses_at_round_entry");
+    finish(&mut host, true);
+    host.cleanup();
+}
+
+fn assert_round_refusal_preserves_worker(
+    owner: &Path,
+    worker: &Path,
+    record: &mut Value,
+    admission: &crate::runtime_admission::RuntimeAdmission,
+    expected: &str,
+) {
+    let home = claude_sign_in_dir(owner, "alpha");
+    fs::write(home.join(".fixture-refresh-sentinel-arm"), b"armed").expect("fixture program arm");
+    let path = worker.join(".claude/.credentials.json");
+    fs::write(&path, b"prior synthetic projection").expect("prior worker file");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("prior mode");
+    nix::unistd::chown(&path, Some(Uid::from_raw(3000)), Some(Gid::from_raw(3000)))
+        .expect("prior worker ownership");
+    let prior = fs::metadata(&path).expect("prior inode").ino();
+    let before = record.clone();
+    let error = crate::container_helper::publish_round_credential_admitted(
+        owner, "alpha", record, admission,
+    )
+    .expect_err("round must refuse");
+    assert_eq!(error.kind, expected, "{error:?}");
+    assert_eq!(*record, before, "reservation remains unchanged");
+    assert_eq!(
+        fs::read(&path).expect("prior bytes"),
+        b"prior synthetic projection"
+    );
+    assert_eq!(fs::metadata(&path).expect("prior metadata").ino(), prior);
+    assert!(
+        !home.join(".fixture-refresh-sentinel").exists(),
+        "owner program entered"
+    );
+}
+
+fn transaction_body(
+    enclosing: &Path,
+    action: impl FnOnce(
+        &FixtureRoot,
+        &Path,
+        &Path,
+        &Path,
+        &mut Value,
+        &crate::runtime_admission::RuntimeAdmission,
+        &Value,
+    ),
+) {
     use sha2::{Digest as _, Sha256};
     use std::fmt::Write as _;
     let _endpoint = fixture_service_endpoint("http://127.0.0.1:1/unused".into());
@@ -358,9 +1469,12 @@ fn transaction_body(enclosing: &Path, action: TransactionAction) {
         anchors.pop().expect("configuration"),
     )
     .expect("moved configuration");
-    let (_runtime, programs) =
+    let (runtime, mut programs) =
         crate::container_entry::take_support_programs(&mut anchors, BoxBackend::Claude)
             .expect("program roles");
+    if let Some(program) = std::env::var_os("CLAUDE_FIXTURE_BUILDER") {
+        programs.insert(PathBuf::from(program), Arc::new(runtime));
+    }
     let _home =
         crate::home::activate_private_launch(&owner, &anchors[0], &runs, &anchors[1], None, 0)
             .expect("moved anchors");
@@ -374,7 +1488,9 @@ fn transaction_body(enclosing: &Path, action: TransactionAction) {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("clock")
         .as_secs();
-    let document = claude_document((now + 590) * 1000);
+    // The mapped transaction exercises publication and custody, not refresh.
+    // Keep its source outside the default reader's 600-second due margin.
+    let document = claude_document((now + 900) * 1000);
     fixture_claude(&owner, &document);
     let install = owner.join(".config/loops/alpha/install-generation.json");
     fs::write(
@@ -487,6 +1603,14 @@ fn round_contract(
     crate::container_helper::publish_round_credential_admitted(owner, "alpha", record, admission)
         .expect("admitted round bound program pin");
     assert!(record["rounds"][0]["credential_publication"].is_object());
+    assert_eq!(
+        record["rounds"][0]["credential_publication"]
+            .as_object()
+            .expect("round receipt")
+            .len(),
+        2,
+        "launch report accepts only the two receipt keys"
+    );
     let path = worker.join(".claude/.credentials.json");
     let metadata = fs::metadata(&path).expect("published worker");
     assert_ne!(metadata.ino(), prior.ino(), "publication replaces the leaf");
@@ -745,6 +1869,80 @@ fn claude_fixture_periodic_publication() {
             },
         );
     });
+}
+
+/// # Panics
+/// Panics if the periodic production entry bypasses the closed Claude cutover gate.
+/// ´test:unit:claude-fixture-periodic-cutover-refuses-before-publication´
+#[test]
+fn claude_fixture_periodic_cutover_refuses_before_publication() {
+    periodic_case(
+        "claude_fixture_periodic_cutover_refuses_before_publication",
+        |enclosing| {
+            transaction_body(enclosing, |_, owner, runs, worker, record, admission, _| {
+                periodic_stage(owner, runs, record);
+                let home = claude_sign_in_dir(owner, "alpha");
+                let marker = home.join(".boxed-refresh-mode");
+                fs::write(&marker, b"refresh\n").expect("cutover request");
+                fs::set_permissions(&marker, fs::Permissions::from_mode(0o600))
+                    .expect("marker mode");
+                fs::write(home.join(".fixture-refresh-sentinel-arm"), b"armed")
+                    .expect("sentinel arm");
+                let worker_file = worker.join(".claude/.credentials.json");
+                fs::write(&worker_file, b"prior worker authority").expect("prior file");
+                fs::set_permissions(&worker_file, fs::Permissions::from_mode(0o600))
+                    .expect("prior mode");
+                nix::unistd::chown(
+                    &worker_file,
+                    Some(Uid::from_raw(3000)),
+                    Some(Gid::from_raw(3000)),
+                )
+                .expect("prior owner");
+                let prior = fs::metadata(&worker_file).expect("prior inode").ino();
+                let reservation = fs::read(crate::launch::reservation_path(runs, "R"))
+                    .expect("prior reservation");
+                let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let thread = crate::container_helper::spawn_credential_authority_admitted(
+                    owner.to_path_buf(),
+                    "alpha".into(),
+                    runs.to_path_buf(),
+                    runs.join("R"),
+                    BoxBackend::Claude,
+                    Arc::clone(&cancelled),
+                    admission,
+                )
+                .expect("production periodic spawner");
+                let mut thread = PeriodicThread::observe(cancelled, thread);
+                let evidence = runs.join(".launch-R/credential-refresh.json");
+                let deadline = std::time::Instant::now() + Duration::from_secs(30);
+                while !evidence.exists() {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "periodic evidence event"
+                    );
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                thread.finish().expect("clean authority cancellation");
+                let value: Value = serde_json::from_slice(&fs::read(evidence).expect("evidence"))
+                    .expect("evidence JSON");
+                assert_eq!(value["state"], "refused", "{value}");
+                assert_eq!(value["kind"], "credential-cutover-gate", "{value}");
+                assert_eq!(
+                    fs::read(&worker_file).expect("prior bytes"),
+                    b"prior worker authority"
+                );
+                assert_eq!(
+                    fs::metadata(&worker_file).expect("prior inode").ino(),
+                    prior
+                );
+                assert_eq!(
+                    fs::read(crate::launch::reservation_path(runs, "R")).expect("reservation"),
+                    reservation
+                );
+                assert!(!home.join(".fixture-refresh-sentinel").exists());
+            });
+        },
+    );
 }
 
 /// # Panics

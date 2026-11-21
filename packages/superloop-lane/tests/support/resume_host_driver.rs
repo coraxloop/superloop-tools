@@ -39,9 +39,20 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
         .to_string(),
         0o600,
     );
-    if home.join("late-reply").exists() {
+    if home.join("reply-candidates-two").exists() || home.join("reply-candidates-one").exists() {
+        let mut instants = vec![fixture.deliver_reply_now()];
+        if home.join("reply-candidates-two").exists() {
+            std::thread::sleep(Duration::from_millis(2));
+            instants.push(fixture.deliver_reply_now());
+        }
+        host::write(
+            home.join("candidate-instants.json"),
+            serde_json::to_vec(&instants).expect("candidate instants"),
+            0o600,
+        );
+    } else if home.join("late-reply").exists() {
         fixture.deliver_reply();
-    } else if !home.join("without-reply").exists() {
+    } else if !home.join("without-reply").exists() && !home.join("reply-candidates-none").exists() {
         fixture.reply();
     }
     let output = host::mapped(&home, DRIVER);

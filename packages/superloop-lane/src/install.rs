@@ -20,6 +20,7 @@ use crate::error::LaneError;
 use crate::settings::Settings;
 
 pub(crate) static NEXT_ALLOCATION_TEMP: AtomicU64 = AtomicU64::new(0);
+const PRIVATE_REPORT_LIMIT: usize = 1_048_576;
 
 /// The loop configuration directory held under its install lock.
 pub struct InstallGuard {
@@ -788,8 +789,11 @@ fn source_text(path: &Path) -> Result<String, LaneError> {
             format!("{} is not a bounded regular file", path.display()),
         ));
     }
-    fs::read_to_string(path)
-        .map_err(|error| LaneError::input("install-source", format!("{}: {error}", path.display())))
+    let text = fs::read_to_string(path).map_err(|error| {
+        LaneError::input("install-source", format!("{}: {error}", path.display()))
+    })?;
+    crate::build::refuse_credential_image_input(path, text.as_bytes())?;
+    Ok(text)
 }
 
 fn unit_text(source: &Path, replacements: &[(&str, &Path)]) -> Result<Vec<u8>, LaneError> {
@@ -1009,14 +1013,136 @@ fn publish_generation(path: &Path, generation: &Value) -> Result<(), LaneError> 
         })
 }
 
-fn private_report(spec: &ChildSpec, entry_bin: &Path, lane_bin: &Path) -> Result<Value, LaneError> {
+struct GenerationRecord<'a> {
+    image_digest: &'a str,
+    codex_sha256: &'a str,
+    codex_host_sha256: &'a str,
+    tools_commit: &'a str,
+    template_dir: &'a Path,
+    socket_dir: &'a Path,
+    unit_dir: &'a Path,
+    proxy_bin: &'a Path,
+    proxy_sha256: &'a str,
+    init_sha256: &'a str,
+    codex_image_program: &'a str,
+    source_fingerprint: &'a str,
+    payloads: &'a [crate::build::payload::InstallPayload],
+    loop_home: &'a Path,
+    image_hash: &'a str,
+}
+
+fn preparing_generation(fields: &GenerationRecord<'_>) -> Result<Value, LaneError> {
+    let mut generation = json!({
+        "schema":1,"phase":"preparing","image_digest":fields.image_digest,
+        "codex_sha256":fields.codex_sha256,"codex_host_sha256":fields.codex_host_sha256,
+        "tools_commit":fields.tools_commit,"template_dir":fields.template_dir,
+        "socket_dir":fields.socket_dir,"unit_dir":fields.unit_dir,
+        "proxy_bin":fields.proxy_bin,"proxy_sha256":fields.proxy_sha256,
+        "init_sha256":fields.init_sha256,"codex_image_program":fields.codex_image_program,
+        "source_fingerprint":fields.source_fingerprint
+    });
+    vendor_generation_fields(
+        &mut generation,
+        fields.payloads,
+        fields.loop_home,
+        fields.image_hash,
+    )?;
+    Ok(generation)
+}
+
+pub(crate) fn install_paths(
+    loop_home: &Path,
+    payload: &crate::build::payload::InstallPayload,
+    image_hash: &str,
+) -> (PathBuf, PathBuf) {
+    (
+        payload.template(loop_home, image_hash),
+        loop_home.join("sockets"),
+    )
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_publish_claude_generation(
+    path: &Path,
+    owner_home: &Path,
+    loop_name: &str,
+    payload: &crate::build::payload::InstallPayload,
+    image_digest: &str,
+    source_fingerprint: &str,
+    init_sha256: &str,
+) -> Result<Value, LaneError> {
+    let hash = image_digest.strip_prefix("sha256:").ok_or_else(|| {
+        LaneError::input(
+            "install-generation",
+            "fixture image digest has no algorithm",
+        )
+    })?;
+    let loop_home = owner_home.join(".var/loops").join(loop_name);
+    let (template, socket) = install_paths(&loop_home, payload, hash);
+    let unit = owner_home.join(".config/systemd/user");
+    let proxy = owner_home.join("proxy-fixture");
+    fs::copy("/usr/bin/true", &proxy)
+        .map_err(|error| LaneError::operation("install-generation", error.to_string()))?;
+    let proxy_sha256 = crate::build::sha256(&proxy)?;
+    let generation = preparing_generation(&GenerationRecord {
+        image_digest,
+        codex_sha256: "",
+        codex_host_sha256: "",
+        tools_commit: "fixture",
+        template_dir: &template,
+        socket_dir: &socket,
+        unit_dir: &unit,
+        proxy_bin: &proxy,
+        proxy_sha256: &proxy_sha256,
+        init_sha256,
+        codex_image_program: "",
+        source_fingerprint,
+        payloads: std::slice::from_ref(payload),
+        loop_home: &loop_home,
+        image_hash: hash,
+    })?;
+    publish_generation(path, &generation)?;
+    Ok(generation)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_complete_claude_generation(
+    path: &Path,
+    generation: &mut Value,
+) -> Result<(), LaneError> {
+    generation["phase"] = json!("complete");
+    publish_generation(path, generation)
+}
+
+fn private_report(
+    spec: &ChildSpec,
+    entry_bin: &Path,
+    lane_bin: &Path,
+    sign_in_dir: &Path,
+) -> Result<Value, LaneError> {
     crate::pinned::owner_executable_word(entry_bin, nix::unistd::Uid::effective().as_raw())?;
     crate::pinned::owner_executable_word(lane_bin, nix::unistd::Uid::effective().as_raw())?;
-    let output = checked_output(spec, None)?;
-    if output.len() > 65_536 {
+    let output = checked_output(spec, None).map_err(|error| {
+        if error.kind == "install-private" && error.detail.ends_with("exceeded output limit") {
+            LaneError::operation(
+                "install-private",
+                format!(
+                    "private report for {} exceeded the child output bound; inspect unexpected sign-in tree growth and any partial installation before retrying; keep credential files in place",
+                    sign_in_dir.display()
+                ),
+            )
+        } else {
+            error
+        }
+    })?;
+    if output.len() > PRIVATE_REPORT_LIMIT {
         return Err(LaneError::operation(
             "install-private",
-            "private report exceeds 65536 bytes",
+            format!(
+                "private report exceeds {PRIVATE_REPORT_LIMIT} bytes ({} bytes) for {}; inspect unexpected sign-in tree growth and any partial installation before retrying; keep credential files in place",
+                output.len(),
+                sign_in_dir.display()
+            ),
         ));
     }
     serde_json::from_str(&output).map_err(|error| {
@@ -1491,6 +1617,28 @@ fn run_with_lane_bin_inner(
     }
     let request = &resolved;
     let payloads = crate::build::payload::install_payloads(&report, &settings)?;
+    crate::build::source_bytes(
+        &request.data_dir.join("box-init"),
+        "image init",
+        65_536,
+        false,
+    )?;
+    for payload in &payloads {
+        crate::build::source_bytes(
+            &payload.bin,
+            "vendor image program",
+            crate::build::MAX_CODEX_BYTES,
+            false,
+        )?;
+        if let Some((companion, _)) = &payload.companion {
+            crate::build::source_bytes(
+                companion,
+                "vendor companion program",
+                crate::build::MAX_CODEX_BYTES,
+                false,
+            )?;
+        }
+    }
     let primary = payloads
         .first()
         .ok_or_else(|| LaneError::input("missing-setting", "no configured vendor"))?;
@@ -1554,8 +1702,7 @@ fn run_with_lane_bin_inner(
     let hash = image_digest
         .strip_prefix("sha256:")
         .ok_or_else(|| LaneError::input("build-report", "image ID is not a sha256 value"))?;
-    let template_dir = primary.template(&row.home, hash);
-    let socket_dir = row.home.join("sockets");
+    let (template_dir, socket_dir) = install_paths(&row.home, primary, hash);
     crate::pinned::owner_executable_word(
         &request.proxy_bin,
         nix::unistd::Uid::effective().as_raw(),
@@ -1800,7 +1947,11 @@ fn run_with_lane_bin_inner(
         None,
     )?
     .with_private_install(&verified_owner_home, &install_guard)?;
-    let private = private_report(&preflight_spec, entry_bin, lane_bin)?;
+    let sign_in_dir = owner_home
+        .join(".config/loops")
+        .join(&request.loop_name)
+        .join("lanes/codex");
+    let private = private_report(&preflight_spec, entry_bin, lane_bin, &sign_in_dir)?;
     let init_source = request.data_dir.join("box-init");
     let mut source_checks = vec![("init", init_source.as_path(), init_sha256)];
     for payload in &payloads {
@@ -2002,8 +2153,23 @@ fn run_with_lane_bin_inner(
             json!({"schema":1,"command":"install","pilot":request.pilot,"installed_backends":installed_backends,"dry_run":true,"changed":changed,"change_counts":change_counts,"allocation":allocation,"unit_dir":unit_dir,"destinations":destinations,"sign_in_metadata":private["sign_in"],"proxy_bin":request.proxy_bin,"proxy_sha256":proxy_sha256,"hash_checks":hash_checks,"private_hash_checks":private["hash_checks"],"private_preflight":preflight_spec.preview(),"private_install":install_spec.preview(),"activation":["systemctl --user daemon-reload",format!("systemctl --user start superloop-lane-vendor@{}.service", request.loop_name)],"wall_seconds":started.elapsed().as_secs_f64()}),
         );
     }
-    let mut generation = json!({"schema":1,"phase":"preparing","image_digest":image_digest,"codex_sha256":codex_sha256,"codex_host_sha256":codex_host_sha256,"tools_commit":tools_commit,"template_dir":template_dir,"socket_dir":socket_dir,"unit_dir":unit_dir,"proxy_bin":request.proxy_bin,"proxy_sha256":proxy_sha256,"init_sha256":init_sha256,"codex_image_program":image_program,"source_fingerprint":measured_source});
-    vendor_generation_fields(&mut generation, &payloads, &row.home, hash)?;
+    let mut generation = preparing_generation(&GenerationRecord {
+        image_digest,
+        codex_sha256,
+        codex_host_sha256,
+        tools_commit,
+        template_dir: &template_dir,
+        socket_dir: &socket_dir,
+        unit_dir: &unit_dir,
+        proxy_bin: &request.proxy_bin,
+        proxy_sha256: &proxy_sha256,
+        init_sha256,
+        codex_image_program: image_program,
+        source_fingerprint: measured_source,
+        payloads: &payloads,
+        loop_home: &row.home,
+        image_hash: hash,
+    })?;
     let refresh_needed = private["charter_refresh"] == true;
     let private_mutation = private["destinations"]
         .as_array()
@@ -2017,7 +2183,7 @@ fn run_with_lane_bin_inner(
     if pending_needed {
         publish_generation(&generation_path, &generation)?;
     }
-    let private_done = private_report(&install_spec, entry_bin, lane_bin)?;
+    let private_done = private_report(&install_spec, entry_bin, lane_bin, &sign_in_dir)?;
     if private_done["changed"].as_u64() != Some(private_changed) {
         return Err(LaneError::operation(
             "install-private",
@@ -2586,6 +2752,25 @@ mod tests {
         );
     }
 
+    /// # Panics
+    /// Panics if an install template shaped as a credential is rendered for publication.
+    /// ´test:unit:install-template-refuses-credential-document-before-render´
+    #[test]
+    fn install_template_refuses_credential_document_before_render() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let source = fixture.path().join("vendor-proxy.service.in");
+        fs::write(&source, br#"{"tokens":{"refresh_token":"synthetic-only"}}"#)
+            .expect("shaped source");
+        let error = super::unit_text(&source, &[]).expect_err("credential source refuses");
+        assert_eq!(error.kind, "credential-image-input", "{error:?}");
+        assert_eq!(
+            fs::read_dir(fixture.path())
+                .expect("fixture entries")
+                .count(),
+            1
+        );
+    }
+
     /// ´test:unit:install-refuses-a-loop-writable-entry-before-private-preflight´
     #[test]
     fn install_refuses_a_loop_writable_entry_before_private_preflight() {
@@ -2606,7 +2791,7 @@ mod tests {
             1,
             "install-private",
         );
-        let error = private_report(&spec, &entry, Path::new("/usr/bin/true"))
+        let error = private_report(&spec, &entry, Path::new("/usr/bin/true"), fixture.path())
             .expect_err("loop can replace entry");
         assert_eq!(error.kind, "owner-program");
     }
@@ -2632,7 +2817,7 @@ mod tests {
             1,
             "install-private",
         );
-        let error = private_report(&spec, &entry, Path::new("/usr/bin/true"))
+        let error = private_report(&spec, &entry, Path::new("/usr/bin/true"), fixture.path())
             .expect_err("entry changed after preflight");
         assert_eq!(error.kind, "owner-program");
     }
@@ -2659,7 +2844,7 @@ mod tests {
             1,
             "install-private",
         );
-        let error = private_report(&spec, Path::new("/usr/bin/true"), &lane_bin)
+        let error = private_report(&spec, Path::new("/usr/bin/true"), &lane_bin, fixture.path())
             .expect_err("replacement refused before private execution");
         assert_eq!(error.kind, "owner-program");
     }

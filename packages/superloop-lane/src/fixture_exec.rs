@@ -173,7 +173,7 @@ mod tests {
     #[test]
     fn fixture_spawn_retries_only_text_file_busy() {
         let Some(marker) = std::env::var_os("SUPERLOOP_HELD_WRITER_CASE") else {
-            let fixture = tempfile::TempDir::new_in("/tmp").expect("isolated case");
+            let fixture = tempfile::tempdir().expect("isolated case under TMPDIR");
             let marker = fixture.path().join("completed");
             let output = Command::new(std::env::current_exe().expect("test binary"))
                 .args([
@@ -192,7 +192,7 @@ mod tests {
             assert_eq!(fs::read(marker).expect("isolated test ran"), b"done");
             return;
         };
-        let fixture = tempfile::TempDir::new_in("/tmp").expect("fixture");
+        let fixture = tempfile::tempdir().expect("fixture under TMPDIR");
         let program = fixture.path().join("stand-in");
         let mut writer = OpenOptions::new()
             .write(true)
@@ -246,7 +246,7 @@ mod tests {
             return;
         }
 
-        let fixture = tempfile::TempDir::new_in("/tmp").expect("fixture");
+        let fixture = tempfile::tempdir().expect("fixture under TMPDIR");
         let program = fixture.path().join("stand-in");
         let mut writer = OpenOptions::new()
             .write(true)

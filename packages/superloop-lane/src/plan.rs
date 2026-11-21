@@ -420,6 +420,46 @@ fn mount(mounts: &mut Vec<Value>, source: &str, target: &str, access: &str, kind
     mounts.push(json!({"access": access, "kind": kind, "measurement": "provisional; launch must verify", "source": source, "target": target}));
 }
 
+// Exact environment names supplied by the two supported clients. Keep this
+// list beside the box vector that decides which names can enter the worker.
+pub(crate) const VENDOR_CREDENTIAL_VARIABLES: [&str; 6] = [
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_AUTH_TOKEN",
+    "CODEX_API_KEY",
+];
+
+fn vendor_credential_variable(name: &str) -> bool {
+    VENDOR_CREDENTIAL_VARIABLES.contains(&name)
+}
+
+fn refuse_vendor_credential_environment(document: &Value, words: &[&str]) -> Result<(), LaneError> {
+    let recorded = document["environment"]
+        .as_object()
+        .is_some_and(|environment| {
+            environment
+                .keys()
+                .any(|key| vendor_credential_variable(key))
+        });
+    let passed = words.windows(2).any(|pair| {
+        ["-e", "--env"].contains(&pair[0])
+            && vendor_credential_variable(pair[1].split('=').next().unwrap_or_default())
+    }) || words.iter().any(|word| {
+        word.strip_prefix("--env=").is_some_and(|value| {
+            vendor_credential_variable(value.split('=').next().unwrap_or_default())
+        })
+    });
+    if recorded || passed {
+        return Err(LaneError::input(
+            "credential-environment",
+            "vendor credential variable is not a boxed environment input",
+        ));
+    }
+    Ok(())
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn door_pin(
     owner_home: &Path,
@@ -715,6 +755,7 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
         .map(Value::as_str)
         .collect::<Option<Vec<_>>>()
         .ok_or_else(|| LaneError::input("box-gate", "runtime argument is not a string"))?;
+    refuse_vendor_credential_environment(document, &words)?;
     let image = document["image_digest"]
         .as_str()
         .ok_or_else(|| LaneError::input("box-gate", "image digest is absent"))?;
@@ -1228,6 +1269,11 @@ pub(crate) fn verify_box_attestation_admitted(
     admission.check(crate::settings::BoxBackend::from_plan(document)?)?;
     #[cfg(test)]
     admission.scope_plan(document)?;
+    verify_box_attestation_structure(document)
+}
+
+/// Check a candidate vector's attestation without admitting its runtime.
+pub(crate) fn verify_box_attestation_structure(document: &Value) -> Result<(), LaneError> {
     if document["box_gate"] != box_gate(document)? {
         return Err(LaneError::input(
             "box-gate",
@@ -1505,6 +1551,7 @@ impl Plan {
     /// # Errors
     ///
     /// Refuses invalid settings, registry fields, or other plan inputs.
+    #[cfg(test)]
     pub(crate) fn build_for_record(
         home_root: &Path,
         loop_name: &str,
@@ -2511,6 +2558,32 @@ mod tests {
             json!({"source":"/owner/.var/loops","target":"/peer","access":"ro","kind":"bind"}),
         );
         assert!(super::box_gate(&extra).is_err());
+    }
+
+    /// # Panics
+    /// Panics if a recorded or runtime vendor credential variable passes the box gate.
+    /// ´test:unit:box-plan-refuses-vendor-credential-environment-before-launch´
+    #[test]
+    fn box_plan_refuses_vendor_credential_environment_before_launch() {
+        let source: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/plan.json")).expect("plan");
+        for name in super::VENDOR_CREDENTIAL_VARIABLES {
+            let mut recorded = source.clone();
+            recorded["environment"][name] = json!("synthetic-secret");
+            let error = super::box_gate(&recorded).expect_err("recorded credential variable");
+            assert_eq!(error.kind, "credential-environment", "{name}");
+
+            let mut vector = source.clone();
+            let words = vector["runtime_argv"]
+                .as_array_mut()
+                .expect("runtime words");
+            words.splice(
+                1..1,
+                [json!("-e"), json!(format!("{name}=synthetic-secret"))],
+            );
+            let error = super::box_gate(&vector).expect_err("runtime credential variable");
+            assert_eq!(error.kind, "credential-environment", "{name}");
+        }
     }
 
     /// ´test:unit:explicit-door-bind-keeps-version-one-for-repair-and-mounts´

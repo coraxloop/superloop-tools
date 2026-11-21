@@ -277,6 +277,21 @@ pub(crate) fn finish_with_fallback(
     Ok(report)
 }
 
+fn no_candidate_recovery(
+    settlement_allowed: bool,
+    loop_name: &str,
+    run: &str,
+    step: &str,
+) -> String {
+    if settlement_allowed {
+        format!(
+            "If no reply was delivered, read the box's outbox report by hand, then preview null-readback recovery with superloop-lane settle {loop_name} {run} --round {step} --dry-run and apply it with --expect-digest from preview_sha256."
+        )
+    } else {
+        "If no reply was delivered, read the box's outbox report by hand. The saved state does not currently admit a settlement preview; inspect its observer and cleanup disposition before trying settle.".to_owned()
+    }
+}
+
 /// Keep a readback refusal in the existing settlement object of the launch report.
 pub(crate) fn settlement_result(
     result: &Result<String, LaneError>,
@@ -303,6 +318,25 @@ pub(crate) fn settlement_result(
             } else {
                 None
             };
+            let no_observation = Value::Null;
+            let observation = if binding_allowed {
+                &record["reply_candidate_observation"]
+            } else {
+                &no_observation
+            };
+            let candidate_deliveries = observation["candidate_deliveries"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default();
+            let candidate_commands = candidate_deliveries
+                .iter()
+                .filter_map(Value::as_str)
+                .map(|delivery| {
+                    format!(
+                        "superloop-lane bind-reply {loop_name} {run} --step {step} --delivery {delivery}"
+                    )
+                })
+                .collect::<Vec<_>>();
             let guidance = if binding_allowed {
                 let after_binding = if settlement_allowed {
                     format!(
@@ -311,9 +345,44 @@ pub(crate) fn settlement_result(
                 } else {
                     "The saved state does not currently admit a settlement preview; inspect its observer and cleanup disposition before trying settle.".to_owned()
                 };
-                format!(
-                    "This refusal removed no letter from the loop inbox; any delivered reply remains unverified. Select this round's answer in the loop inbox: replace UTC_INSTANT in the report's next_command with the middle of its WORKER.UTC_INSTANT.letter name and run that action with superloop-lane. {after_binding} No reply is selected automatically."
-                )
+                if observation["window"].is_object() {
+                    let start = observation["window"]["start_utc"]
+                        .as_str()
+                        .unwrap_or_default();
+                    let end = observation["window"]["end_utc"]
+                        .as_str()
+                        .unwrap_or_default();
+                    let mut text = format!(
+                        "This refusal removed no letter from the loop inbox. Searched worker-to-loop deliveries from {start} through {end}; found {} candidate(s).",
+                        candidate_commands.len()
+                    );
+                    if candidate_commands.is_empty() {
+                        let none_recovery =
+                            no_candidate_recovery(settlement_allowed, loop_name, run, step);
+                        let _written = write!(
+                            text,
+                            " {none_recovery} If a reply arrives later, keep its inbox entry unmoved and bind its delivery instant."
+                        );
+                    } else {
+                        for command in &candidate_commands {
+                            let _written = write!(text, " Candidate command: {command}.");
+                        }
+                        let _written = write!(
+                            text,
+                            " Choose only the delivery that answers this round. {after_binding}"
+                        );
+                    }
+                    let _written = write!(text, " No reply is selected automatically.");
+                    text
+                } else if let Some(scan_error) = observation["error"].as_str() {
+                    format!(
+                        "This refusal removed no letter from the loop inbox. Candidate scan refused: {scan_error}. Inspect the inbox entry and bind its delivery instant manually. {after_binding} No reply is selected automatically."
+                    )
+                } else {
+                    format!(
+                        "This refusal removed no letter from the loop inbox; any delivered reply remains unverified. Select this round's answer in the loop inbox: replace UTC_INSTANT in the report's next_command with the middle of its WORKER.UTC_INSTANT.letter name and run that action with superloop-lane. {after_binding} No reply is selected automatically."
+                    )
+                }
             } else if settlement_allowed {
                 format!(
                     "The recorded state does not admit late reply binding. Inspect recorded_cause in the launch report, then preview settlement with superloop-lane settle {loop_name} {run} --round {step} --dry-run."
@@ -323,7 +392,10 @@ pub(crate) fn settlement_result(
             };
             Ok(serde_json::json!({"state":"refused", "detail":error.line(),
                 "run_phase":record["phase"], "round_phase":record["rounds"].as_array().and_then(|rows| rows.last()).map(|row| &row["phase"]),
-                "next_command":next, "recorded_cause":cause, "guidance":guidance}))
+                "next_command":next, "recorded_cause":cause, "guidance":guidance,
+                "window":observation["window"],"candidate_count":observation["candidate_count"],
+                "candidate_deliveries":candidate_deliveries,"candidate_commands":candidate_commands,
+                "candidate_scan_error":observation["error"]}))
         }
     }
 }

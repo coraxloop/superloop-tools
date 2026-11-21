@@ -452,7 +452,7 @@ fn package_seed(
                 .expect("allocated worker mail group"),
         ),
         body,
-        false,
+        (false, false),
     );
     writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("seed result");
 }
@@ -489,7 +489,7 @@ fn fixture_identity(case: &str) -> Identity {
         }
     }
 }
-fn package_reply_child(home: &Path) {
+fn package_reply_child(home: &Path, current: bool) {
     let (manifest, fds) = receive();
     let receiver = Receiver::current().expect("receiver");
     let custody = ReplyCustody::receive(&receiver, &manifest, duplicate(&fds), "alpha")
@@ -513,13 +513,13 @@ fn package_reply_child(home: &Path) {
                 .expect("allocated worker mail group"),
         ),
         b"Synthetic completed reply.\n",
-        true,
+        (true, current),
     );
     writeln!(std::io::stdout().lock(), "PACKAGE-DELIVERY {instant}").expect("reply result");
 }
 fn child(home: &Path, case: &str) {
-    if case == "package-canonical-reply" {
-        package_reply_child(home);
+    if case == "package-canonical-reply" || case == "package-canonical-reply-now" {
+        package_reply_child(home, case.ends_with("-now"));
         return;
     }
     let (manifest, fds) = receive();
@@ -747,7 +747,7 @@ fn delivery_for(
         reply,
         ("worker", 64021),
         BODY,
-        false,
+        (false, false),
     )
 }
 fn delivery_for_name(
@@ -757,7 +757,7 @@ fn delivery_for_name(
     reply: bool,
     worker: (&str, u32),
     body: &[u8],
-    append: bool,
+    (append, current): (bool, bool),
 ) -> (journal::Journal, Instant) {
     let (worker, group) = worker;
     let address = format!("alpha+{worker}");
@@ -812,12 +812,16 @@ fn delivery_for_name(
     )
     .expect("fixture source");
     File::from(fd).write_all(body).expect("source bytes");
-    let now = Instant::parse(if append {
-        "2026-01-01T00:00:00.002Z"
+    let now = if current {
+        Instant::now().expect("current instant")
     } else {
-        "2026-01-01T00:00:00.001Z"
-    })
-    .expect("instant");
+        Instant::parse(if append {
+            "2026-01-01T00:00:00.002Z"
+        } else {
+            "2026-01-01T00:00:00.001Z"
+        })
+        .expect("instant")
+    };
     let record = publication::prepare(&journal, &sender, &recipient, outgoing)
         .expect("prepare")
         .accept(
@@ -950,7 +954,8 @@ fn reply_session_retains_custody() {
                     "package-seed",
                     "package-inbound-seed",
                     "package-canonical-inbound-seed",
-                    "package-canonical-reply"
+                    "package-canonical-reply",
+                    "package-canonical-reply-now"
                 ]
                 .contains(&phase.as_str()),
                 "unsupported fixture phase {phase}"

@@ -502,6 +502,18 @@ fn pin_for_backend(
 /// Panics if host custody or the synthetic role replacement fails.
 #[cfg(test)]
 pub(crate) fn fixture_claude_helper_bundle(home: &Path, runs: &Path) -> Bundle {
+    fixture_claude_helper_bundle_with_podman(home, runs, Path::new("/usr/bin/false"))
+}
+
+/// Use the production helper roles while pinning a fixture's pre-existing Podman stand-in.
+/// # Panics
+/// Panics if host custody or the synthetic role replacement fails.
+#[cfg(test)]
+pub(crate) fn fixture_claude_helper_bundle_with_podman(
+    home: &Path,
+    runs: &Path,
+    podman: &Path,
+) -> Bundle {
     let owner = std::fs::File::open(home).expect("owner").into();
     let storage = std::fs::File::open(runs).expect("runs").into();
     let mut bundle = pin(
@@ -509,7 +521,7 @@ pub(crate) fn fixture_claude_helper_bundle(home: &Path, runs: &Path) -> Bundle {
         (home, &owner),
         (runs, &storage),
         &std::env::current_exe().expect("entry"),
-        Path::new("/usr/bin/podman"),
+        podman,
         BoxBackend::Codex,
     )
     .expect("production host composer");

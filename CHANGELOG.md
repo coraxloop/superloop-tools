@@ -6,6 +6,38 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-21
+
+### Added
+
+- Accept the door's registered receive transport rule as a request record's decision source, `transport-rule`, kept on the deterministic rung of retained decisions and bound to the record's mirror ref (``test:unit:registered-receive-rule-round-trips-and-binds-the-mirror-ref``). Compatibility: no door writes this form yet and existing records keep theirs; every door loop installs this release and restarts its door on it before any later release that writes transport-rule records is installed, and a rollback from that later release returns to this release, not to 0.8.2, whose readers refuse the new source.
+
+- Read a door's workspace request against the grant its loop declared at launch, taken from the run's protected reservation through the registered runs descriptor and checked against the registered loop, run, worker and scope and the caller's node, with the request's original wire decoded once by the strict envelope decoder (``test:unit:door-workspace-request-binds-protected-grant-and-raw-wire``). Compatibility: no production caller selects this reader yet, so door requests, records and answers are unchanged and no operator acts.
+
+- Pair the workspace classifier's exact agent input with an escaped, display-only rendering of each execution word and shell text, and flag the U+2028 and U+2029 line separators with their field and byte offset (``test:unit:workspace-agent-input-pairs-readable-execution-with-exact-bytes``). Compatibility: no door request, record or route changes and no operator acts; the rendering appears only when a later release activates the workspace route.
+
+### Changed
+
+- Default the boxed Claude helper's owner credential path to access-only reads and publication; due or expired authority refuses without invoking the vendor program. An owner-held cutover request remains refused until carrier exclusion can be proved (``inv:superlooplane:one-claude-source-refresher``). Compatibility: the production Claude gate remains closed, Codex boxes are unchanged, and Claude owner checks can now refuse as `credential-read-due`, `credential-read-expired`, `credential-mode` or `credential-cutover-gate`.
+
+- Refuse named vendor credential variables in a box plan, owner sign-in binds at launch, and recognized credential files in image and install inputs as `credential-environment`, `credential-mount` and `credential-image-input`; pin the Claude periodic cutover refusal at its production entry (``inv:superlooplane:box-inputs-exclude-recognized-credentials``). Compatibility: the production Claude gate remains closed; Codex plans, launches, builds and installs now refuse the same recognized credential inputs, while ordinary Codex boxes and harvest keep their existing forms; a loop whose inputs are refused removes the named variable, bind or file and reruns the command.
+
+### Fixed
+
+- Admit the exact `tmp/arg0-linux` dispatch scratch tree alongside `tmp/arg0` during sign-in convergence, and raise the private installation report's bound from 65536 to 1048576 bytes, beneath the child runner's 2097152-byte output bound, so the report keeps its per-entry metadata for a vendor-maintained tree of several hundred changed entries (``test:crate:pilot-install-preserves-arg0-linux-dispatch-links``, ``test:crate:pilot-install-reports-large-fictional-sign-in-walk-in-preview-and-act``). Compatibility: previews and acts of `install`, with or without `--pilot` and `--refresh-proxy`, and of `repair` that refused on a link inside `tmp/arg0-linux` or on a private report between 65536 and 1048576 bytes now complete, and an acting installation without `--refresh-proxy`, or an acting repair, then converges the vendor-maintained `plugins`, `skills` and `cache` entries to owner-only modes and lists each repair; the report keeps its shape, every entry outside the two named scratch trees keeps its link and type refusals, a link refusal now names the full sign-in path and a remedy where it named only the entry, and an oversized refusal names the sign-in path and the inspection step.
+
+- Name the searched round window and each in-window worker delivery with its complete `bind-reply` command in a missing-binding launch refusal whose saved state admits a late binding; when none is present, name the box report that needs a hand reading, and null-readback settlement only when the saved state admits its preview. Compatibility: the refusal keeps its exit status and reservation state; its report and error detail now carry candidate instants and recovery commands, and no delivery is bound by launch.
+
+- Select the protected run's backend for `record-hosts`, observed-plan conflicts, network evidence and the network exercise, so a Claude run cannot read or write Codex's reviewed host list and `record-hosts` writes the reviewed names under the run's own backend (``test:unit:network-evidence-selects-saved-backend-hosts``). Compatibility: Codex-only loops keep the same host list, settings bytes and refusal details; a saved run whose backend program is no longer configured still refuses `missing-setting` from the saved-run loader before `record-hosts` writes anything, and the enforcing vendor proxy still serves only `vendor_hosts.codex`.
+
+- Run a Claude launch dry run through the launch's installed-input and read-only preview checks before the closed `backend-unavailable` gate; check source custody from metadata without reading its document, and the refresh-mode marker and any existing refresh lock as the act does without creating the lock, defer the unanswered Claude driver contract to launch time, and name the selected backend in setting refusals (``test:crate:claude-dry-run-reaches-every-launch-check-before-the-gate``). Compatibility: a Claude-only operator now sees the first launch check that refuses before the final runtime gate, whose refusal says the read-only checks passed and carries source custody metadata, while changing Claude launches remain gated first and Codex launch behavior is unchanged.
+
+- Select a Claude-only loop's configured backend in the public `plan` and `make-home --letter` forms and the free-worker-UID chooser; keep Codex as the default when both programs are configured (``test:integration:plan-previews-the-configured-boxed-backend``). Compatibility: a Claude-only candidate now reaches plan construction instead of refusing for absent `backend_argv.codex`, and `make-home --letter` now creates a Claude-shaped home for such a loop, with no credential file; existing Codex candidates keep their selection, and production Claude launch remains closed.
+
+- Rebuild saved-run plans for the backend named by their reservation across settlement, harvest, follow, checkpoint, import, checkout, exercise, rotation and resumed rounds; an absent backend in a legacy record keeps the Codex default. Service fixtures wait for joined threads to disappear from procfs under their hang guard (``test:unit:claude-only-settle-reads-recorded-backend``; ``test:unit:claude-only-resume-reads-recorded-backend``; ``test:unit:codex-only-record-readers-keep-the-default``). Compatibility: the production Claude gate remains closed and valid Codex runs retain their plan. A malformed or unsafe reservation can now be refused while the backend is selected, before a later saved-run check, and a loop whose settings are broken in more than one way may now see its registry or settings-grant refusal before the backend-setting refusal.
+
+- Carry the verified runs root into helper service and private runtime preparation instead of selecting a Codex plan to find the reservation; align the Claude fixture's installed paths with the loop root and default its held runtime to a stand-in (``test:unit:helper-service-plan-readers-keep-wrapped-gate``; ``test:unit:helper-service-refuses-a-run-outside-registry-runs-root``; ``test:crate:claude-service-fixture-defaults-to-held-standin-runtime``). Compatibility: the production Claude gate stays closed, and no refusal kind changes for a Codex loop: the helper service already reported a broken `backend_argv.codex` inside `helper-pin`, and private preparation still reports it as `missing-setting`, now after reading the run's reservation, so a preparation without a reservation reports `launch-reservation` first. No reservation or install record changes.
+
 ## [0.8.2] - 2026-11-20
 
 ### Fixed
@@ -1097,7 +1129,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/coraxloop/superloop-tools/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/coraxloop/superloop-tools/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/coraxloop/superloop-tools/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...v0.8.0

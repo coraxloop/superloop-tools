@@ -27,7 +27,7 @@ use crate::launch::{
 use crate::plan::protected_identifier_path;
 use crate::runtime_admission::RuntimeAdmission;
 use crate::settings::BoxBackend;
-use crate::{caller_home, load_plan, valid_run_name};
+use crate::{caller_home, valid_run_name};
 
 const PROMPT_LIMIT: usize = 1_048_576;
 const STREAM_LIMIT: usize = 67_108_864;
@@ -837,11 +837,19 @@ fn verify_vector(saved: &[String], expected: &[String]) -> Result<(), LaneError>
 #[cfg(test)]
 pub(crate) fn fixture_pinned_request(
     owner_home: &Path,
+    runs_root: &Path,
     run: &str,
     podman: &Path,
 ) -> Result<Value, LaneError> {
-    pinned_request_admitted(owner_home, "alpha", run, podman, &RuntimeAdmission::Gate)
-        .map(|request| request.record)
+    pinned_request_admitted(
+        owner_home,
+        "alpha",
+        run,
+        podman,
+        runs_root,
+        &RuntimeAdmission::Gate,
+    )
+    .map(|request| request.record)
 }
 
 #[cfg(test)]
@@ -854,15 +862,11 @@ fn pinned_request_admitted(
     loop_name: &str,
     run: &str,
     podman: &Path,
+    runs_root: &Path,
     admission: &RuntimeAdmission,
 ) -> Result<PinnedRequest, LaneError> {
     crate::pinned::owner_executable(podman, Uid::effective().as_raw())?;
-    let (initial, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
-    let root = initial
-        .driver_dir
-        .parent()
-        .ok_or_else(|| LaneError::input("helper-pin", "run has no runs root"))?;
-    let reservation = reservation_path(root, run);
+    let reservation = reservation_path(runs_root, run);
     let record = read_reservation(&reservation)?.ok_or_else(|| {
         LaneError::input("helper-pin", format!("{} is absent", reservation.display()))
     })?;
@@ -1840,12 +1844,13 @@ fn run_identity_at(
     run_dir: &Path,
     namespace_owner: u32,
 ) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
-    run_identity_at_admitted(
+    let (home, scope, run, program, _) = run_identity_at_admitted(
         owner_home,
         run_dir,
         namespace_owner,
         &RuntimeAdmission::Gate,
-    )
+    )?;
+    Ok((home, scope, run, program))
 }
 
 fn run_identity_at_admitted(
@@ -1853,11 +1858,13 @@ fn run_identity_at_admitted(
     run_dir: &Path,
     namespace_owner: u32,
     admission: &RuntimeAdmission,
-) -> Result<(PathBuf, String, String, PathBuf), LaneError> {
+) -> Result<(PathBuf, String, String, PathBuf, PathBuf), LaneError> {
     let (run, runs, _protected_root) = run_location(run_dir, namespace_owner)?;
     let record = read_reservation(&reservation_path(runs, &run))?
         .ok_or_else(|| LaneError::input("helper-pin", "protected run reservation is absent"))?;
-    run_identity_record_at(owner_home, run_dir, namespace_owner, &record, admission)
+    let (home, scope, run, program) =
+        run_identity_record_at(owner_home, run_dir, namespace_owner, &record, admission)?;
+    Ok((home, scope, run, program, runs.to_path_buf()))
 }
 
 fn run_location(
@@ -2669,13 +2676,39 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
             "rootless namespace owner is required",
         ));
     }
-    let (owner_home, loop_name, run, podman) = run_identity_at_admitted(
-        &caller_home()?,
-        run_dir,
-        Uid::effective().as_raw(),
+    serve_admitted_at(&caller_home()?, run_dir, admission)
+}
+
+#[cfg(test)]
+pub(crate) fn fixture_serve_admitted_at(
+    owner_home: &Path,
+    run_dir: &Path,
+    admission: &RuntimeAdmission,
+) -> Result<(), LaneError> {
+    serve_admitted_at(owner_home, run_dir, admission)
+}
+
+fn serve_admitted_at(
+    owner_home: &Path,
+    run_dir: &Path,
+    admission: &RuntimeAdmission,
+) -> Result<(), LaneError> {
+    if !Uid::effective().is_root() {
+        return Err(LaneError::input(
+            "helper-identity",
+            "rootless namespace owner is required",
+        ));
+    }
+    let (owner_home, loop_name, run, podman, runs_root) =
+        run_identity_at_admitted(owner_home, run_dir, Uid::effective().as_raw(), admission)?;
+    let initial = pinned_request_admitted(
+        &owner_home,
+        &loop_name,
+        &run,
+        &podman,
+        &runs_root,
         admission,
     )?;
-    let initial = pinned_request_admitted(&owner_home, &loop_name, &run, &podman, admission)?;
     attempt_vector(&initial.argv, &initial.driver_dir, 1)?;
     let live_rollback = initial.record.get("round_rollback").is_some();
     let loop_uid = initial.loop_uid;
@@ -2702,11 +2735,9 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
             ),
         ));
     }
-    let root = driver_dir
-        .parent()
-        .ok_or_else(|| LaneError::input("helper-pin", "runs root absent"))?;
-    let reservation = reservation_path(root, &run);
-    let backend = publish_helper_identity_admitted(&owner_home, &loop_name, &run, root, admission)?;
+    let reservation = reservation_path(&runs_root, &run);
+    let backend =
+        publish_helper_identity_admitted(&owner_home, &loop_name, &run, &runs_root, admission)?;
     let mut resources = ServiceResources::new();
     resources.run_registered(
         (socket_slot, control_slot),
@@ -2716,7 +2747,7 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
             spawn_credential_authority_admitted(
                 owner_home.clone(),
                 loop_name.clone(),
-                root.to_path_buf(),
+                runs_root.clone(),
                 driver_dir.clone(),
                 backend,
                 cancelled,
@@ -2743,7 +2774,13 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
             serve_attempts(
                 resources,
                 (&owner_home, &loop_name, &run, &podman),
-                (&driver_dir, &reservation, loop_uid, initial.launcher),
+                (
+                    &driver_dir,
+                    &reservation,
+                    &runs_root,
+                    loop_uid,
+                    initial.launcher,
+                ),
                 admission,
             )
         },
@@ -2753,11 +2790,11 @@ fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), La
 fn serve_attempts(
     resources: &ServiceResources,
     identity: (&Path, &str, &str, &Path),
-    run_state: (&Path, &Path, u32, LauncherIdentity),
+    run_state: (&Path, &Path, &Path, u32, LauncherIdentity),
     admission: &RuntimeAdmission,
 ) -> Result<(), LaneError> {
     let (owner_home, loop_name, run, podman) = identity;
-    let (driver_dir, reservation, loop_uid, launcher) = run_state;
+    let (driver_dir, reservation, runs_root, loop_uid, launcher) = run_state;
     let socket = resources.socket.as_ref().expect("bound request socket");
     let listener = &socket.listener;
     let socket_slot = &socket.slot;
@@ -2787,7 +2824,8 @@ fn serve_attempts(
                 "the loop-group socket changed during the run",
             ));
         }
-        let request = pinned_request_admitted(owner_home, loop_name, run, podman, admission)?;
+        let request =
+            pinned_request_admitted(owner_home, loop_name, run, podman, runs_root, admission)?;
         if request.loop_uid != loop_uid || request.driver_dir != driver_dir {
             return Err(LaneError::input(
                 "helper-pin",
@@ -4067,6 +4105,21 @@ mod tests {
         use std::os::unix::fs::MetadataExt as _;
 
         let (fixture, run, _) = custom_runs_fixture();
+        let settings = fixture.path().join(".config/loops/alpha/workers.toml");
+        let mut configured: toml::Table =
+            toml::from_str(&fs::read_to_string(&settings).expect("settings"))
+                .expect("settings TOML");
+        let mut backend = toml::map::Map::new();
+        backend.insert(
+            "claude".into(),
+            toml::Value::Array(vec![toml::Value::String("/usr/bin/true".into())]),
+        );
+        configured["backend_argv"] = toml::Value::Table(backend);
+        fs::write(
+            &settings,
+            toml::to_string(&configured).expect("Claude-only settings"),
+        )
+        .expect("replace backend settings");
         let root = run.parent().expect("runs root");
         let reservation = crate::launch::reservation_path(root, "R");
         let mut record: Value =
@@ -4078,6 +4131,7 @@ mod tests {
             "alpha",
             "R",
             Path::new("/usr/bin/podman"),
+            root,
             &Gate,
         )
         .err()
@@ -4098,6 +4152,7 @@ mod tests {
                 "alpha",
                 "R",
                 Path::new("/usr/bin/podman"),
+                root,
                 &Gate,
             )
             .err()
@@ -4128,6 +4183,7 @@ mod tests {
                     "alpha",
                     "R",
                     Path::new("/usr/bin/podman"),
+                    root,
                     &Gate,
                 )
                 .map(|_| ()),
@@ -4139,6 +4195,34 @@ mod tests {
         assert_eq!(
             fs::metadata(&reservation).expect("unchanged inode").ino(),
             inode
+        );
+    }
+
+    /// # Panics
+    /// Panics only if the verified run parent is accepted as another registry root.
+    /// ´test:unit:helper-service-refuses-a-run-outside-registry-runs-root´
+    #[test]
+    fn helper_service_refuses_a_run_outside_registry_runs_root() {
+        let (fixture, run, _) = custom_runs_fixture();
+        let reservation = crate::launch::reservation_path(run.parent().expect("runs"), "R");
+        let record: Value = serde_json::from_slice(&fs::read(reservation).expect("reservation"))
+            .expect("reservation JSON");
+        let other = fixture.path().join("other");
+        fs::create_dir(&other).expect("alternate root");
+        let wrong = other.join("R");
+        fs::create_dir(&wrong).expect("alternate run");
+        let error = super::run_identity_record_at(
+            fixture.path(),
+            &wrong,
+            nix::unistd::Uid::effective().as_raw(),
+            &record,
+            &Gate,
+        )
+        .expect_err("registry root differs");
+        assert_eq!(error.kind, "helper-pin", "{error:?}");
+        assert_eq!(
+            error.detail,
+            "run directory is outside the planned runs root"
         );
     }
 
@@ -4670,9 +4754,16 @@ mod tests {
             .expect("ready helper sees the program");
         fs::remove_file(&program).expect("replace between readiness and request");
         std::os::unix::fs::symlink("/usr/bin/true", &program).expect("replacement link");
-        let refusal = pinned_request_admitted(fixture.path(), "alpha", "R", &program, &Gate)
-            .err()
-            .expect("request checks the executable before reading the run");
+        let refusal = pinned_request_admitted(
+            fixture.path(),
+            "alpha",
+            "R",
+            &program,
+            fixture.path(),
+            &Gate,
+        )
+        .err()
+        .expect("request checks the executable before reading the run");
         assert_eq!(refusal.kind, "owner-program");
     }
 

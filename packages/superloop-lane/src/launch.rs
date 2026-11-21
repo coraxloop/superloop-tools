@@ -29,6 +29,19 @@ use crate::plan::{Plan, protected_identifier_path, protected_identity_dir};
 use crate::settings::Settings;
 use crate::{load_plan, valid_run_name};
 
+/// Read the current host list for the backend bound into a protected plan.
+pub(crate) fn selected_vendor_hosts<'a>(
+    settings: &'a Settings,
+    plan: &Value,
+) -> Result<(crate::settings::BoxBackend, &'a [String]), LaneError> {
+    let backend = crate::settings::BoxBackend::from_plan(plan)?;
+    let hosts = settings
+        .vendor_hosts
+        .get(backend.name())
+        .map_or(&[][..], Vec::as_slice);
+    Ok((backend, hosts))
+}
+
 pub mod admission;
 pub mod bound_roots;
 pub mod census;
@@ -774,8 +787,11 @@ fn driver_runtime_contract(
     owner_home: &Path,
     environment: &BTreeMap<String, String>,
     backend: crate::settings::BoxBackend,
+    preview: bool,
 ) -> Result<&'static str, LaneError> {
-    backend.require_runtime()?;
+    if !preview {
+        backend.require_runtime()?;
+    }
     let answer = build::run_checked(
         driver,
         [
@@ -805,6 +821,25 @@ fn driver_runtime_contract(
         ));
     }
     Ok("boxed-runtime 1")
+}
+
+fn preview_backend_gate(
+    owner_home: &Path,
+    loop_name: &str,
+    backend: crate::settings::BoxBackend,
+) -> Result<(), LaneError> {
+    if backend == crate::settings::BoxBackend::Codex {
+        return Ok(());
+    }
+    let custody = crate::credential::claude_source_custody_preview(owner_home, loop_name)?;
+    backend.require_runtime().map_err(|mut error| {
+        std::fmt::Write::write_fmt(
+            &mut error.detail,
+            format_args!("; all read-only launch preview checks passed; runtime admission remains closed; source custody {custody}; Claude driver contract is checked on launch"),
+        )
+        .expect("writing to a String cannot fail");
+        error
+    })
 }
 
 pub(crate) fn private_podman_environment_from(
@@ -1000,6 +1035,17 @@ pub(crate) fn door_registration_from_record(
         }
     };
     crate::door::Registration::from_row(row, loop_name, run, peer_uid, scope)
+}
+
+/// Read one door reservation through the same protected descriptor path used by registration.
+/// # Errors
+/// Refuses a missing, replaced or unprotected reservation.
+pub(crate) fn door_reservation(
+    runs: &std::os::fd::OwnedFd,
+    run: &str,
+    owner: u32,
+) -> Result<Value, LaneError> {
+    checkout::read_record_bound(runs, run, owner).map(|(record, _)| record)
 }
 
 pub(crate) fn door_probe_registration(
@@ -1748,6 +1794,16 @@ pub(crate) fn record_hosts_with_lane_bin_from(
         crate::install::lock_loop_config(&config, request.dry_run || request.list)?;
     let (plan, settings) =
         crate::load_plan_for_record(owner_home, &request.loop_name, &request.run, (0, 0))?;
+    let (backend, configured_hosts) = selected_vendor_hosts(&settings, &plan.document)?;
+    if !settings.backend_argv.contains_key(backend.name()) {
+        return Err(LaneError::input(
+            "missing-setting",
+            format!(
+                "backend_argv.{} is absent for this saved run",
+                backend.name()
+            ),
+        ));
+    }
     crate::pinned::owner_executable(&request.podman_bin, Uid::effective().as_raw())?;
     let environment = launch_environment(owner_home)?;
     let verified_home =
@@ -1816,15 +1872,14 @@ pub(crate) fn record_hosts_with_lane_bin_from(
             ));
         }
     }
-    let previous = settings
-        .vendor_hosts
-        .get("codex")
-        .cloned()
-        .unwrap_or_default();
+    let previous = configured_hosts.to_vec();
     if !previous.is_empty() && previous != request.hosts {
         return Err(LaneError::input(
             "host-list",
-            "vendor_hosts.codex already differs; a separate reviewed update is required",
+            format!(
+                "vendor_hosts.{} already differs; a separate reviewed update is required",
+                backend.name()
+            ),
         ));
     }
     let changed = previous.is_empty();
@@ -1840,7 +1895,7 @@ pub(crate) fn record_hosts_with_lane_bin_from(
         .cloned()
         .unwrap_or_default();
     vendor_hosts.insert(
-        "codex".into(),
+        backend.name().into(),
         toml::Value::Array(
             request
                 .hosts
@@ -1860,7 +1915,7 @@ pub(crate) fn record_hosts_with_lane_bin_from(
         build::publish(&settings_path, updated.as_bytes())?;
         let check = Settings::read(&settings_path)?;
         check.validate_grant(owner_home, &request.loop_name)?;
-        if check.vendor_hosts.get("codex") != Some(&request.hosts) {
+        if check.vendor_hosts.get(backend.name()) != Some(&request.hosts) {
             return Err(LaneError::operation(
                 "settings-write",
                 "host list check differs",
@@ -1913,6 +1968,18 @@ pub(crate) fn check_mount_roots(
             .as_str()
             .ok_or_else(|| LaneError::operation("plan-json", "mount source is absent"))?;
         let source = Path::new(source);
+        let loop_config = owner_home.join(".config/loops").join(loop_name);
+        let sign_ins = [loop_config.join("claude"), loop_config.join("lanes/codex")];
+        if source == owner_home
+            || sign_ins
+                .iter()
+                .any(|home| source.starts_with(home) || home.starts_with(source))
+        {
+            return Err(LaneError::input(
+                "credential-mount",
+                "owner home or loop sign-in source is not a worker bind",
+            ));
+        }
         if mount["target"] == "/mail" {
             let identity: loop_home::mail::birth::Identity =
                 serde_json::from_value(plan.document["mail"]["identity"].clone())
@@ -3918,13 +3985,23 @@ fn run_with_program(
     let (_admission, mut generation_guard) =
         crate::install::lock_launch_generation(&config, request.dry_run)?;
     admission::ensure_open(&config, caller.0)?;
-    let (mut plan, settings) = crate::load_launch_plan(
-        owner_home,
-        &request.loop_name,
-        &request.run,
-        (0, 0),
-        request.backend,
-    )?;
+    let (mut plan, settings) = if request.dry_run {
+        crate::load_launch_preview_plan(
+            owner_home,
+            &request.loop_name,
+            &request.run,
+            (0, 0),
+            request.backend,
+        )?
+    } else {
+        crate::load_launch_plan(
+            owner_home,
+            &request.loop_name,
+            &request.run,
+            (0, 0),
+            request.backend,
+        )?
+    };
     let prior_workspace = read_reservation(&reservation_path(
         plan.driver_dir
             .parent()
@@ -3958,11 +4035,19 @@ fn run_with_program(
         .backend_argv
         .get(selected_backend.name())
         .and_then(|words| words.first())
-        .ok_or_else(|| LaneError::input("missing-setting", "backend_argv.codex is absent"))?;
+        .ok_or_else(|| {
+            LaneError::input(
+                "missing-setting",
+                format!("backend_argv.{} is absent", selected_backend.name()),
+            )
+        })?;
     if !Path::new(backend).is_absolute() {
         return Err(LaneError::input(
             "missing-setting",
-            "backend_argv.codex program is not absolute",
+            format!(
+                "backend_argv.{} program is not absolute",
+                selected_backend.name()
+            ),
         ));
     }
     if request.observe {
@@ -3973,7 +4058,10 @@ fn run_with_program(
         {
             return Err(LaneError::input(
                 "observe-conflict",
-                "vendor_hosts.codex is already set; use an enforcing launch",
+                format!(
+                    "vendor_hosts.{} is already set; use an enforcing launch",
+                    selected_backend.name()
+                ),
             ));
         }
         plan.observe_vendor()?;
@@ -3984,7 +4072,10 @@ fn run_with_program(
     {
         return Err(LaneError::input(
             "missing-setting",
-            "vendor_hosts.codex is empty; use --observe for one named first run",
+            format!(
+                "vendor_hosts.{} is empty; use --observe for one named first run",
+                selected_backend.name()
+            ),
         ));
     }
     let root = plan
@@ -4030,10 +4121,15 @@ fn run_with_program(
     let fresh_dir = planned_step_dir(&plan, "dispatch")?;
     let launch_argv = entry_argv(driver, &plan, request, &fresh_dir)?;
     let setup_argv = runtime_prepare_argv(&exe_word, &podman_word, owner_home, request)?;
+    let backend_check = if selected_backend == crate::settings::BoxBackend::Codex {
+        "backend_argv.codex program"
+    } else {
+        "backend_argv.claude program"
+    };
     let mut checks = vec![
         "box gate: container options, read-only root and template, worker-owned writable leaves, proxy route",
         "worker UID allocation",
-        "backend_argv.codex program",
+        backend_check,
         "bound mount roots",
         "installed template hashes",
         "recorded image identifier",
@@ -4060,10 +4156,24 @@ fn run_with_program(
     crate::pinned::owner_executable(Path::new(&podman_word), Uid::effective().as_raw())?;
     crate::pinned::owner_executable(entry, caller.0)?;
     executable(driver, "lane driver")?;
-    let driver_contract =
-        driver_runtime_contract(driver, owner_home, &environment, selected_backend)?;
+    let deferred_claude_contract =
+        request.dry_run && selected_backend == crate::settings::BoxBackend::Claude;
+    let driver_contract = if deferred_claude_contract {
+        checks_on_launch.push("Claude driver boxed-runtime contract");
+        "checked on launch"
+    } else {
+        driver_runtime_contract(
+            driver,
+            owner_home,
+            &environment,
+            selected_backend,
+            request.dry_run,
+        )?
+    };
     let driver_sha256 = sha256(driver)?;
-    checks.push("driver boxed-runtime contract");
+    if !deferred_claude_contract {
+        checks.push("driver boxed-runtime contract");
+    }
     checks.push("entry deployment and boxed interface version");
     let report = image_report(owner_home, &request.loop_name, selected_backend)?;
     if report["image_digest"] != image {
@@ -4122,6 +4232,7 @@ fn run_with_program(
         )?;
         if request.dry_run {
             checks.push("interrupted settlement process identities and complete attempt evidence");
+            preview_backend_gate(owner_home, &request.loop_name, selected_backend)?;
             return Ok(
                 json!({"schema":1,"command":"launch","dry_run":true,"plan":plan.document,"proxy_service":proxy_service,"bound_source_matrix":{"state":"not-applicable","reason":"interrupted settlement starts no new container"},"interrupted_settlement":preview,"checks_performed":checks,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
             );
@@ -4164,7 +4275,11 @@ fn run_with_program(
     let reservation_census =
         json!({"skipped_count":skipped_runs.len(),"skipped_names":skipped_runs});
     select_worker_identity(&mut plan, owner_home, &request.loop_name, worker_uid)?;
-    crate::plan::verify_box_attestation(&plan.document)?;
+    if request.dry_run {
+        crate::plan::verify_box_attestation_structure(&plan.document)?;
+    } else {
+        crate::plan::verify_box_attestation(&plan.document)?;
+    }
     let box_gate = plan.document["box_gate"].clone();
     let dry_recovery = if request.dry_run {
         preview_dead_preparation(
@@ -4256,6 +4371,7 @@ fn run_with_program(
             report["workspace_declaration_digest"] =
                 json!(workspace::declaration_digest(declaration)?);
         }
+        preview_backend_gate(owner_home, &request.loop_name, selected_backend)?;
         return Ok(report);
     }
     let _preparation_lease = lock_run_preparation(&root, &request.run, caller.0)?;
@@ -4540,6 +4656,8 @@ fn run_with_program(
     publish_reservation(&reservation, &record)?;
     let mut driver_started = false;
     let mut child_end = build::ChildEnd::default();
+    let reply_window_start = loop_home::mail::instant::Instant::now()
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
     let result = crate::container_helper::host_launch_bound(&record).and_then(|bound| {
         build::run_checked_with_pid(
             entry,
@@ -4580,6 +4698,8 @@ fn run_with_program(
         "driver_end",
         driver_completion(&result, driver_started, &child_end),
     )?;
+    let reply_window_end = loop_home::mail::instant::Instant::now()
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
     let helper_stop = stop_helper(&mut helper, &plan, &verified_runs);
     if let Some(status) = helper
         .try_wait()
@@ -4649,7 +4769,7 @@ fn run_with_program(
     crate::pinned::owner_executable(Path::new(&exe_word), caller.0)?;
     let settlement = build::run_checked_with_private_launch(
         &request.podman_bin,
-        settle_argv,
+        settle_argv.clone(),
         &environment,
         owner_home,
         60,
@@ -4740,6 +4860,38 @@ fn run_with_program(
     );
     let round_dir = report::round_dir(&plan, &record, None)?;
     publish_reservation(&reservation, &record)?;
+    let mut report_record = record.clone();
+    if settlement
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.line().contains(steering::MISSING_REPLY_BINDING))
+    {
+        let mut select_argv = settle_argv;
+        select_argv.extend([
+            "--select-reply".into(),
+            "--window-start".into(),
+            reply_window_start.to_string(),
+            "--window-end".into(),
+            reply_window_end.to_string(),
+        ]);
+        report_record["reply_candidate_observation"] = build::run_checked_with_private_launch(
+            &request.podman_bin,
+            select_argv,
+            &environment,
+            owner_home,
+            60,
+            "reply-candidates",
+            &verified_home,
+            &root,
+            &verified_runs,
+            None,
+        )
+        .and_then(|output| {
+            serde_json::from_str::<Value>(&output)
+                .map_err(|error| LaneError::input("reply-candidates", error.to_string()))
+        })
+        .unwrap_or_else(|error| json!({"error":error.line()}));
+    }
     let report: Result<Value, LaneError> = (|| {
         let settlement_report = report::settlement_result(
             &settlement,
@@ -4748,7 +4900,7 @@ fn run_with_program(
             record["active_round"]
                 .as_str()
                 .ok_or_else(|| LaneError::input("launch-report", "active round is absent"))?,
-            &record,
+            &report_record,
         )?;
         let output = result.as_ref().map_or_else(LaneError::line, Clone::clone);
         let publication = report::credential_publication(&record)?;
@@ -4866,6 +5018,31 @@ fn record_failed_pre_driver(
             || record["observer_end"]["state"] == "uncertain"
     );
     publish_reservation(reservation, &record)
+}
+
+/// List a completed round's candidate inbox names in the settlement namespace.
+///
+/// # Errors
+/// Refuses an invalid window, missing reservation or untrusted namespace.
+pub fn private_reply_candidates(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    window_start: &str,
+    window_end: &str,
+) -> Result<Value, LaneError> {
+    if !nix::unistd::Uid::effective().is_root() {
+        return Err(LaneError::input(
+            "namespace-owner",
+            "rootless namespace root is required",
+        ));
+    }
+    let (plan, _) = crate::load_plan_for_record(owner_home, loop_name, run, (0, 0))?;
+    let start = loop_home::mail::instant::Instant::parse(window_start)
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
+    let end = loop_home::mail::instant::Instant::parse(window_end)
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
+    steering::round_reply_candidates(owner_home, &plan, run, &start, &end)
 }
 
 /// Verify the driver directory and record the worker reply outside its home.
@@ -7227,6 +7404,7 @@ pub(crate) fn pinned_plan_from_record_admitted(
 #[allow(clippy::too_many_lines)]
 pub fn private_prepare_runtime(
     owner_home: &Path,
+    runs_root: &Path,
     loop_name: &str,
     run: &str,
     podman: &Path,
@@ -7242,14 +7420,8 @@ pub fn private_prepare_runtime(
         return Err(LaneError::input("run-name", format!("bad run name: {run}")));
     }
     crate::pinned::owner_executable(podman, Uid::effective().as_raw())?;
-    let (initial, _) = load_plan(owner_home, loop_name, run, (0, 0))?;
-    let driver_dir = initial.driver_dir;
-    let reservation = reservation_path(
-        driver_dir
-            .parent()
-            .ok_or_else(|| LaneError::input("plan-read", "run has no runs root"))?,
-        run,
-    );
+    let driver_dir = runs_root.join(run);
+    let reservation = reservation_path(runs_root, run);
     let record = read_reservation(&reservation)?.ok_or_else(|| {
         LaneError::input(
             "launch-reservation",
@@ -7263,16 +7435,18 @@ pub fn private_prepare_runtime(
         ));
     }
     let (plan, settings) = pinned_plan_from_record(owner_home, loop_name, run, podman, &record)?;
+    if plan.driver_dir != driver_dir {
+        return Err(LaneError::input(
+            "launch-reservation",
+            "verified runs root differs from the registry plan",
+        ));
+    }
+    let (backend, configured_hosts) = selected_vendor_hosts(&settings, &plan.document)?;
     let observed = plan.document["vendor_mode"].is_string();
-    if observed
-        && settings
-            .vendor_hosts
-            .get("codex")
-            .is_some_and(|hosts| !hosts.is_empty())
-    {
+    if observed && !configured_hosts.is_empty() {
         return Err(LaneError::input(
             "observe-conflict",
-            "vendor_hosts.codex is already set",
+            format!("vendor_hosts.{} is already set", backend.name()),
         ));
     }
     let birth: loop_home::mail::birth::Identity =
@@ -7291,8 +7465,8 @@ pub fn private_prepare_runtime(
     custody
         .verify_birth(owner_home, loop_name, &birth)
         .map_err(|error| LaneError::input("mail-birth", error.to_string()))?;
-    crate::plan::verify_box_attestation(&plan.document)?;
     check_mount_roots(&plan, &settings, owner_home)?;
+    crate::plan::verify_box_attestation(&plan.document)?;
     check_pins(&plan, &settings, owner_home, observed, true)?;
     if let Ok(stage) = std::env::var("SUPERLOOP_MATRIX_STAGE") {
         let evidence_path = protected_identity_dir(&driver_dir)?.join("launch-evidence.json");
@@ -7688,6 +7862,38 @@ mod tests {
             let error = result.expect_err("unsafe mail mount");
             assert_eq!(error.kind, "mail-mount");
             assert_eq!(error.detail, "mail source is not this worker's endpoint");
+        }
+    }
+
+    /// # Panics
+    /// Panics if launch preflight accepts an owner home or loop sign-in bind.
+    /// ´test:unit:box-launch-refuses-owner-credential-binds-before-start´
+    #[test]
+    fn box_launch_refuses_owner_credential_binds_before_start() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let owner = fixture.path();
+        let loop_root = owner.join(".var/loops/alpha");
+        let mut settings = crate::tests::fixture_settings(std::path::Path::new("/usr/bin/true"));
+        settings.image_digest = Some("sha256:abc".into());
+        settings.template_dir = Some(loop_root.join("runner-templates/codex/abc"));
+        settings.socket_dir = Some(loop_root.join("sockets"));
+        for source in [
+            owner.to_path_buf(),
+            owner.join(".config/loops/alpha/claude"),
+            owner.join(".config/loops/alpha/lanes/codex"),
+            owner.join(".config/loops/alpha"),
+        ] {
+            let plan = crate::plan::Plan {
+                home: loop_root.join("worker-homes/R"),
+                driver_dir: loop_root.join("runs/R"),
+                letter: owner.join("briefing"),
+                document: serde_json::json!({"loop":"alpha", "backend":"codex",
+                    "mounts":[{"kind":"bind", "source":source,
+                        "target":"/home/worker/exposed", "access":"ro"}]}),
+            };
+            let error = super::check_mount_roots(&plan, &settings, owner)
+                .expect_err("credential bind must refuse before launch");
+            assert_eq!(error.kind, "credential-mount", "{error:?}");
         }
     }
 
@@ -9656,6 +9862,7 @@ mod tests {
             fixture.path(),
             &BTreeMap::new(),
             crate::settings::BoxBackend::Claude,
+            false,
         )
         .expect_err("gate before driver probe");
         assert_eq!(error.status, 2);
@@ -9694,6 +9901,7 @@ mod tests {
                 fixture.path(),
                 &BTreeMap::new(),
                 crate::settings::BoxBackend::Codex,
+                false,
             );
             assert_eq!(result.is_ok(), accepted, "{script}: {result:?}");
             if !accepted {
