@@ -226,6 +226,42 @@ fn workspace_judgement_input_reader_binds_exact_execution() {
     );
 }
 
+/// ´test:unit:workspace-judgement-reader-requires-flag-coverage-floor´
+#[test]
+fn workspace_judgement_reader_requires_flag_coverage_floor() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let mut envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    envelope.execution = execute_command::workspace::Execution::Argv {
+        words: vec!["сargo".as_bytes().to_vec()],
+    };
+    let row = approved_record(&store, "R:2b", &envelope).into_value();
+    let mut missing = row.clone();
+    missing["workspace_agent_input"]["flagged_code_points"]["rows"] = json!([]);
+    missing["workspace_agent_input"]["flagged_code_points"]["omitted_count"] = json!(0);
+    assert_eq!(
+        RequestRecord::decode(missing.clone()).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+    missing["workspace_agent_input"]["flagged_code_points"]["omitted_count"] = json!(1);
+    RequestRecord::decode(missing).expect("the omitted count covers the Cyrillic point");
+}
+
+/// ´test:unit:workspace-judgement-reader-accepts-true-ascii-extra-flag´
+#[test]
+fn workspace_judgement_reader_accepts_true_ascii_extra_flag() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let mut envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    envelope.execution = execute_command::workspace::Execution::Argv {
+        words: vec!["сargo".as_bytes().to_vec()],
+    };
+    let mut row = approved_record(&store, "R:2c", &envelope).into_value();
+    row["workspace_agent_input"]["flagged_code_points"]["rows"]
+        .as_array_mut().unwrap().push(json!({"field":"execution.words[0]","first_byte_offset":2,"code_point":"U+0061","count":1}));
+    RequestRecord::decode(row).expect("a true ASCII row is allowed beyond the floor");
+}
+
 /// ´test:unit:workspace-judgement-input-refused-on-unjudged-intent´
 #[test]
 fn workspace_judgement_input_refused_on_unjudged_intent() {

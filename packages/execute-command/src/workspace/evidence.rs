@@ -181,6 +181,60 @@ fn field_bytes<'a>(field: &str, envelope: &'a Envelope) -> Option<&'a [u8]> {
     None
 }
 
+fn all_field_bytes(envelope: &Envelope) -> Vec<(String, &[u8])> {
+    let mut fields = Vec::new();
+    match &envelope.execution {
+        Execution::Argv { words } => {
+            for (i, word) in words.iter().enumerate() {
+                fields.push((format!("execution.words[{i}]"), word.as_slice()));
+            }
+        }
+        Execution::Sequence { steps } => {
+            for (step, words) in steps.iter().enumerate() {
+                for (i, word) in words.iter().enumerate() {
+                    fields.push((format!("execution.steps[{step}][{i}]"), word.as_slice()));
+                }
+            }
+        }
+        Execution::Shell { shell, text } => {
+            fields.push(("execution.shell".into(), shell.as_bytes()));
+            fields.push(("execution.text".into(), text.as_bytes()));
+        }
+    }
+    for (i, component) in envelope.cwd.iter().enumerate() {
+        fields.push((format!("cwd[{i}]"), component.as_bytes()));
+    }
+    for (i, (name, value)) in envelope.env_additions.iter().enumerate() {
+        fields.push((format!("env_additions[{i}].name"), name.as_bytes()));
+        fields.push((format!("env_additions[{i}].value"), value.as_bytes()));
+    }
+    fields
+}
+
+fn distinct_points(bytes: &[u8]) -> std::collections::BTreeSet<char> {
+    let mut points = std::collections::BTreeSet::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        let (valid, skip) = match std::str::from_utf8(rest) {
+            Ok(s) => (s, 0),
+            Err(error) => (
+                std::str::from_utf8(&rest[..error.valid_up_to()]).unwrap_or_default(),
+                error
+                    .error_len()
+                    .unwrap_or_else(|| rest.len() - error.valid_up_to()),
+            ),
+        };
+        points.extend(valid.chars());
+        offset += valid.len() + skip;
+    }
+    points
+}
+
+const fn floor_point(point: char) -> bool {
+    !point.is_ascii() || matches!(point, '\0'..='\u{001f}' | '\u{007f}')
+}
+
 fn point_at(bytes: &[u8], offset: usize) -> Option<char> {
     let tail = bytes.get(offset..)?;
     (1..=4).find_map(|len| {
@@ -289,6 +343,22 @@ pub fn validate_agent_observation(
         {
             return Err(protocol("workspace judgement flag truth differs"));
         }
+    }
+    let mut missing_floor = 0;
+    let mut available_unrowed = 0;
+    for (field, bytes) in all_field_bytes(envelope) {
+        for point in distinct_points(bytes) {
+            if !seen.contains(&(field.as_str(), point)) {
+                available_unrowed += 1;
+                if floor_point(point) {
+                    missing_floor += 1;
+                }
+            }
+        }
+    }
+    let omitted = flags["omitted_count"].as_u64().unwrap_or_default();
+    if omitted < missing_floor || omitted > available_unrowed {
+        return Err(protocol("workspace judgement flag coverage differs"));
     }
     Ok(())
 }
