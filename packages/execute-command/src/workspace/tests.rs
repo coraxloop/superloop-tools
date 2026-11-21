@@ -399,7 +399,13 @@ fn workspace_agent_input_is_lossless_and_flags_code_points() {
     let input = agent_input(&e, &g, &["unknown".into()]).unwrap();
     assert_eq!(input["execution"], json!(e.execution));
     assert_eq!(input["execution"]["words"][1], json!([255, 254]));
-    assert_eq!(input["flagged_code_points"].as_array().unwrap().len(), 5);
+    assert_eq!(
+        input["flagged_code_points"]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        5
+    );
     assert!(input["flagged_code_points"].to_string().contains("U+2028"));
     assert!(input["flagged_code_points"].to_string().contains("U+2029"));
     e.execution = Execution::Shell {
@@ -408,7 +414,105 @@ fn workspace_agent_input_is_lossless_and_flags_code_points() {
     };
     let input = agent_input(&e, &g, &[]).unwrap();
     assert_eq!(input["execution"], json!(e.execution));
-    assert_eq!(input["flagged_code_points"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        input["flagged_code_points"]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+}
+/// ´test:unit:workspace-escape-debug-pins-toolchain-character-tables´
+#[test]
+fn workspace_escape_debug_pins_toolchain_character_tables() {
+    let (mut envelope, grant, _, _) = fixture();
+    for (text, escaped) in [
+        ("\u{00a0}", "\\u{a0}"),
+        ("\u{2028}", "\\u{2028}"),
+        ("\u{3164}", "\\u{3164}"),
+        ("a\u{0301}", "a\\u{301}"),
+    ] {
+        envelope.execution = Execution::Argv {
+            words: vec![b"program".to_vec(), text.as_bytes().to_vec()],
+        };
+        let shown = agent_input(&envelope, &grant, &[]).unwrap();
+        assert_eq!(
+            shown["execution_readable_display_only"]["words"][1],
+            escaped
+        );
+    }
+}
+/// ´test:unit:workspace-agent-input-flags-non-ascii-in-every-execution-field´
+#[test]
+fn workspace_agent_input_flags_non_ascii_in_every_execution_field() {
+    let (mut envelope, grant, _, _) = fixture();
+    envelope.cwd = vec!["réports".into()];
+    envelope.env_additions = vec![("LABEL".into(), "café".into())];
+    envelope.execution = Execution::Argv {
+        words: vec!["сargo".as_bytes().to_vec(), "a\u{0301}".as_bytes().to_vec()],
+    };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    assert_eq!(input["execution"], json!(envelope.execution));
+    for (field, point) in [
+        ("execution.words[0]", "U+0441"),
+        ("execution.words[1]", "U+0301"),
+        ("cwd[0]", "U+00E9"),
+        ("env_additions[0].value", "U+00E9"),
+    ] {
+        assert!(
+            input["flagged_code_points"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["field"] == field && row["code_point"] == point)
+        );
+    }
+    envelope.execution = Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "echo a−b a∕b a⁄b Ａ𝒜\u{3164}".into(),
+    };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    for point in ["U+2212", "U+2215", "U+2044", "U+FF21", "U+1D49C", "U+3164"] {
+        assert!(
+            input["flagged_code_points"]["rows"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|row| row["field"] == "execution.text" && row["code_point"] == point)
+        );
+    }
+}
+
+/// ´test:unit:workspace-agent-input-compacts-repeated-flags-and-bounds-rows´
+#[test]
+fn workspace_agent_input_compacts_repeated_flags_and_bounds_rows() {
+    let (mut envelope, grant, _, _) = fixture();
+    envelope.execution = Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "é".repeat(1000),
+    };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    let rows = input["flagged_code_points"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0]["count"], 1000);
+    assert_eq!(rows[0]["first_byte_offset"], 0);
+    assert_eq!(input["flagged_code_points"]["omitted_count"], 0);
+    validate_agent_observation(&input, &envelope, &grant).unwrap();
+
+    envelope.execution = Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: (0x400..0x450).filter_map(char::from_u32).collect(),
+    };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    assert_eq!(
+        input["flagged_code_points"]["rows"]
+            .as_array()
+            .unwrap()
+            .len(),
+        64
+    );
+    assert_eq!(input["flagged_code_points"]["omitted_count"], 16);
+    validate_agent_observation(&input, &envelope, &grant).unwrap();
 }
 /// ´test:unit:workspace-agent-input-pairs-readable-execution-with-exact-bytes´
 #[test]
@@ -435,8 +539,14 @@ fn workspace_agent_input_pairs_readable_execution_with_exact_bytes() {
     let input = agent_input(&envelope, &grant, &[]).unwrap();
     assert_eq!(input["execution"], json!(envelope.execution));
     assert_eq!(input["execution_readable_display_only"]["kind"], "shell");
-    assert_eq!(input["flagged_code_points"][0]["code_point"], "U+2028");
-    assert_eq!(input["flagged_code_points"][0]["field"], "execution.text");
+    assert_eq!(
+        input["flagged_code_points"]["rows"][0]["code_point"],
+        "U+2028"
+    );
+    assert_eq!(
+        input["flagged_code_points"]["rows"][0]["field"],
+        "execution.text"
+    );
 }
 /// ´test:unit:workspace-grant-snapshot-binds-every-field´
 #[test]

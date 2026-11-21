@@ -163,9 +163,81 @@ fn approved_record(
         runner_stderr_tail: None,
         runner_first_line: String::new(),
     };
+    let input = execute_command::workspace::agent_input(
+        envelope,
+        &grant,
+        &["fictional unknown command".into()],
+    )
+    .expect("judge input");
     store
-        .record_agent(id, &result, None, None)
+        .record_agent(id, &result, None, None, Some(&input))
         .expect("agent judgement")
+}
+
+/// ´test:unit:workspace-judgement-input-reader-binds-exact-execution´
+#[test]
+fn workspace_judgement_input_reader_binds_exact_execution() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let recorded = approved_record(&store, "R:1a", &envelope);
+    let row = recorded.into_value();
+    let grant: Grant = serde_json::from_value(row["effect"]["workspace"]["grant"].clone()).unwrap();
+    assert_eq!(row["workspace_agent_input"]["grant_summary"], json!(grant));
+    assert_eq!(
+        RequestRecord::decode(row.clone()).unwrap().into_value(),
+        row
+    );
+    for pointer in [
+        "/workspace_agent_input/execution/words/0/0",
+        "/workspace_agent_input/cwd/0",
+        "/workspace_agent_input/env_additions",
+    ] {
+        let mut changed = row.clone();
+        *changed.pointer_mut(pointer).unwrap() = json!("changed");
+        assert_eq!(
+            RequestRecord::decode(changed).unwrap_err().kind,
+            "requests-record-refusal",
+            "{pointer}"
+        );
+    }
+    let mut different_display = row.clone();
+    different_display["workspace_agent_input"]["execution_readable_display_only"]["words"][0] =
+        json!("different table rendering");
+    RequestRecord::decode(different_display).expect("stored display is not regenerated");
+    let mut malformed_display = row.clone();
+    malformed_display["workspace_agent_input"]["execution_readable_display_only"]["words"] =
+        json!([]);
+    assert_eq!(
+        RequestRecord::decode(malformed_display).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+    let mut false_flag = row.clone();
+    false_flag["workspace_agent_input"]["flagged_code_points"]["rows"] = json!([{"field":"execution.words[0]","first_byte_offset":0,"code_point":"U+00E9","count":1}]);
+    assert_eq!(
+        RequestRecord::decode(false_flag).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+    let mut old = row;
+    old.as_object_mut().unwrap().remove("workspace_agent_input");
+    assert_eq!(
+        RequestRecord::decode(old).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+}
+
+/// ´test:unit:workspace-judgement-input-refused-on-unjudged-intent´
+#[test]
+fn workspace_judgement_input_refused_on_unjudged_intent() {
+    let mut row = record();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let grant: Grant = serde_json::from_value(detail()["grant"].clone()).unwrap();
+    row["workspace_agent_input"] =
+        execute_command::workspace::agent_input(&envelope, &grant, &[]).unwrap();
+    assert_eq!(
+        RequestRecord::decode(row).unwrap_err().kind,
+        "requests-record-refusal"
+    );
 }
 
 /// ´test:unit:workspace-unanswered-miss-waits-in-every-door-mode´

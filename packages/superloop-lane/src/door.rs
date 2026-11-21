@@ -2851,6 +2851,7 @@ fn serve_request_with_agent_at(
             &result,
             result.rubric_digest.as_deref(),
             configured_model,
+            None,
         ) {
             let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
             let mut reply =
@@ -2906,6 +2907,7 @@ fn serve_request_with_agent_at(
                         &result,
                         result.rubric_digest.as_deref(),
                         configured_model,
+                        None,
                     )
                 });
                 let complete = |reply: &Value| {

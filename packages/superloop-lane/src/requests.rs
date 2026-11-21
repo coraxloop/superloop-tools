@@ -300,6 +300,48 @@ fn validate_workspace_effect(value: &Value) -> Result<(), LaneError> {
     Ok(())
 }
 
+fn validate_workspace_judgement(value: &Value) -> Result<(), LaneError> {
+    let input = &value["workspace_agent_input"];
+    let reasons = input["miss_reasons"]
+        .as_array()
+        .filter(|reasons| reasons.len() <= 16)
+        .ok_or_else(|| {
+            refusal(
+                "requests-record-refusal",
+                "workspace judgement reasons differ",
+            )
+        })?;
+    if !reasons.iter().all(|reason| {
+        reason
+            .as_str()
+            .is_some_and(|s| !s.is_empty() && s.len() <= 256)
+    }) {
+        return Err(refusal(
+            "requests-record-refusal",
+            "workspace judgement reasons differ",
+        ));
+    }
+    let detail = execute_command::workspace::WorkspaceEffect::decode(
+        value["effect"]["workspace"].clone(),
+        "compute",
+        value["loop"].as_str().unwrap_or_default(),
+        value["run"].as_str().unwrap_or_default(),
+    )
+    .map_err(|error| refusal("requests-record-refusal", error.to_string()))?;
+    if value["schema"] != 7
+        || value["operation"] != "compute-workspace"
+        || value["would_do_source"] != "agent"
+    {
+        return Err(refusal(
+            "requests-record-refusal",
+            "workspace judgement input differs from exact execution",
+        ));
+    }
+    execute_command::workspace::validate_agent_observation(input, &detail.envelope, &detail.grant)
+        .map_err(|error| refusal("requests-record-refusal", error.to_string()))?;
+    Ok(())
+}
+
 /// Unobserved terminal facts, also used by the explicit historical rewrite.
 pub(crate) fn unobserved_ending() -> Value {
     json!({"cause":"unobserved","wall_clock":"unobserved","final_write":"unknown","local_child":"unobserved",
@@ -408,6 +450,7 @@ impl RequestRecord {
             "agent_runner_exit",
             "agent_runner_stderr_tail",
             "agent_runner_first_line",
+            "workspace_agent_input",
         ] {
             if value.get(key).is_some() {
                 keys.push(key);
@@ -663,6 +706,17 @@ impl RequestRecord {
         if value["operation"] == "compute-workspace" {
             effect_keys.push("workspace");
             validate_workspace_effect(&value)?;
+        }
+        let needs_workspace_input =
+            value["operation"] == "compute-workspace" && value["would_do_source"] == "agent";
+        if needs_workspace_input != value.get("workspace_agent_input").is_some() {
+            return Err(refusal(
+                "requests-record-refusal",
+                "workspace judgement input presence differs",
+            ));
+        }
+        if needs_workspace_input {
+            validate_workspace_judgement(&value)?;
         }
         if value["operation"] == "compute" {
             effect_keys.push("compute");

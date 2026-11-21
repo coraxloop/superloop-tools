@@ -1,9 +1,11 @@
 //! Lossless agent input and schema-seven execution evidence, without an effect writer.
 use super::*;
+use std::collections::BTreeMap;
+
+const MAX_FLAG_ROWS: usize = 64;
 
 fn flagged(c: char) -> bool {
-    c.is_control()
-        || matches!(u32::from(c), 0x00ad | 0x0600..=0x0605 | 0x061c | 0x06dd | 0x070f | 0x08e2 | 0x0890..=0x0891 | 0x180e | 0x200b..=0x200f | 0x2028..=0x202e | 0x2060..=0x2064 | 0x2066..=0x206f | 0xfeff | 0xfff9..=0xfffb | 0x110bd | 0x110cd | 0x13430..=0x13455 | 0x1bca0..=0x1bca3 | 0x1d173..=0x1d17a | 0xe0001 | 0xe0020..=0xe007f)
+    c.is_control() || !c.is_ascii()
 }
 fn readable_word(bytes: &[u8]) -> String {
     String::from_utf8_lossy(bytes).escape_debug().to_string()
@@ -21,7 +23,7 @@ fn readable_execution(execution: &Execution) -> Value {
         }
     }
 }
-fn flags(path: &str, bytes: &[u8], rows: &mut Vec<Value>) {
+fn flags(path: &str, bytes: &[u8], rows: &mut BTreeMap<(String, char), (usize, usize)>) {
     // Decode valid spans only. Invalid UTF-8 remains explicit bytes in execution.
     let mut offset = 0;
     while offset < bytes.len() {
@@ -35,7 +37,8 @@ fn flags(path: &str, bytes: &[u8], rows: &mut Vec<Value>) {
             ),
         };
         for (i, c) in valid.char_indices().filter(|(_, c)| flagged(*c)) {
-            rows.push(json!({"field":path,"byte_offset":offset+i,"code_point":format!("U+{:04X}",u32::from(c))}));
+            let row = rows.entry((path.to_owned(), c)).or_insert((offset + i, 0));
+            row.1 += 1;
         }
         offset += valid.len() + skip;
     }
@@ -55,7 +58,7 @@ pub fn agent_input(
         &grant.run,
         &grant.node,
     )?;
-    let mut code_points = Vec::new();
+    let mut code_points = BTreeMap::new();
     match &envelope.execution {
         Execution::Argv { words } => {
             for (i, w) in words.iter().enumerate() {
@@ -89,9 +92,205 @@ pub fn agent_input(
             &mut code_points,
         );
     }
+    let omitted_count = code_points.len().saturating_sub(MAX_FLAG_ROWS);
+    let rows = code_points.into_iter().take(MAX_FLAG_ROWS).map(|((field, point), (first_byte_offset, count))| {
+        json!({"field":field,"first_byte_offset":first_byte_offset,"code_point":format!("U+{:04X}",u32::from(point)),"count":count})
+    }).collect::<Vec<_>>();
     Ok(
-        json!({"execution":envelope.execution,"execution_readable_display_only":readable_execution(&envelope.execution),"cwd":envelope.cwd,"env_additions":envelope.env_additions,"grant_summary":grant,"miss_reasons":reasons,"flagged_code_points":code_points}),
+        json!({"execution":envelope.execution,"execution_readable_display_only":readable_execution(&envelope.execution),"cwd":envelope.cwd,"env_additions":envelope.env_additions,"grant_summary":grant,"miss_reasons":reasons,"flagged_code_points":{"rows":rows,"omitted_count":omitted_count}}),
     )
+}
+
+fn exact_keys(value: &Value, keys: &[&str]) -> bool {
+    value.as_object().is_some_and(|object| {
+        object.len() == keys.len() && keys.iter().all(|key| object.contains_key(*key))
+    })
+}
+
+fn display_valid(display: &Value, execution: &Execution) -> bool {
+    let bounded = |value: &Value| value.as_str().is_some_and(|s| s.len() <= 262_144);
+    match execution {
+        Execution::Argv { words } => {
+            exact_keys(display, &["kind", "words"])
+                && display["kind"] == "argv"
+                && display["words"]
+                    .as_array()
+                    .is_some_and(|items| items.len() == words.len() && items.iter().all(bounded))
+        }
+        Execution::Sequence { steps } => {
+            exact_keys(display, &["kind", "steps"])
+                && display["kind"] == "sequence"
+                && display["steps"].as_array().is_some_and(|items| {
+                    items.len() == steps.len()
+                        && items.iter().zip(steps).all(|(item, words)| {
+                            item.as_array().is_some_and(|shown| {
+                                shown.len() == words.len() && shown.iter().all(bounded)
+                            })
+                        })
+                })
+        }
+        Execution::Shell { .. } => {
+            exact_keys(display, &["kind", "shell", "text"])
+                && display["kind"] == "shell"
+                && bounded(&display["shell"])
+                && bounded(&display["text"])
+        }
+    }
+}
+
+fn field_bytes<'a>(field: &str, envelope: &'a Envelope) -> Option<&'a [u8]> {
+    match &envelope.execution {
+        Execution::Argv { words } => {
+            for (i, word) in words.iter().enumerate() {
+                if field == format!("execution.words[{i}]") {
+                    return Some(word);
+                }
+            }
+        }
+        Execution::Sequence { steps } => {
+            for (step, words) in steps.iter().enumerate() {
+                for (i, word) in words.iter().enumerate() {
+                    if field == format!("execution.steps[{step}][{i}]") {
+                        return Some(word);
+                    }
+                }
+            }
+        }
+        Execution::Shell { shell, text } => {
+            if field == "execution.shell" {
+                return Some(shell.as_bytes());
+            }
+            if field == "execution.text" {
+                return Some(text.as_bytes());
+            }
+        }
+    }
+    for (i, component) in envelope.cwd.iter().enumerate() {
+        if field == format!("cwd[{i}]") {
+            return Some(component.as_bytes());
+        }
+    }
+    for (i, (name, value)) in envelope.env_additions.iter().enumerate() {
+        if field == format!("env_additions[{i}].name") {
+            return Some(name.as_bytes());
+        }
+        if field == format!("env_additions[{i}].value") {
+            return Some(value.as_bytes());
+        }
+    }
+    None
+}
+
+fn point_at(bytes: &[u8], offset: usize) -> Option<char> {
+    let tail = bytes.get(offset..)?;
+    (1..=4).find_map(|len| {
+        tail.get(..len)
+            .and_then(|part| std::str::from_utf8(part).ok())
+            .and_then(|s| s.chars().next())
+    })
+}
+
+fn occurrences(bytes: &[u8], point: char) -> (Option<usize>, usize) {
+    let mut first = None;
+    let mut count = 0;
+    let mut offset = 0;
+    while offset < bytes.len() {
+        let rest = &bytes[offset..];
+        let (valid, skip) = match std::str::from_utf8(rest) {
+            Ok(s) => (s, 0),
+            Err(error) => (
+                std::str::from_utf8(&rest[..error.valid_up_to()]).unwrap_or_default(),
+                error
+                    .error_len()
+                    .unwrap_or_else(|| rest.len() - error.valid_up_to()),
+            ),
+        };
+        for (i, current) in valid.char_indices() {
+            if current == point {
+                first.get_or_insert(offset + i);
+                count += 1;
+            }
+        }
+        offset += valid.len() + skip;
+    }
+    (first, count)
+}
+
+/// Check stored judge input without regenerating its display or flag policy.
+/// # Errors
+/// Refuses a changed exact context, a malformed display, or a flag unsupported by its bytes.
+pub fn validate_agent_observation(
+    input: &Value,
+    envelope: &Envelope,
+    grant: &Grant,
+) -> Result<(), Refusal> {
+    if !exact_keys(
+        input,
+        &[
+            "execution",
+            "execution_readable_display_only",
+            "cwd",
+            "env_additions",
+            "grant_summary",
+            "miss_reasons",
+            "flagged_code_points",
+        ],
+    ) || input["execution"] != json!(envelope.execution)
+        || input["cwd"] != json!(envelope.cwd)
+        || input["env_additions"] != json!(envelope.env_additions)
+        || input["grant_summary"] != json!(grant)
+        || !display_valid(
+            &input["execution_readable_display_only"],
+            &envelope.execution,
+        )
+    {
+        return Err(protocol(
+            "workspace judgement input shape or exact context differs",
+        ));
+    }
+    let flags = &input["flagged_code_points"];
+    if !exact_keys(flags, &["rows", "omitted_count"])
+        || flags["omitted_count"].as_u64().is_none_or(|n| n > 262_144)
+    {
+        return Err(protocol("workspace judgement flags differ"));
+    }
+    let rows = flags["rows"]
+        .as_array()
+        .filter(|rows| rows.len() <= MAX_FLAG_ROWS)
+        .ok_or_else(|| protocol("workspace judgement flag rows differ"))?;
+    let mut seen = std::collections::BTreeSet::new();
+    for row in rows {
+        if !exact_keys(row, &["field", "first_byte_offset", "code_point", "count"]) {
+            return Err(protocol("workspace judgement flag row differs"));
+        }
+        let field = row["field"]
+            .as_str()
+            .ok_or_else(|| protocol("workspace judgement flag field differs"))?;
+        let bytes = field_bytes(field, envelope)
+            .ok_or_else(|| protocol("workspace judgement flag field differs"))?;
+        let offset = row["first_byte_offset"]
+            .as_u64()
+            .and_then(|n| usize::try_from(n).ok())
+            .ok_or_else(|| protocol("workspace judgement flag offset differs"))?;
+        let point = row["code_point"]
+            .as_str()
+            .and_then(|s| s.strip_prefix("U+"))
+            .and_then(|s| u32::from_str_radix(s, 16).ok())
+            .and_then(char::from_u32)
+            .ok_or_else(|| protocol("workspace judgement flag point differs"))?;
+        let count = row["count"]
+            .as_u64()
+            .ok_or_else(|| protocol("workspace judgement flag count differs"))?;
+        let (first, actual_count) = occurrences(bytes, point);
+        if !seen.insert((field, point))
+            || point_at(bytes, offset) != Some(point)
+            || first != Some(offset)
+            || count != actual_count as u64
+        {
+            return Err(protocol("workspace judgement flag truth differs"));
+        }
+    }
+    Ok(())
 }
 /// Explicit outcome; absence of a measurement never becomes a successful exit.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]

@@ -2315,10 +2315,14 @@ impl Store {
         result: &crate::door::agent::RunnerOutcome,
         digest: Option<&str>,
         model: Option<&str>,
+        workspace_input: Option<&Value>,
     ) -> Result<RequestRecord, LaneError> {
         self.change_one("record_agent", id, false, |request| {
             let mut value = request.value().clone();
             super::judgement::apply(&mut value, result, digest, model);
+            if let Some(input) = workspace_input {
+                value["workspace_agent_input"] = input.clone();
+            }
             if value["state"].is_null()
                 && (value["mode"] == "audit"
                     || (value["mode"] == "enforce" && result.verdict == "refer"))
@@ -4288,7 +4292,7 @@ pub(crate) mod tests {
         advice.verdict = "refuse".into();
         advice.scope = "loop".into();
         store
-            .record_agent("R:1a", &advice, None, None)
+            .record_agent("R:1a", &advice, None, None, None)
             .expect("advice");
         assert!(store.request("R:1a").expect("unlabelled").value()["label"].is_null());
         store.triage("R", &[json!({"id":"R:1a","action":"adjudicate","treatment":"allow","reason":"owner decision"})], "owner", "2").expect("opposing owner label");
@@ -4614,7 +4618,7 @@ pub(crate) mod tests {
         result.observations = json!({"children_reaped":true,"agent_calls":1});
         std::thread::scope(|scope| {
             let judgement =
-                scope.spawn(|| store.record_agent("R:1a", &result, None, Some("configured")));
+                scope.spawn(|| store.record_agent("R:1a", &result, None, Some("configured"), None));
             let completion = scope.spawn(|| store.record_effect("R:1a", effect.clone()));
             let supervision = scope.spawn(|| store.triage("R", &[json!({"id":"R:1a","action":"adjudicate","treatment":"allow","reason":"supervisory answer"})], "superloop", "2"));
             judgement
@@ -5367,7 +5371,7 @@ pub(crate) mod tests {
             std::time::Instant::now(),
         );
         store
-            .record_agent("R:1a", &referral, None, None)
+            .record_agent("R:1a", &referral, None, None, None)
             .expect("durable referral");
         let (rows, _) = store.list().expect("read committed filing");
         assert_eq!(rows.len(), 1);
@@ -6312,11 +6316,17 @@ pub(crate) mod tests {
         outcome.wall_ms = 125;
         outcome.observations = json!({"agent_calls":1,"children_reaped":true});
         store
-            .record_agent("R:2b", &outcome, Some(&"a".repeat(64)), Some("fixture"))
+            .record_agent(
+                "R:2b",
+                &outcome,
+                Some(&"a".repeat(64)),
+                Some("fixture"),
+                None,
+            )
             .expect("measured judgement");
         outcome.observations = serde_json::Value::Null;
         store
-            .record_agent("R:3c", &outcome, None, Some("fixture"))
+            .record_agent("R:3c", &outcome, None, Some("fixture"), None)
             .expect("unmeasured judgement");
         fixture
     }
