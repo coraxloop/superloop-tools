@@ -465,6 +465,52 @@ fn claude_fixture_withdrawal_refuses_wrong_projection_owner() {
     assert!(!path.exists());
 }
 
+fn wrong_codex_projection_owner_body(enclosing: &Path) {
+    transaction_body(enclosing, |_, _, _, worker, _, _, _| {
+        let directory = worker.join(".codex");
+        fs::create_dir(&directory).expect("Codex worker state");
+        nix::unistd::chown(
+            &directory,
+            Some(Uid::from_raw(3000)),
+            Some(Gid::from_raw(3000)),
+        )
+        .expect("worker directory owner");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("worker directory mode");
+        let projection = directory.join("auth.json");
+        fs::write(&projection, b"fictional access").expect("projection entry");
+        fs::set_permissions(&projection, fs::Permissions::from_mode(0o600))
+            .expect("projection mode");
+        nix::unistd::chown(&projection, Some(Uid::from_raw(0)), Some(Gid::from_raw(0)))
+            .expect("wrong projection owner");
+        let error = withdraw_worker_projection(worker, 3000, BoxBackend::Codex)
+            .expect_err("entry owner refuses withdrawal after directory opens");
+        assert_eq!(error.kind, "credential-withdraw", "{error:?}");
+        assert_eq!(
+            fs::read(&projection).expect("entry remains"),
+            b"fictional access"
+        );
+    });
+}
+
+/// # Panics
+/// Panics if a wrong-owned Codex entry is removed after its directory opens.
+/// ´test:unit:codex-fixture-withdrawal-refuses-wrong-entry-owner´
+#[test]
+fn codex_fixture_withdrawal_refuses_wrong_entry_owner() {
+    if enter(
+        "codex_fixture_withdrawal_refuses_wrong_entry_owner",
+        wrong_codex_projection_owner_body,
+    ) {
+        return;
+    }
+    let mut host = launch("codex_fixture_withdrawal_refuses_wrong_entry_owner");
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
 /// # Panics
 /// Panics if the admitted round fails its mapped custody or projection contract.
 /// ´test:unit:claude-fixture-admitted-round´

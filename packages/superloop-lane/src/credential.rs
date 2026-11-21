@@ -2594,6 +2594,10 @@ mod tests {
             let error = withdraw_worker_projection(root.path(), uid, BoxBackend::Codex)
                 .expect_err("changed entry refuses withdrawal");
             assert_eq!(error.kind, "credential-withdraw", "{error:?}");
+            assert!(
+                error.detail.contains("changed type, owner or mode"),
+                "{error:?}"
+            );
             assert!(projection.exists() || projection.symlink_metadata().is_ok());
         };
         fs::write(&projection, b"fictional access").expect("projection");
@@ -2604,6 +2608,8 @@ mod tests {
         expect_refusal();
         fs::remove_file(&projection).expect("remove link");
         fs::create_dir(&projection).expect("directory projection");
+        fs::set_permissions(&projection, fs::Permissions::from_mode(0o600))
+            .expect("directory has the expected file mode");
         expect_refusal();
         fs::remove_dir(&projection).expect("remove directory");
         fs::write(&projection, b"fictional access").expect("projection");

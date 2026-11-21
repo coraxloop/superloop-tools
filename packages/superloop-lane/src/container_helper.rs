@@ -2667,13 +2667,17 @@ impl Drop for ServiceResources {
 ///
 /// Refuses a changed saved request, a foreign peer, or a failed bounded child.
 pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
-    limit_helper_core()?;
-    serve_admitted(run_dir, &RuntimeAdmission::Gate)
+    serve_with_core_limit(|| serve_admitted(run_dir, &RuntimeAdmission::Gate))
 }
 
 fn limit_helper_core() -> Result<(), LaneError> {
     nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)
         .map_err(|error| LaneError::operation("helper-core-limit", error.to_string()))
+}
+
+fn serve_with_core_limit<T>(action: impl FnOnce() -> Result<T, LaneError>) -> Result<T, LaneError> {
+    limit_helper_core()?;
+    action()
 }
 
 fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), LaneError> {
@@ -2692,8 +2696,7 @@ pub(crate) fn fixture_serve_admitted_at(
     run_dir: &Path,
     admission: &RuntimeAdmission,
 ) -> Result<(), LaneError> {
-    limit_helper_core()?;
-    serve_admitted_at(owner_home, run_dir, admission)
+    serve_with_core_limit(|| serve_admitted_at(owner_home, run_dir, admission))
 }
 
 fn serve_admitted_at(
@@ -3118,6 +3121,38 @@ mod tests {
         }
         let output = crate::fixture_exec::test_image_command(
             "container_helper::tests::helper_serve_child_sets_zero_core_limit",
+        )
+        .env(CHILD, "1")
+        .output()
+        .expect("isolated helper child");
+        assert!(
+            output.status.success(),
+            "helper child: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// ´test:unit:helper-core-limit-precedes-service-action´
+    #[test]
+    fn helper_core_limit_precedes_service_action() {
+        const CHILD: &str = "SUPERLOOP_TEST_CORE_ORDER_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            super::serve_with_core_limit(|| {
+                let (soft, hard) =
+                    nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE)
+                        .expect("core limit inside service action");
+                assert_eq!((soft, hard), (0, 0), "action begins after the limit");
+                Ok(())
+            })
+            .expect("bounded service action");
+            return;
+        }
+        let (_, hard) = nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE)
+            .expect("initial core limit");
+        assert_ne!(hard, 0, "ordering test needs a nonzero initial hard limit");
+        let output = crate::fixture_exec::test_image_command(
+            "container_helper::tests::helper_core_limit_precedes_service_action",
         )
         .env(CHILD, "1")
         .output()

@@ -437,6 +437,26 @@ print((Path(sys.argv[2])/'.codex/auth.json').read_text())
 }
 
 /// # Panics
+/// Panics if the completed service leaves the Codex worker projection behind.
+fn assert_codex_projection_withdrawn(home: &Path, worker: &str) {
+    let withdrawn = namespace_python(
+        home,
+        "import os,sys\nprint('absent' if not os.path.lexists(os.path.join(sys.argv[2],'.codex','auth.json')) else 'present')\n",
+        worker,
+    )
+    .expect("inspect mapped worker entry after service join");
+    assert!(
+        withdrawn.status.success(),
+        "{}",
+        String::from_utf8_lossy(&withdrawn.stderr)
+    );
+    assert_eq!(
+        withdrawn.stdout, b"absent\n",
+        "service left Codex projection"
+    );
+}
+
+/// # Panics
 /// Panics if the complete service does not execute its held runtime and publish authority evidence.
 pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
     let record = prepare(home, runs, podman);
@@ -507,6 +527,7 @@ pub(super) fn exercise(home: &Path, runs: &Path, podman: &Path) {
         String::from_utf8_lossy(&helper.stderr)
     );
     assert!(String::from_utf8_lossy(&helper.stdout).contains("HELPER-SERVICE-ENTRY-END"));
+    assert_codex_projection_withdrawn(home, worker);
     let protected = crate::plan::protected_identity_dir(&runs.join("R")).expect("protected root");
     for path in [
         protected.join("container-attempt-1.status.json"),
