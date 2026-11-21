@@ -70,9 +70,13 @@ pub(crate) fn check_backend_exec_probe(
     report: &Value,
     runtime_argv: &Value,
 ) -> Result<(), LaneError> {
-    if backend == crate::settings::BoxBackend::Codex {
-        return check_exec_probe(report, runtime_argv);
+    match backend {
+        crate::settings::BoxBackend::Codex => check_exec_probe(report, runtime_argv),
+        crate::settings::BoxBackend::Claude => check_claude_exec_probe(report, runtime_argv),
     }
+}
+
+fn check_claude_exec_probe(report: &Value, runtime_argv: &Value) -> Result<(), LaneError> {
     payload::check_claude_report(report, true)?;
     let help = report["claude_exec_probe"]["stdout"]
         .as_str()
@@ -2437,6 +2441,25 @@ pub(crate) mod mail_standin {
 
 #[cfg(test)]
 mod tests {
+    /// ´test:unit:backend-exec-probe-refuses-the-selected-missing-report´
+    #[test]
+    fn backend_exec_probe_refuses_the_selected_missing_report() {
+        let report = serde_json::json!({});
+        let vector = serde_json::json!([]);
+        assert_eq!(
+            super::check_backend_exec_probe(crate::settings::BoxBackend::Codex, &report, &vector,)
+                .expect_err("Codex probe")
+                .kind,
+            "codex-exec-help"
+        );
+        assert_eq!(
+            super::check_backend_exec_probe(crate::settings::BoxBackend::Claude, &report, &vector,)
+                .expect_err("Claude probe")
+                .kind,
+            "build-report"
+        );
+    }
+
     use super::{
         BuildRequest, CODEX_EXEC_OPTIONS, ChildSpec, check_exec_probe, checked_output, child,
         codex_image_program, executable_snapshot, hash_bytes, hash_spec, parsed_image_id, run,

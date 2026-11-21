@@ -100,26 +100,34 @@ pub(crate) fn resume_box_vector(
             "request thread is malformed",
         ));
     }
-    if backend == BoxBackend::Claude {
-        let program = vector
-            .iter()
-            .position(|word| word == "/home/worker/.local/bin/claude")
-            .ok_or_else(|| LaneError::input("round-thread", "saved Claude program is absent"))?;
-        let arguments = &vector[program + 1..];
-        if arguments.first().is_none_or(|word| word != "-p")
-            || arguments
-                .iter()
-                .any(|word| matches!(word.as_str(), "--resume" | "-r"))
-        {
-            return Err(LaneError::input(
-                "round-thread",
-                "saved Claude print or resume boundary differs",
-            ));
-        }
-        let mut resumed = vector.to_vec();
-        resumed.extend(["--resume".to_owned(), thread.to_owned()]);
-        return Ok(resumed);
+    match backend {
+        BoxBackend::Claude => resume_claude_vector(vector, thread),
+        BoxBackend::Codex => resume_codex_vector(vector, thread),
     }
+}
+
+fn resume_claude_vector(vector: &[String], thread: &str) -> Result<Vec<String>, LaneError> {
+    let program = vector
+        .iter()
+        .position(|word| word == "/home/worker/.local/bin/claude")
+        .ok_or_else(|| LaneError::input("round-thread", "saved Claude program is absent"))?;
+    let arguments = &vector[program + 1..];
+    if arguments.first().is_none_or(|word| word != "-p")
+        || arguments
+            .iter()
+            .any(|word| matches!(word.as_str(), "--resume" | "-r"))
+    {
+        return Err(LaneError::input(
+            "round-thread",
+            "saved Claude print or resume boundary differs",
+        ));
+    }
+    let mut resumed = vector.to_vec();
+    resumed.extend(["--resume".to_owned(), thread.to_owned()]);
+    Ok(resumed)
+}
+
+fn resume_codex_vector(vector: &[String], thread: &str) -> Result<Vec<String>, LaneError> {
     let exec = vector
         .iter()
         .position(|word| word == "exec")
@@ -493,9 +501,13 @@ fn record_attempt_wall(
 fn capacity_event(backend: BoxBackend, bytes: &[u8]) -> bool {
     // No captured Claude transient-capacity event is established. Its recorded
     // quota rejection is not retryable capacity, nor is another vendor's event.
-    if backend == BoxBackend::Claude {
-        return false;
+    match backend {
+        BoxBackend::Claude => false,
+        BoxBackend::Codex => codex_capacity_event(bytes),
     }
+}
+
+fn codex_capacity_event(bytes: &[u8]) -> bool {
     bytes.split(|byte| *byte == b'\n').any(|line| {
         let Ok(event) = serde_json::from_slice::<Value>(line) else {
             return false;
