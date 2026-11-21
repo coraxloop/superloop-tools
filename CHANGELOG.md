@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-11-21
+
 ### Added
 
 - Accept the door's registered receive transport rule as a request record's decision source, `transport-rule`, kept on the deterministic rung of retained decisions and bound to the record's mirror ref (``test:unit:registered-receive-rule-round-trips-and-binds-the-mirror-ref``). Compatibility: no door writes this form yet and existing records keep theirs; every door loop installs this release and restarts its door on it before any later release that writes transport-rule records is installed, and a rollback from that later release returns to this release, not to 0.8.2, whose readers refuse the new source.
@@ -1127,7 +1129,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.8.2...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.9.0...HEAD
+[0.9.0]: https://github.com/coraxloop/superloop-tools/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/coraxloop/superloop-tools/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/coraxloop/superloop-tools/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/coraxloop/superloop-tools/compare/v0.7.0...v0.8.0
