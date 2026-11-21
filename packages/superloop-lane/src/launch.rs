@@ -828,11 +828,15 @@ fn preview_backend_gate(
     loop_name: &str,
     backend: crate::settings::BoxBackend,
 ) -> Result<(), LaneError> {
-    if backend == crate::settings::BoxBackend::Codex {
-        return Ok(());
+    match backend {
+        crate::settings::BoxBackend::Codex => Ok(()),
+        crate::settings::BoxBackend::Claude => preview_claude_backend_gate(owner_home, loop_name),
     }
+}
+
+fn preview_claude_backend_gate(owner_home: &Path, loop_name: &str) -> Result<(), LaneError> {
     let custody = crate::credential::claude_source_custody_preview(owner_home, loop_name)?;
-    backend.require_runtime().map_err(|mut error| {
+    crate::settings::BoxBackend::Claude.require_runtime().map_err(|mut error| {
         std::fmt::Write::write_fmt(
             &mut error.detail,
             format_args!("; all read-only launch preview checks passed; runtime admission remains closed; source custody {custody}; Claude driver contract is checked on launch"),
@@ -840,6 +844,13 @@ fn preview_backend_gate(
         .expect("writing to a String cannot fail");
         error
     })
+}
+
+const fn backend_program_check(backend: crate::settings::BoxBackend) -> &'static str {
+    match backend {
+        crate::settings::BoxBackend::Codex => "backend_argv.codex program",
+        crate::settings::BoxBackend::Claude => "backend_argv.claude program",
+    }
 }
 
 pub(crate) fn private_podman_environment_from(
@@ -2325,11 +2336,14 @@ fn image_report(
         LaneError::input("build-report", format!("{}: {error}", path.display()))
     })?)
     .map_err(|error| LaneError::input("build-report", format!("{}: {error}", path.display())))?;
-    if backend == crate::settings::BoxBackend::Codex {
-        build::image_program_from_report(&report)?;
-    } else {
-        build::payload::check_claude_report(&report, true)?;
-        build::payload::image_program(&report, backend.vendor())?;
+    match backend {
+        crate::settings::BoxBackend::Codex => {
+            build::image_program_from_report(&report)?;
+        }
+        crate::settings::BoxBackend::Claude => {
+            build::payload::check_claude_report(&report, true)?;
+            build::payload::image_program(&report, backend.vendor())?;
+        }
     }
     Ok(report)
 }
@@ -4121,11 +4135,7 @@ fn run_with_program(
     let fresh_dir = planned_step_dir(&plan, "dispatch")?;
     let launch_argv = entry_argv(driver, &plan, request, &fresh_dir)?;
     let setup_argv = runtime_prepare_argv(&exe_word, &podman_word, owner_home, request)?;
-    let backend_check = if selected_backend == crate::settings::BoxBackend::Codex {
-        "backend_argv.codex program"
-    } else {
-        "backend_argv.claude program"
-    };
+    let backend_check = backend_program_check(selected_backend);
     let mut checks = vec![
         "box gate: container options, read-only root and template, worker-owned writable leaves, proxy route",
         "worker UID allocation",
@@ -9858,6 +9868,40 @@ mod tests {
             super::preview_dead_preparation(fixture.path(), &plan, "R", &letter, &[], || Ok(true))
                 .expect("pending preview");
         assert_eq!(pending["retirement_to_journal"], next["current_retirement"]);
+    }
+
+    /// # Panics
+    /// Panics if a read-only launch choice takes the other backend's branch.
+    /// ´test:unit:read-only-launch-choices-follow-the-selected-backend´
+    #[test]
+    fn read_only_launch_choices_follow_the_selected_backend() {
+        use crate::settings::BoxBackend;
+        let fixture = tempfile::TempDir::new().expect("fictional owner");
+        assert!(super::preview_backend_gate(fixture.path(), "alpha", BoxBackend::Codex).is_ok());
+        assert!(super::preview_backend_gate(fixture.path(), "alpha", BoxBackend::Claude).is_err());
+        assert_eq!(
+            super::backend_program_check(BoxBackend::Codex),
+            "backend_argv.codex program"
+        );
+        assert_eq!(
+            super::backend_program_check(BoxBackend::Claude),
+            "backend_argv.claude program"
+        );
+        let directory = fixture.path().join(".config/loops/alpha");
+        fs::create_dir_all(&directory).expect("fictional loop settings directory");
+        fs::write(directory.join("image-build.json"), b"{}").expect("fictional image report");
+        assert!(
+            super::image_report(fixture.path(), "alpha", BoxBackend::Codex)
+                .expect_err("Codex image pin")
+                .detail
+                .contains("codex_image_program")
+        );
+        assert!(
+            super::image_report(fixture.path(), "alpha", BoxBackend::Claude)
+                .expect_err("Claude image pin")
+                .detail
+                .contains("build_environment.claude_bin")
+        );
     }
 
     /// ´test:unit:helper-service-driver-contract-keeps-runtime-gate´
