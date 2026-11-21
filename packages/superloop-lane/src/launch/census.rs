@@ -2,6 +2,229 @@
 
 use super::*;
 
+#[derive(Default)]
+struct DesignationCounts {
+    live_without_member: usize,
+    retired_without_member: usize,
+    pending_rollback_before_images: usize,
+    stranded_rollback_before_images: usize,
+    pending_absence_plans: usize,
+    pending_census_rewrites: usize,
+    pending_retirement_rewrites: usize,
+    pending_node_retirement_rewrites: usize,
+    blockers: Vec<Value>,
+}
+
+impl DesignationCounts {
+    fn row(&mut self, record: &Value, retired: bool, loop_name: &str) {
+        let run = record["run"].as_str().unwrap_or_default();
+        for (index, round) in record["rounds"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .enumerate()
+        {
+            if round.get("reply_designation").is_some() {
+                continue;
+            }
+            if retired {
+                self.retired_without_member += 1;
+            } else {
+                self.live_without_member += 1;
+            }
+            self.blockers
+                .push(json!({"kind":"round-without-member","run":run,
+                "step":round["step"],"index":index,"next_command":null,
+                "clears_by":"A later row rewrite adds the member; none exists in this release."}));
+        }
+        if !retired && record.get("round_rollback").is_some() {
+            if record.get("dispatch_intent").is_some() {
+                self.stranded_rollback_before_images += 1;
+                self.blockers.push(json!({"kind":"rollback-after-dispatch-intent",
+                    "run":run,"next_command":null,
+                    "clears_by":"No restore command exists after dispatch intent; retain the run for owner repair."}));
+            } else {
+                self.pending_rollback_before_images += 1;
+                self.blockers.push(json!({"kind":"pending-round-rollback",
+                    "run":run,"next_command":null,
+                    "clears_by":"A live launch may restore before intent or consume the image at spawn receipt. A crash leaves no standalone restore command; retain the run for owner repair."}));
+            }
+        }
+        if !retired && record.get("retirement_absence_plan").is_some() {
+            self.pending_absence_plans += 1;
+            let flags = record["retirement_absence_plan"]["flags"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(" ");
+            let options = if flags.is_empty() {
+                String::new()
+            } else {
+                format!(" {flags}")
+            };
+            self.blockers.push(json!({"kind":"pending-absence-plan","run":run,
+                "next_command":format!("superloop-lane retire {loop_name} {run}{options} --dry-run"),
+                "apply_command":format!("superloop-lane retire {loop_name} {run}{options} --expect-digest HEX"),
+                "then":"Replace HEX with the preview_sha256 from the dry run."}));
+        }
+    }
+
+    #[allow(clippy::case_sensitive_file_extension_comparisons)] // Protected journal names are exact.
+    #[allow(clippy::too_many_lines)] // Three recorded journal forms have distinct recovery routes.
+    fn rewrite(
+        &mut self,
+        name: &str,
+        path: &Path,
+        root: &Path,
+        loop_name: &str,
+    ) -> Result<bool, LaneError> {
+        let kind = if name.starts_with(".census-rewrite-") && name.ends_with(".json") {
+            0
+        } else if name.starts_with(".retire-rewrite-") && name.ends_with(".json") {
+            1
+        } else if name == ".retire-node-rewrite.json" {
+            2
+        } else {
+            return Ok(false);
+        };
+        let bytes = super::retire::absences::read_bytes(path)?.ok_or_else(|| {
+            LaneError::input("census-record", format!("{} vanished", path.display()))
+        })?;
+        let journal: Value = serde_json::from_slice(&bytes).map_err(|error| {
+            LaneError::input("census-record", format!("{}: {error}", path.display()))
+        })?;
+        match journal["phase"].as_str() {
+            Some("pending") => match kind {
+                0 | 1 => {
+                    let run = name
+                        .strip_prefix(if kind == 0 {
+                            ".census-rewrite-"
+                        } else {
+                            ".retire-rewrite-"
+                        })
+                        .and_then(|name| name.strip_suffix(".json"))
+                        .filter(|run| valid_run_name(run))
+                        .ok_or_else(|| {
+                            LaneError::input(
+                                "census-record",
+                                format!("{} has no valid run", path.display()),
+                            )
+                        })?;
+                    let (kind_name, preview, apply) = if kind == 0 {
+                        self.pending_census_rewrites += 1;
+                        (
+                            "pending-census-rewrite",
+                            format!("superloop-lane census rewrite {loop_name} {run} --dry-run"),
+                            format!(
+                                "superloop-lane census rewrite {loop_name} {run} --expect-digest HEX"
+                            ),
+                        )
+                    } else {
+                        self.pending_retirement_rewrites += 1;
+                        (
+                            "pending-retirement-rewrite",
+                            format!("superloop-lane retire rewrite {loop_name} {run} --dry-run"),
+                            format!(
+                                "superloop-lane retire rewrite {loop_name} {run} --expect-digest HEX"
+                            ),
+                        )
+                    };
+                    self.blockers.push(json!({"kind":kind_name,"run":run,
+                        "next_command":preview,
+                        "apply_command":apply,
+                        "then":"Replace HEX with the preview_sha256 from the dry run."}));
+                }
+                _ => {
+                    self.pending_node_retirement_rewrites += 1;
+                    let entries = match journal["schema"].as_u64() {
+                        Some(1) => journal["plan"]["files"].as_array(),
+                        Some(2) => journal["manifest"].as_array(),
+                        _ => None,
+                    };
+                    let manifest = entries.ok_or_else(|| {
+                        LaneError::input(
+                            "census-record",
+                            format!("{} has no rewrite file inventory", path.display()),
+                        )
+                    })?;
+                    let mut runs = std::collections::BTreeSet::new();
+                    for entry in manifest {
+                        let recorded = entry["path"].as_str().map(Path::new).ok_or_else(|| {
+                            LaneError::input(
+                                "census-record",
+                                format!("{} has an unnamed rewrite row", path.display()),
+                            )
+                        })?;
+                        if recorded.parent() != Some(root) {
+                            return Err(LaneError::input(
+                                "census-record",
+                                "node rewrite path escapes runs root",
+                            ));
+                        }
+                        let row =
+                            super::read_reservation_checked(recorded, false)?.ok_or_else(|| {
+                                LaneError::input(
+                                    "census-record",
+                                    format!("{} vanished", recorded.display()),
+                                )
+                            })?;
+                        let run = row["run"]
+                            .as_str()
+                            .filter(|run| valid_run_name(run))
+                            .ok_or_else(|| {
+                                LaneError::input("census-record", "node rewrite row has no run")
+                            })?;
+                        runs.insert(run.to_owned());
+                    }
+                    for run in runs {
+                        self.blockers.push(json!({"kind":"pending-node-retirement-rewrite",
+                            "run":run,"next_command":format!("superloop-lane retire rewrite-node {loop_name} --dry-run"),
+                            "apply_command":format!("superloop-lane retire rewrite-node {loop_name} --expect-digest HEX"),
+                            "then":"Replace HEX with the preview_sha256 from the dry run."}));
+                    }
+                }
+            },
+            Some("complete") => {}
+            _ => {
+                return Err(LaneError::input(
+                    "census-record",
+                    format!("{} has an unknown rewrite phase", path.display()),
+                ));
+            }
+        }
+        Ok(true)
+    }
+
+    fn report(mut self) -> Value {
+        self.blockers.sort_by(|left, right| {
+            (
+                left["run"].as_str(),
+                left["kind"].as_str(),
+                left["index"].as_u64(),
+            )
+                .cmp(&(
+                    right["run"].as_str(),
+                    right["kind"].as_str(),
+                    right["index"].as_u64(),
+                ))
+        });
+        json!({
+            "rows_without_member":{"live":self.live_without_member,"retired":self.retired_without_member},
+            "pending_rollback_before_images":self.pending_rollback_before_images,
+            "stranded_rollback_before_images":self.stranded_rollback_before_images,
+            "pending_absence_plans":self.pending_absence_plans,
+            "pending_rewrite_transactions":{
+                "census":self.pending_census_rewrites,
+                "retirement":self.pending_retirement_rewrites,
+                "node_retirement":self.pending_node_retirement_rewrites,
+            },
+            "blockers":self.blockers
+        })
+    }
+}
+
 #[path = "census_rewrite.rs"]
 pub mod rewrite;
 
@@ -261,6 +484,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
     let mut migration_rows = Vec::new();
     let mut reservations = Vec::new();
     let mut retired = Vec::new();
+    let mut designation_counts = DesignationCounts::default();
     let mut skipped_names = Vec::new();
     let entries = fs::read_dir(root)
         .map_err(|error| LaneError::input("census-root", format!("{}: {error}", root.display())))?
@@ -300,6 +524,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                     owner_home, root, loop_name, &path, &record,
                 )?);
             }
+            designation_counts.row(&record, false, loop_name);
             let due = credential_refresh(&runs, run, owner)?;
             reservations.push(row(
                 loop_name,
@@ -330,6 +555,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                     owner_home, root, loop_name, &path, &record,
                 )?);
             }
+            designation_counts.row(&record, true, loop_name);
             let due = unavailable("unmeasured", "retired");
             retired.push(row(
                 loop_name,
@@ -341,6 +567,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                 &due,
             )?);
         } else {
+            designation_counts.rewrite(&name, &path, root, loop_name)?;
             skipped_names.push(name.into_owned());
         }
     }
@@ -373,7 +600,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
         .collect::<std::collections::BTreeSet<_>>();
     skipped_names.retain(|name| !attributed.contains(name.as_str()));
     skipped_names.sort();
-    let mut result = json!({"schema":1,"command":"census","loop":loop_name,"admission":admission,"allocation":{"base":base,"count":count},"reservations":reservations,"retired_records":retired,"skipped_names":skipped_names,"wall_seconds":begun.elapsed().as_secs_f64()});
+    let mut result = json!({"schema":1,"command":"census","loop":loop_name,"admission":admission,"allocation":{"base":base,"count":count},"reservations":reservations,"retired_records":retired,"skipped_names":skipped_names,"reply_designation_readiness":designation_counts.report(),"wall_seconds":begun.elapsed().as_secs_f64()});
     if migration {
         result["mail_migration"] = json!({"records":migration_rows,"unattributed_names":skipped_names,"activation_verified":false});
     }
@@ -475,7 +702,8 @@ mod tests {
         fs::create_dir(&recovered).expect("launch recovery path");
         let retried = root.join(".retired-R-0-6-7");
         fs::create_dir(&retried).expect("later retry path");
-        publish_reservation(&reservation_path(&root, "R"), &json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"launcher_pid":pid,"launcher_start":start,"observer_state":"not-started","dead_preparation_retired":{"state":"retired-dead-preparation","planned_paths":[{"source":root.join("R"),"target":recovered}]},"retry_retirements":[{"state":"retired-dead-preparation","planned_paths":[{"source":root.join("R"),"target":retried}]}],"plan":{}})).expect("reservation");
+        publish_reservation(&reservation_path(&root, "R"), &json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"launcher_pid":pid,"launcher_start":start,"observer_state":"not-started","rounds":[{"step":"dispatch"},{"step":"review","reply_designation":{"state":"unmeasured"}},{"step":"close"}],"round_rollback":{"nonce":"a".repeat(64),"before":"{}"},"retirement_absence_plan":{"before":{},"flags":["--confirm-missing-lease"]},"dead_preparation_retired":{"state":"retired-dead-preparation","planned_paths":[{"source":root.join("R"),"target":recovered}]},"retry_retirements":[{"state":"retired-dead-preparation","planned_paths":[{"source":root.join("R"),"target":retried}]}],"plan":{}})).expect("reservation");
+        publish_reservation(&reservation_path(&root, "T"), &json!({"schema":1,"phase":"started","loop":"alpha","run":"T","worker_uid":3001,"observer_state":"not-started","rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}}],"round_rollback":{"nonce":"b".repeat(64),"before":"{}"},"dispatch_intent":{"nonce":"b".repeat(64)},"plan":{}})).expect("stranded rollback");
         let retired_path = root.join(".retired-S-20-1-2");
         let retired_driver = root.join(".retired-S-0-1-2");
         fs::create_dir(&retired_driver).expect("retired driver");
@@ -483,9 +711,107 @@ mod tests {
         std::os::unix::fs::symlink("missing-target", &lease)
             .expect("lease name without readable target");
         fs::write(root.join(".prepare-orphan.lock"), b"").expect("orphan lease");
-        publish_reservation(&retired_path, &json!({"schema":1,"phase":"retired","loop":"alpha","run":"S","worker_uid":3001,"observer_state":"not-started","current_retirement":{"reservation_path":{"target":retired_path},"planned_paths":[{"source":root.join("S"),"target":retired_driver},{"source":root.join("shared"),"target":retried}]},"plan":{}})).expect("retired record");
+        publish_reservation(&retired_path, &json!({"schema":1,"phase":"retired","loop":"alpha","run":"S","worker_uid":3001,"observer_state":"not-started","rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}},{"step":"close"}],"current_retirement":{"reservation_path":{"target":retired_path},"planned_paths":[{"source":root.join("S"),"target":retired_driver},{"source":root.join("shared"),"target":retried}]},"plan":{}})).expect("retired record");
+        for (name, phase) in [
+            (".census-rewrite-R.json", "pending"),
+            (".retire-rewrite-R.json", "pending"),
+            (".retire-node-rewrite.json", "pending"),
+            (".census-rewrite-S.json", "complete"),
+        ] {
+            publish_reservation(
+                &root.join(name),
+                &json!({"schema":1,"phase":phase,"plan":if name == ".retire-node-rewrite.json" {
+                    json!({"files":[{"path":reservation_path(&root, "R")},{"path":reservation_path(&root, "T")}]})
+                } else {json!({"before":{}})}}),
+            )
+            .expect("rewrite journal");
+        }
+        let before = fs::read(reservation_path(&root, "R")).expect("before census");
         admission::set(home, "alpha", true).expect("paused admission");
         let report = run(home, "alpha").expect("census");
+        assert_eq!(
+            fs::read(reservation_path(&root, "R")).expect("after census"),
+            before
+        );
+        assert_eq!(
+            report["reply_designation_readiness"]["rows_without_member"],
+            json!({"live":2,"retired":1})
+        );
+        assert_eq!(
+            report["reply_designation_readiness"]["pending_rollback_before_images"],
+            1
+        );
+        assert_eq!(
+            report["reply_designation_readiness"]["stranded_rollback_before_images"],
+            1
+        );
+        assert_eq!(
+            report["reply_designation_readiness"]["pending_absence_plans"],
+            1
+        );
+        assert_eq!(
+            report["reply_designation_readiness"]["pending_rewrite_transactions"],
+            json!({"census":1,"retirement":1,"node_retirement":1})
+        );
+        let blockers = report["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers");
+        for (kind, run, command) in [
+            (
+                "pending-absence-plan",
+                "R",
+                "superloop-lane retire alpha R --confirm-missing-lease --dry-run",
+            ),
+            (
+                "pending-census-rewrite",
+                "R",
+                "superloop-lane census rewrite alpha R --dry-run",
+            ),
+            (
+                "pending-retirement-rewrite",
+                "R",
+                "superloop-lane retire rewrite alpha R --dry-run",
+            ),
+            (
+                "pending-node-retirement-rewrite",
+                "R",
+                "superloop-lane retire rewrite-node alpha --dry-run",
+            ),
+            (
+                "pending-node-retirement-rewrite",
+                "T",
+                "superloop-lane retire rewrite-node alpha --dry-run",
+            ),
+        ] {
+            assert!(
+                blockers.iter().any(|row| row["kind"] == kind
+                    && row["run"] == run
+                    && row["next_command"] == command
+                    && row["apply_command"] == command.replace("--dry-run", "--expect-digest HEX")),
+                "missing {kind} for {run}"
+            );
+        }
+        assert!(
+            blockers
+                .iter()
+                .any(|row| row["kind"] == "rollback-after-dispatch-intent"
+                    && row["run"] == "T"
+                    && row["next_command"].is_null())
+        );
+        assert_eq!(
+            blockers
+                .iter()
+                .filter(|row| row["kind"] == "round-without-member" && row["run"] == "R")
+                .count(),
+            2
+        );
+        assert_eq!(
+            blockers
+                .iter()
+                .filter(|row| row["kind"] == "round-without-member" && row["run"] == "S")
+                .count(),
+            1
+        );
         assert_eq!(report["admission"]["state"], "paused");
         assert_eq!(
             report["reservations"][0]["identities"]["launcher"]["presence"],
@@ -529,6 +855,29 @@ mod tests {
                 .expect("skipped")
                 .iter()
                 .any(|name| name == "R")
+        );
+        publish_reservation(
+            &root.join(".retire-node-rewrite.json"),
+            &json!({
+                "schema":2,"phase":"pending","plan":{"files":[]},
+                "manifest":[{"path":reservation_path(&root,"R")},
+                    {"path":reservation_path(&root,"T")}]}
+            ),
+        )
+        .expect("schema 2 rewrite journal");
+        let schema_two = run(home, "alpha").expect("schema 2 census");
+        assert_eq!(
+            schema_two["reply_designation_readiness"]["pending_rewrite_transactions"]["node_retirement"],
+            1
+        );
+        assert_eq!(
+            schema_two["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .filter(|row| row["kind"] == "pending-node-retirement-rewrite")
+                .count(),
+            2
         );
         let reused_retired = root.join(".retired-R-20-3-4");
         publish_reservation(&reused_retired, &json!({"schema":1,"phase":"retired","loop":"alpha","run":"R","worker_uid":3001,"observer_state":"not-started","current_retirement":{"reservation_path":{"target":reused_retired},"planned_paths":[]},"plan":{}})).expect("retired reuse record");
@@ -598,6 +947,20 @@ mod tests {
                 "state":"unmeasured","reason":"historical-envelope:four-key-run-refusals",
                 "expires_unix":null,"refresh_due_unix":null,"evidence_state":"published","refused":null
             })
+        );
+        let rewrite = root.join(".retire-rewrite-R.json");
+        publish_reservation(&rewrite, &json!({"schema":1,"phase":"unknown"}))
+            .expect("unknown phase journal");
+        assert_eq!(
+            run(home, "alpha").expect_err("unknown phase refuses").kind,
+            "census-record"
+        );
+        fs::write(&rewrite, b"malformed").expect("corrupt journal");
+        assert_eq!(
+            run(home, "alpha")
+                .expect_err("malformed journal refuses")
+                .kind,
+            "census-record"
         );
     }
 }

@@ -16,7 +16,7 @@ pub(super) fn hash(bytes: &[u8]) -> String {
     text
 }
 
-pub(super) fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, LaneError> {
+pub(in crate::launch) fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, LaneError> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)
