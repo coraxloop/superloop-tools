@@ -235,8 +235,7 @@ fn workspace_judgement_reader_requires_flag_coverage_floor() {
     envelope.execution = execute_command::workspace::Execution::Argv {
         words: vec!["сargo".as_bytes().to_vec()],
     };
-    let row = approved_record(&store, "R:2b", &envelope).into_value();
-    let mut missing = row.clone();
+    let mut missing = approved_record(&store, "R:2b", &envelope).into_value();
     missing["workspace_agent_input"]["flagged_code_points"]["rows"] = json!([]);
     missing["workspace_agent_input"]["flagged_code_points"]["omitted_count"] = json!(0);
     assert_eq!(

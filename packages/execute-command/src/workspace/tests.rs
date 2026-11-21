@@ -514,6 +514,121 @@ fn workspace_agent_input_compacts_repeated_flags_and_bounds_rows() {
     assert_eq!(input["flagged_code_points"]["omitted_count"], 16);
     validate_agent_observation(&input, &envelope, &grant).unwrap();
 }
+
+/// ´test:unit:workspace-agent-input-orders-execution-before-other-fields´
+#[test]
+fn workspace_agent_input_orders_execution_before_other_fields() {
+    let (mut envelope, grant, _, _) = fixture();
+    envelope.execution = Execution::Argv {
+        words: vec!["сargo".as_bytes().to_vec()],
+    };
+    envelope.cwd = vec![(0x391..0x3d1).filter_map(char::from_u32).collect()];
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    let rows = input["flagged_code_points"]["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 64);
+    assert_eq!(rows[0]["field"], "execution.words[0]");
+    assert_eq!(rows[0]["code_point"], "U+0441");
+    assert_eq!(input["flagged_code_points"]["omitted_count"], 1);
+    validate_agent_observation(&input, &envelope, &grant).unwrap();
+
+    let mut words = vec![b"x".to_vec(); 11];
+    words[2] = "é".as_bytes().to_vec();
+    words[10] = "α".as_bytes().to_vec();
+    envelope.cwd = vec!["checkout".into()];
+    envelope.execution = Execution::Argv { words };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    let rows = input["flagged_code_points"]["rows"].as_array().unwrap();
+    assert_eq!(rows[0]["field"], "execution.words[2]");
+    assert_eq!(rows[1]["field"], "execution.words[10]");
+}
+
+fn decode_debug_display(display: &str) -> String {
+    let mut decoded = String::new();
+    let mut chars = display.chars();
+    while let Some(current) = chars.next() {
+        if current != '\\' {
+            decoded.push(current);
+            continue;
+        }
+        match chars.next().unwrap() {
+            '0' => decoded.push('\0'),
+            'n' => decoded.push('\n'),
+            'r' => decoded.push('\r'),
+            't' => decoded.push('\t'),
+            '\\' => decoded.push('\\'),
+            '\'' => decoded.push('\''),
+            '"' => decoded.push('"'),
+            'u' => {
+                assert_eq!(chars.next(), Some('{'));
+                let hex: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                decoded.push(char::from_u32(u32::from_str_radix(&hex, 16).unwrap()).unwrap());
+            }
+            other => panic!("unexpected debug escape: {other}"),
+        }
+    }
+    decoded
+}
+
+/// ´test:unit:workspace-agent-display-decodes-to-exact-lossy-bytes´
+#[test]
+fn workspace_agent_display_decodes_to_exact_lossy_bytes() {
+    let (mut envelope, grant, _, _) = fixture();
+    let word = vec![255, b'\\', b'\n', b'\''];
+    envelope.execution = Execution::Argv {
+        words: vec![
+            b"program".to_vec(),
+            word.clone(),
+            "a\u{2028}\u{00a0}".as_bytes().to_vec(),
+        ],
+    };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    let shown = input["execution_readable_display_only"]["words"]
+        .as_array()
+        .unwrap();
+    assert_eq!(
+        decode_debug_display(shown[1].as_str().unwrap()),
+        String::from_utf8_lossy(&word)
+    );
+    assert_eq!(
+        decode_debug_display(shown[2].as_str().unwrap()),
+        "a\u{2028}\u{00a0}"
+    );
+
+    envelope.execution = Execution::Sequence {
+        steps: vec![vec![b"program".to_vec(), word.clone()]],
+    };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    assert_eq!(
+        decode_debug_display(
+            input["execution_readable_display_only"]["steps"][0][1]
+                .as_str()
+                .unwrap()
+        ),
+        String::from_utf8_lossy(&word)
+    );
+
+    envelope.execution = Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "echo \\\"a\\\"\u{2028}".into(),
+    };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    assert_eq!(
+        decode_debug_display(
+            input["execution_readable_display_only"]["shell"]
+                .as_str()
+                .unwrap()
+        ),
+        "/bin/sh"
+    );
+    assert_eq!(
+        decode_debug_display(
+            input["execution_readable_display_only"]["text"]
+                .as_str()
+                .unwrap()
+        ),
+        "echo \\\"a\\\"\u{2028}"
+    );
+}
 /// ´test:unit:workspace-agent-input-pairs-readable-execution-with-exact-bytes´
 #[test]
 fn workspace_agent_input_pairs_readable_execution_with_exact_bytes() {

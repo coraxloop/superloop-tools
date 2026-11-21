@@ -23,26 +23,6 @@ fn readable_execution(execution: &Execution) -> Value {
         }
     }
 }
-fn flags(path: &str, bytes: &[u8], rows: &mut BTreeMap<(String, char), (usize, usize)>) {
-    // Decode valid spans only. Invalid UTF-8 remains explicit bytes in execution.
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let rest = &bytes[offset..];
-        let (valid, skip) = match std::str::from_utf8(rest) {
-            Ok(s) => (s, 0),
-            Err(e) => (
-                std::str::from_utf8(&rest[..e.valid_up_to()]).unwrap_or_default(),
-                e.error_len()
-                    .unwrap_or_else(|| rest.len() - e.valid_up_to()),
-            ),
-        };
-        for (i, c) in valid.char_indices().filter(|(_, c)| flagged(*c)) {
-            let row = rows.entry((path.to_owned(), c)).or_insert((offset + i, 0));
-            row.1 += 1;
-        }
-        offset += valid.len() + skip;
-    }
-}
 /// Agent sees exact byte arrays or exact Unicode shell text, plus flagged code points.
 /// # Errors
 /// Refuses a malformed or stale context before rendering.
@@ -58,44 +38,22 @@ pub fn agent_input(
         &grant.run,
         &grant.node,
     )?;
-    let mut code_points = BTreeMap::new();
-    match &envelope.execution {
-        Execution::Argv { words } => {
-            for (i, w) in words.iter().enumerate() {
-                flags(&format!("execution.words[{i}]"), w, &mut code_points);
-            }
+    let mut code_points = Vec::new();
+    for (field, bytes) in all_field_bytes(envelope) {
+        let mut points = scan_points(bytes)
+            .into_iter()
+            .filter(|(point, _)| flagged(*point))
+            .collect::<Vec<_>>();
+        points.sort_by_key(|(_, (offset, _))| *offset);
+        for (point, (first_byte_offset, count)) in points {
+            code_points.push(json!({"field":field,"first_byte_offset":first_byte_offset,"code_point":format!("U+{:04X}",u32::from(point)),"count":count}));
         }
-        Execution::Sequence { steps } => {
-            for (s, words) in steps.iter().enumerate() {
-                for (i, w) in words.iter().enumerate() {
-                    flags(&format!("execution.steps[{s}][{i}]"), w, &mut code_points);
-                }
-            }
-        }
-        Execution::Shell { shell, text } => {
-            flags("execution.shell", shell.as_bytes(), &mut code_points);
-            flags("execution.text", text.as_bytes(), &mut code_points);
-        }
-    }
-    for (i, c) in envelope.cwd.iter().enumerate() {
-        flags(&format!("cwd[{i}]"), c.as_bytes(), &mut code_points);
-    }
-    for (i, (k, v)) in envelope.env_additions.iter().enumerate() {
-        flags(
-            &format!("env_additions[{i}].name"),
-            k.as_bytes(),
-            &mut code_points,
-        );
-        flags(
-            &format!("env_additions[{i}].value"),
-            v.as_bytes(),
-            &mut code_points,
-        );
     }
     let omitted_count = code_points.len().saturating_sub(MAX_FLAG_ROWS);
-    let rows = code_points.into_iter().take(MAX_FLAG_ROWS).map(|((field, point), (first_byte_offset, count))| {
-        json!({"field":field,"first_byte_offset":first_byte_offset,"code_point":format!("U+{:04X}",u32::from(point)),"count":count})
-    }).collect::<Vec<_>>();
+    let rows = code_points
+        .into_iter()
+        .take(MAX_FLAG_ROWS)
+        .collect::<Vec<_>>();
     Ok(
         json!({"execution":envelope.execution,"execution_readable_display_only":readable_execution(&envelope.execution),"cwd":envelope.cwd,"env_additions":envelope.env_additions,"grant_summary":grant,"miss_reasons":reasons,"flagged_code_points":{"rows":rows,"omitted_count":omitted_count}}),
     )
@@ -138,49 +96,6 @@ fn display_valid(display: &Value, execution: &Execution) -> bool {
     }
 }
 
-fn field_bytes<'a>(field: &str, envelope: &'a Envelope) -> Option<&'a [u8]> {
-    match &envelope.execution {
-        Execution::Argv { words } => {
-            for (i, word) in words.iter().enumerate() {
-                if field == format!("execution.words[{i}]") {
-                    return Some(word);
-                }
-            }
-        }
-        Execution::Sequence { steps } => {
-            for (step, words) in steps.iter().enumerate() {
-                for (i, word) in words.iter().enumerate() {
-                    if field == format!("execution.steps[{step}][{i}]") {
-                        return Some(word);
-                    }
-                }
-            }
-        }
-        Execution::Shell { shell, text } => {
-            if field == "execution.shell" {
-                return Some(shell.as_bytes());
-            }
-            if field == "execution.text" {
-                return Some(text.as_bytes());
-            }
-        }
-    }
-    for (i, component) in envelope.cwd.iter().enumerate() {
-        if field == format!("cwd[{i}]") {
-            return Some(component.as_bytes());
-        }
-    }
-    for (i, (name, value)) in envelope.env_additions.iter().enumerate() {
-        if field == format!("env_additions[{i}].name") {
-            return Some(name.as_bytes());
-        }
-        if field == format!("env_additions[{i}].value") {
-            return Some(value.as_bytes());
-        }
-    }
-    None
-}
-
 fn all_field_bytes(envelope: &Envelope) -> Vec<(String, &[u8])> {
     let mut fields = Vec::new();
     match &envelope.execution {
@@ -211,8 +126,9 @@ fn all_field_bytes(envelope: &Envelope) -> Vec<(String, &[u8])> {
     fields
 }
 
-fn distinct_points(bytes: &[u8]) -> std::collections::BTreeSet<char> {
-    let mut points = std::collections::BTreeSet::new();
+fn scan_points(bytes: &[u8]) -> BTreeMap<char, (usize, usize)> {
+    // Invalid UTF-8 remains in execution as bytes and contributes no code point.
+    let mut points = BTreeMap::new();
     let mut offset = 0;
     while offset < bytes.len() {
         let rest = &bytes[offset..];
@@ -225,7 +141,10 @@ fn distinct_points(bytes: &[u8]) -> std::collections::BTreeSet<char> {
                     .unwrap_or_else(|| rest.len() - error.valid_up_to()),
             ),
         };
-        points.extend(valid.chars());
+        for (i, point) in valid.char_indices() {
+            let row = points.entry(point).or_insert((offset + i, 0));
+            row.1 += 1;
+        }
         offset += valid.len() + skip;
     }
     points
@@ -233,41 +152,6 @@ fn distinct_points(bytes: &[u8]) -> std::collections::BTreeSet<char> {
 
 const fn floor_point(point: char) -> bool {
     !point.is_ascii() || matches!(point, '\0'..='\u{001f}' | '\u{007f}')
-}
-
-fn point_at(bytes: &[u8], offset: usize) -> Option<char> {
-    let tail = bytes.get(offset..)?;
-    (1..=4).find_map(|len| {
-        tail.get(..len)
-            .and_then(|part| std::str::from_utf8(part).ok())
-            .and_then(|s| s.chars().next())
-    })
-}
-
-fn occurrences(bytes: &[u8], point: char) -> (Option<usize>, usize) {
-    let mut first = None;
-    let mut count = 0;
-    let mut offset = 0;
-    while offset < bytes.len() {
-        let rest = &bytes[offset..];
-        let (valid, skip) = match std::str::from_utf8(rest) {
-            Ok(s) => (s, 0),
-            Err(error) => (
-                std::str::from_utf8(&rest[..error.valid_up_to()]).unwrap_or_default(),
-                error
-                    .error_len()
-                    .unwrap_or_else(|| rest.len() - error.valid_up_to()),
-            ),
-        };
-        for (i, current) in valid.char_indices() {
-            if current == point {
-                first.get_or_insert(offset + i);
-                count += 1;
-            }
-        }
-        offset += valid.len() + skip;
-    }
-    (first, count)
 }
 
 /// Check stored judge input without regenerating its display or flag policy.
@@ -312,15 +196,13 @@ pub fn validate_agent_observation(
         .as_array()
         .filter(|rows| rows.len() <= MAX_FLAG_ROWS)
         .ok_or_else(|| protocol("workspace judgement flag rows differ"))?;
-    let mut seen = std::collections::BTreeSet::new();
+    let mut claims = BTreeMap::new();
     for row in rows {
         if !exact_keys(row, &["field", "first_byte_offset", "code_point", "count"]) {
             return Err(protocol("workspace judgement flag row differs"));
         }
         let field = row["field"]
             .as_str()
-            .ok_or_else(|| protocol("workspace judgement flag field differs"))?;
-        let bytes = field_bytes(field, envelope)
             .ok_or_else(|| protocol("workspace judgement flag field differs"))?;
         let offset = row["first_byte_offset"]
             .as_u64()
@@ -335,26 +217,32 @@ pub fn validate_agent_observation(
         let count = row["count"]
             .as_u64()
             .ok_or_else(|| protocol("workspace judgement flag count differs"))?;
-        let (first, actual_count) = occurrences(bytes, point);
-        if !seen.insert((field, point))
-            || point_at(bytes, offset) != Some(point)
-            || first != Some(offset)
-            || count != actual_count as u64
+        if claims
+            .insert((field.to_owned(), point), (offset, count))
+            .is_some()
         {
-            return Err(protocol("workspace judgement flag truth differs"));
+            return Err(protocol("workspace judgement flag row repeats"));
         }
     }
     let mut missing_floor = 0;
     let mut available_unrowed = 0;
     for (field, bytes) in all_field_bytes(envelope) {
-        for point in distinct_points(bytes) {
-            if !seen.contains(&(field.as_str(), point)) {
-                available_unrowed += 1;
-                if floor_point(point) {
-                    missing_floor += 1;
+        for (point, (offset, count)) in scan_points(bytes) {
+            match claims.remove(&(field.clone(), point)) {
+                Some((claimed_offset, claimed_count))
+                    if claimed_offset == offset && claimed_count == count as u64 => {}
+                Some(_) => return Err(protocol("workspace judgement flag truth differs")),
+                None => {
+                    available_unrowed += 1;
+                    if floor_point(point) {
+                        missing_floor += 1;
+                    }
                 }
             }
         }
+    }
+    if !claims.is_empty() {
+        return Err(protocol("workspace judgement flag field or point differs"));
     }
     let omitted = flags["omitted_count"].as_u64().unwrap_or_default();
     if omitted < missing_floor || omitted > available_unrowed {
