@@ -1765,6 +1765,46 @@ fn write_claude_run(home: &Path, worker_uid: u32, source: &ClaudeSource) -> Resu
     .map(|_published| ())
 }
 
+/// Remove only the selected backend's worker projection after its service ends.
+/// The entry is inspected beneath the held directory without opening its contents.
+pub(crate) fn withdraw_worker_projection(
+    home: &Path,
+    worker_uid: u32,
+    backend: BoxBackend,
+) -> Result<(), LaneError> {
+    let (directory, name) = match backend {
+        BoxBackend::Codex => (home.join(".codex"), "auth.json"),
+        BoxBackend::Claude => (home.join(".claude"), ".credentials.json"),
+    };
+    let fd = open_dir(&directory, owner_identity().0, worker_uid, 0o700)?;
+    let stat = match fstatat(&fd, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(Errno::ENOENT) => return Ok(()),
+        Err(error) => return Err(failure("credential-withdraw", error.to_string())),
+    };
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+        || stat.st_uid != worker_uid
+        || stat.st_mode & 0o7777 != 0o600
+    {
+        return Err(failure(
+            "credential-withdraw",
+            "worker projection changed type, owner or mode",
+        ));
+    }
+    unlinkat(&fd, name, UnlinkatFlags::NoRemoveDir)
+        .or_else(|error| {
+            if error == Errno::ENOENT {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| failure("credential-withdraw", error.to_string()))?;
+    File::from(fd)
+        .sync_all()
+        .map_err(|error| failure("credential-withdraw", error.to_string()))
+}
+
 /// Callers hold the loop refresh lock through this operation and worker publication.
 /// This preserves the identity check followed by rename; it is not an atomic CAS.
 fn refresh_provider<P: OwnerProvider>(
@@ -2488,6 +2528,55 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("private fixture root");
         root
+    }
+
+    /// # Panics
+    /// Panics if withdrawal touches another entry, reads a projection, or a later
+    /// publication cannot restore the selected worker file.
+    /// ´test:unit:codex-worker-projection-withdraws-and-republishes´
+    #[test]
+    fn codex_worker_projection_withdraws_and_republishes() {
+        let root = claude_fixture_root();
+        let uid = owner_identity().0;
+        let directory = root.path().join(".codex");
+        fs::create_dir(&directory).expect("worker state");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("worker state mode");
+        let other = directory.join("config.toml");
+        fs::write(&other, b"other worker state").expect("other entry");
+        atomic_file(
+            &directory,
+            "auth.json",
+            b"fictional access",
+            uid,
+            uid,
+            0o700,
+            None,
+        )
+        .expect("first publication");
+        withdraw_worker_projection(root.path(), uid, BoxBackend::Codex)
+            .expect("service withdrawal");
+        assert!(!directory.join("auth.json").exists());
+        assert_eq!(
+            fs::read(&other).expect("other entry remains"),
+            b"other worker state"
+        );
+        withdraw_worker_projection(root.path(), uid, BoxBackend::Codex)
+            .expect("absent projection is harmless");
+        atomic_file(
+            &directory,
+            "auth.json",
+            b"next fictional access",
+            uid,
+            uid,
+            0o700,
+            None,
+        )
+        .expect("next round publication");
+        assert_eq!(
+            fs::read(directory.join("auth.json")).expect("next round file"),
+            b"next fictional access"
+        );
     }
 
     /// # Panics

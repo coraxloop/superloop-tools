@@ -950,6 +950,7 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
             let before = fs::read(&reservation).expect("reservation before service");
             let worker_file = worker.join(".claude/.credentials.json");
             let prior_worker = fs::read(&worker_file).ok();
+            let (projected_tx, projected_rx) = std::sync::mpsc::sync_channel(1);
             let request_socket =
                 crate::container_helper::socket_path(&runs.join("R")).expect("request socket path");
             let control_socket = crate::container_helper::control_socket_path(&runs.join("R"))
@@ -989,6 +990,7 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
                     _ => "",
                 };
                 let done = Arc::clone(&service_done);
+                let live_worker_file = worker_file.clone();
                 Some(std::thread::spawn(move || {
                     while !(evidence.exists() && request.exists() && control.exists()) {
                         if done.load(std::sync::atomic::Ordering::Acquire) {
@@ -1006,6 +1008,13 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
                         fs::write(&diagnostic, missing).expect("readiness diagnostic");
                         std::thread::sleep(Duration::from_millis(10));
                     }
+                    projected_tx
+                        .send((
+                            fs::metadata(&live_worker_file)
+                                .expect("live worker projection metadata"),
+                            fs::read(&live_worker_file).expect("live worker projection"),
+                        ))
+                        .expect("live publication observation");
                     let mut result = String::new();
                     if matches!(scenario, ServiceCase::Attempt | ServiceCase::OutsideSession) {
                         let alias_socket = client_socket.as_ref().expect("client socket alias");
@@ -1193,6 +1202,9 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
                 "read-mode service never runs the owner program"
             );
             if scenario != ServiceCase::Due {
+                let (metadata, projected_bytes) = projected_rx
+                    .recv()
+                    .expect("publication observed before launcher exit");
                 let saved: Value =
                     serde_json::from_slice(&fs::read(&reservation).expect("published reservation"))
                         .expect("reservation JSON");
@@ -1202,14 +1214,13 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
                 assert_eq!(receipt.len(), 2, "report reader accepts exactly two keys");
                 assert_eq!(receipt["source_inode"], source_meta.ino());
                 assert!(receipt["published_unix_ns"].as_u64().is_some());
-                let metadata = fs::metadata(&worker_file).expect("worker projection");
                 assert_eq!(
                     (metadata.uid(), metadata.gid(), metadata.mode() & 0o777),
                     (3000, 3000, 0o600)
                 );
+                assert!(!worker_file.exists(), "service withdrew worker projection");
                 let projected: Value =
-                    serde_json::from_slice(&fs::read(&worker_file).expect("worker bytes"))
-                        .expect("worker JSON");
+                    serde_json::from_slice(&projected_bytes).expect("worker JSON");
                 assert_eq!(projected.as_object().expect("worker object").len(), 1);
                 let fields = projected["claudeAiOauth"]
                     .as_object()
@@ -1231,6 +1242,19 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
                 .expect("evidence JSON");
                 assert_eq!(evidence["state"], "current", "{evidence}");
                 assert_eq!(evidence["backend"], "claude", "{evidence}");
+                if scenario == ServiceCase::NoClient {
+                    let mut next = saved;
+                    next["active_round"] = json!("review");
+                    next["rounds"]
+                        .as_array_mut()
+                        .expect("rounds")
+                        .push(json!({"step":"review"}));
+                    crate::container_helper::publish_round_credential_admitted(
+                        owner, "alpha", &mut next, admission,
+                    )
+                    .expect("next round republishes after withdrawal");
+                    assert!(worker_file.exists(), "next round projection is present");
+                }
             }
         },
     );

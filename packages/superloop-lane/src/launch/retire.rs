@@ -1196,8 +1196,24 @@ fn retire_record_confirmed_with(
         ));
     }
     if dry_run {
+        let backend = if saved["plan"]["backend"].is_null() {
+            crate::settings::BoxBackend::Codex
+        } else {
+            crate::settings::BoxBackend::from_plan(&saved["plan"])?
+        };
+        let projection = match backend {
+            crate::settings::BoxBackend::Codex => worker_home.join(".codex/auth.json"),
+            crate::settings::BoxBackend::Claude => worker_home.join(".claude/.credentials.json"),
+        };
+        let projection_custody = match fs::symlink_metadata(&projection) {
+            Ok(metadata) => {
+                json!({"present":true,"regular":metadata.file_type().is_file(),"uid":metadata.uid(),"mode":metadata.mode() & 0o7777})
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({"present":false}),
+            Err(error) => return Err(LaneError::input("retire-projection", error.to_string())),
+        };
         return Ok(
-            json!({"state":"would-retire","journal":record["current_retirement"],"identities":identities,"container_presence":"absent-by-label","worker_uid":saved["worker_uid"],"node_retirement":record["node_retirement"],"preview_sha256":digest}),
+            json!({"state":"would-retire","journal":record["current_retirement"],"identities":identities,"container_presence":"absent-by-label","worker_uid":saved["worker_uid"],"node_retirement":record["node_retirement"],"preview_sha256":digest,"worker_projection":projection_custody}),
         );
     }
     if saved["phase"] != "retiring" && saved["phase"] != "retired" {
@@ -2198,6 +2214,22 @@ mod tests {
         .expect("dry retirement");
         assert_eq!(preview["state"], "would-retire");
         assert_eq!(preview["worker_uid"], 3000);
+        assert_eq!(preview["worker_projection"]["present"], false);
+        let state = home.join(".codex");
+        fs::create_dir_all(&state).expect("legacy Codex worker state");
+        fs::write(state.join("auth.json"), b"\xff").expect("opaque worker projection");
+        let present = retire_record_with(
+            &root,
+            "R",
+            &home,
+            &record,
+            true,
+            |_, _| crate::container_helper::ProcessPresence::Absent,
+            || Ok(true),
+        )
+        .expect("metadata-only retirement preview");
+        assert_eq!(present["worker_projection"]["present"], true);
+        assert_eq!(present["worker_projection"]["regular"], true);
         assert!(reservation_path(&root, "R").exists());
         assert!(root.join("R").exists());
         let changed = retire_record_with(

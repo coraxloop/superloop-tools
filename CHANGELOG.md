@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Add a read-only reply designation query to the held loop-home reply session: it lists retained delivery instants and phases for one worker, loop recipient and exact outgoing name (``spec:loophome:reply-designation-query``). Compatibility: no public command, round record or settlement behavior changes and no operator acts; nothing calls the query yet.
 
+### Fixed
+
+- Withdraw a boxed worker's published sign-in projection, `.codex/auth.json` or `.claude/.credentials.json`, once the helper's registered service has stopped the box and joined its authority thread, by metadata beneath the worker's credential directory without opening the entry; keep the next round's publication before readiness, report projection presence by metadata in `retire --dry-run`, and set the helper's core limit to zero, soft and hard, before it serves (``test:unit:codex-worker-projection-withdraws-and-republishes``; ``test:unit:codex-service-end-withdraws-the-worker-projection``; ``test:unit:claude-fixture-service-round-publishes-read-mode``). Compatibility: existing runs resume unchanged and republish their projection at their next round; the projection is now absent between rounds and in newly retired homes, while homes retired earlier keep the file earlier releases left and a killed helper leaves its projection until a later removal; `retire --dry-run` output gains `worker_projection`; the Claude half stays behind the closed production gate; a helper crash leaves no core file and is diagnosed from its error and a fixture.
+
 ## [0.9.0] - 2026-11-21
 
 ### Added

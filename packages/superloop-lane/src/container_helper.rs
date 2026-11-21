@@ -2666,6 +2666,8 @@ impl Drop for ServiceResources {
 ///
 /// Refuses a changed saved request, a foreign peer, or a failed bounded child.
 pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
+    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)
+        .map_err(|error| LaneError::operation("helper-core-limit", error.to_string()))?;
     serve_admitted(run_dir, &RuntimeAdmission::Gate)
 }
 
@@ -2739,7 +2741,7 @@ fn serve_admitted_at(
     let backend =
         publish_helper_identity_admitted(&owner_home, &loop_name, &run, &runs_root, admission)?;
     let mut resources = ServiceResources::new();
-    resources.run_registered(
+    let result = resources.run_registered(
         (socket_slot, control_slot),
         (0, 0),
         loop_uid,
@@ -2784,7 +2786,38 @@ fn serve_admitted_at(
                 admission,
             )
         },
-    )
+    );
+    // run_registered has stopped the container and joined the authority thread.
+    // The next round republishes before it exposes the request socket.
+    finish_with_projection_withdrawal(result, &initial.record, backend)
+}
+
+fn finish_with_projection_withdrawal(
+    result: Result<(), LaneError>,
+    record: &Value,
+    backend: BoxBackend,
+) -> Result<(), LaneError> {
+    let withdrawal = crate::credential::withdraw_worker_projection(
+        Path::new(
+            record["plan"]["home"]
+                .as_str()
+                .ok_or_else(|| LaneError::input("credential-withdraw", "run home is absent"))?,
+        ),
+        record["worker_uid"]
+            .as_u64()
+            .and_then(|uid| u32::try_from(uid).ok())
+            .ok_or_else(|| LaneError::input("credential-withdraw", "worker UID is absent"))?,
+        backend,
+    );
+    match (result, withdrawal) {
+        (Ok(()), withdrawal) => withdrawal,
+        (Err(mut primary), Err(secondary)) => {
+            use std::fmt::Write as _;
+            let _written = write!(primary.detail, "; cleanup {secondary}");
+            Err(primary)
+        }
+        (Err(primary), Ok(())) => Err(primary),
+    }
 }
 
 fn serve_attempts(
@@ -3020,6 +3053,51 @@ mod tests {
         assert!(resources.controller.is_none() && resources.refresher.is_none());
         assert!(!root.join("request.sock").exists());
         assert!(!root.join("control.sock").exists());
+    }
+
+    /// # Panics
+    /// Panics if joined Codex service cleanup leaves its worker projection or
+    /// prevents the next round from publishing into the same slot.
+    /// ´test:unit:codex-service-end-withdraws-the-worker-projection´
+    #[test]
+    fn codex_service_end_withdraws_the_worker_projection() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let root = tempfile::tempdir().expect("service fixture");
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let gid = nix::unistd::Gid::effective().as_raw();
+        let state = root.path().join(".codex");
+        std::fs::create_dir(&state).expect("worker state");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+            .expect("worker state mode");
+        let projection = state.join("auth.json");
+        std::fs::write(&projection, b"fictional access").expect("published projection");
+        std::fs::set_permissions(&projection, std::fs::Permissions::from_mode(0o600))
+            .expect("projection mode");
+        let mut resources = super::ServiceResources::new();
+        let result = resources.run(
+            cleanup_slots(root.path()),
+            (uid, gid),
+            gid,
+            cleanup_authority,
+            |_| Ok(()),
+        );
+        assert_service_removed(root.path(), &resources);
+        let record = serde_json::json!({"plan":{"home":root.path()},"worker_uid":uid});
+        super::finish_with_projection_withdrawal(
+            result,
+            &record,
+            crate::settings::BoxBackend::Codex,
+        )
+        .expect("service withdrawal");
+        assert!(
+            !projection.exists(),
+            "service ended with no worker authority"
+        );
+        std::fs::write(&projection, b"next fictional access").expect("next round publication");
+        assert_eq!(
+            std::fs::read(&projection).expect("next round file"),
+            b"next fictional access"
+        );
     }
 
     /// ´test:unit:helper-service-setup-failures-clean-owned-sockets´
