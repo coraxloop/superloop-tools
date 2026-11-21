@@ -1517,8 +1517,8 @@ fn make_home_pinned_with_sources(
         let file = make_file(&state, &path, b"", 0o600)?;
         report_file(&mut reports, &file, &path, worker, worker, 0o600)?;
     }
-    if backend == crate::settings::BoxBackend::Codex {
-        let credential_path = state_path.join("auth.json");
+    if let Some(projection) = backend.metadata().projection.filter(|file| file.precreate) {
+        let credential_path = state_path.join(projection.name);
         let credential = make_file(&state, &credential_path, b"", 0o600)?;
         report_file(
             &mut reports,
