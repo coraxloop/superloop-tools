@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Add a read-only reply designation query to the held loop-home reply session: it lists retained delivery instants and phases for one worker, loop recipient and exact outgoing name (``spec:loophome:reply-designation-query``). Compatibility: no public command, round record or settlement behavior changes and no operator acts; nothing calls the query yet.
+
 ## [0.9.0] - 2026-11-21
 
 ### Added

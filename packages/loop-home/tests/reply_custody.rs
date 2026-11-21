@@ -856,6 +856,19 @@ fn measure(
     case: &str,
 ) {
     let (_writer, instant) = delivery(storage, journal, row);
+    let candidates = session
+        .reply_designation_deliveries("alpha.01.letter")
+        .expect("held session reads exact submission metadata");
+    assert_eq!(
+        candidates,
+        vec![(instant.clone(), journal::Phase::Complete)]
+    );
+    assert_eq!(
+        session
+            .reply_designation_deliveries("alpha.other.letter")
+            .expect("other submission name"),
+        Vec::new()
+    );
     let result = session
         .reply("review", &instant)
         .expect("held reply binding with writer active");
@@ -890,6 +903,13 @@ fn measure(
             nix::sys::stat::FchmodatFlags::FollowSymlink,
         )
         .expect("widen held journal");
+        let query_error = session
+            .reply_designation_deliveries("alpha.01.letter")
+            .expect_err("query revalidates journal");
+        assert!(
+            query_error.to_string().contains("anchor-mode"),
+            "{query_error}"
+        );
         let error = session
             .verify_reply("review", &instant)
             .expect_err("journal revalidated");

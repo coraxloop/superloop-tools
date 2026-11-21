@@ -595,6 +595,23 @@ impl ReplyCustody {
     }
 }
 impl ReplySession {
+    /// Read transport metadata for the selected worker's exact outgoing name.
+    /// The lifetime lease remains held; a later bind verifies custody again.
+    /// # Errors
+    /// Refuses changed worker custody, invalid names or journal evidence.
+    pub fn reply_designation_deliveries(
+        &self,
+        outgoing: &str,
+    ) -> Result<Vec<(Instant, journal::Phase)>> {
+        self.inventory.verify_worker(&self.identity)?;
+        let loop_name = &self.inventory.loop_name;
+        journal::reply_designation_deliveries_beneath(
+            &self.journal,
+            &format!("{loop_name}+{}", self.identity.name),
+            loop_name,
+            outgoing,
+        )
+    }
     /// Bind a worker-to-principal delivery while retaining the lifetime lease.
     /// # Errors
     /// Refuses changed inventory, delivery evidence or journal custody.
