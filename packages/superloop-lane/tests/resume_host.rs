@@ -45,6 +45,17 @@ fn public_resumed_launch_uses_real_work_scope() {
     scope::run("success");
 }
 
+/// The public launch refusal names each in-window worker delivery.
+fn public_missing_reply_refusal_names_in_window_deliveries() {
+    for case in [
+        "reply-candidates-two",
+        "reply-candidates-one",
+        "reply-candidates-none",
+    ] {
+        scope::run(case);
+    }
+}
+
 fn public_resumed_inspector_refusal_restores_and_retries() {
     for history in ["reply", "failed"] {
         scope::run(&format!("inspector:{history}"));
@@ -217,7 +228,7 @@ fn main() -> std::process::ExitCode {
             std::io::stdout().lock(),
             "test result: {}. {passed} passed; {failed} failed; 0 ignored; {} filtered out",
             if failed == 0 { "ok" } else { "FAILED" },
-            16 - passed - failed
+            17 - passed - failed
         )
         .expect("summary");
     }
@@ -228,7 +239,7 @@ fn main() -> std::process::ExitCode {
     }
 }
 
-fn cases() -> [(&'static str, fn()); 16] {
+fn cases() -> [(&'static str, fn()); 17] {
     [
         (
             "public_over_budget_round_settles_with_delivered_reply",
@@ -290,6 +301,10 @@ fn cases() -> [(&'static str, fn()); 16] {
         (
             "public_resumed_launch_uses_real_work_scope",
             public_resumed_launch_uses_real_work_scope,
+        ),
+        (
+            "public_missing_reply_refusal_names_in_window_deliveries",
+            public_missing_reply_refusal_names_in_window_deliveries,
         ),
     ]
 }

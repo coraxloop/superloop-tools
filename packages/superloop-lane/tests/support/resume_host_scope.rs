@@ -112,6 +112,19 @@ impl Drop for Scope {
 }
 pub(super) fn run(case: &str) {
     let mut scope = Scope::new();
+    if [
+        "reply-candidates-two",
+        "reply-candidates-one",
+        "reply-candidates-none",
+    ]
+    .contains(&case)
+    {
+        host::write(
+            scope.fixture.as_ref().expect("root").home().join(case),
+            b"",
+            0o600,
+        );
+    }
     let result = scope.execute(case);
     let stopped = scope.stop();
     assert!(stopped.is_ok(), "{stopped:?}");
@@ -165,6 +178,85 @@ fn next_round(fixture: &host::Host, choose: bool) -> std::process::ExitCode {
     std::process::ExitCode::SUCCESS
 }
 
+fn reply_candidates_child(fixture: &host::Host, case: &str) -> std::process::ExitCode {
+    let error = fixture
+        .launch(false)
+        .expect_err("unbound reply refuses launch");
+    assert!(error.detail.contains("reply has no verified mail binding"));
+    let report: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(fixture.home().join("runs/.report=R=review.json"))
+            .expect("refused launch report"),
+    )
+    .expect("report JSON");
+    let settlement = &report["settlement"];
+    let mut expected: Vec<String> = if case == "reply-candidates-none" {
+        Vec::new()
+    } else {
+        serde_json::from_slice(
+            &std::fs::read(fixture.home().join("candidate-instants.json"))
+                .expect("delivered instants"),
+        )
+        .expect("instant list")
+    };
+    expected.sort_unstable();
+    assert_eq!(
+        settlement["candidate_count"],
+        expected.len(),
+        "{settlement}"
+    );
+    assert_eq!(
+        settlement["candidate_deliveries"],
+        serde_json::json!(&expected)
+    );
+    assert!(settlement["window"]["start_utc"].is_string());
+    assert!(settlement["window"]["end_utc"].is_string());
+    for instant in &expected {
+        let command =
+            format!("superloop-lane bind-reply alpha R --step review --delivery {instant}");
+        assert!(
+            settlement["candidate_commands"]
+                .as_array()
+                .expect("commands")
+                .iter()
+                .any(|item| item.as_str() == Some(command.as_str()))
+        );
+        assert!(
+            settlement["guidance"]
+                .as_str()
+                .expect("guidance")
+                .contains(&command)
+        );
+        assert!(error.detail.contains(&command));
+    }
+    if expected.is_empty() {
+        assert!(
+            settlement["guidance"]
+                .as_str()
+                .expect("guidance")
+                .contains("preview null-readback recovery")
+        );
+    }
+    let saved: serde_json::Value =
+        serde_json::from_slice(&fixture.reservation()).expect("failed reservation");
+    assert_eq!(saved["phase"], "failed");
+    assert_eq!(saved["rounds"][1]["phase"], "failed");
+    assert!(saved["rounds"][1]["reply"].is_null());
+    assert_eq!(saved["mail_replies"].as_array().expect("bindings").len(), 0);
+    assert!(saved.get("reply_candidate_observation").is_none());
+    assert!(
+        saved["rounds"][1]["settlement_error"]
+            .as_str()
+            .expect("settlement refusal")
+            .contains("reply has no verified mail binding")
+    );
+    writeln!(
+        std::io::stdout().lock(),
+        "CANDIDATE-REFUSAL {case} {settlement}"
+    )
+    .expect("session-facing refusal");
+    std::process::ExitCode::SUCCESS
+}
+
 pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     let [case, home, device, inode] = args else {
         panic!("scope arguments");
@@ -189,6 +281,9 @@ pub(super) fn child(args: &[String]) -> std::process::ExitCode {
     }
     if case == "late-reply" {
         return late_reply_child(&fixture);
+    }
+    if case.starts_with("reply-candidates-") {
+        return reply_candidates_child(&fixture, case);
     }
     if case == "stop-race" {
         let error = fixture.launch(false).expect_err("real helper stop refuses");

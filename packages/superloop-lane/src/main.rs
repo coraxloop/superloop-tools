@@ -644,6 +644,34 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
             run,
             option,
             owner_home,
+            select,
+            start_flag,
+            window_start,
+            end_flag,
+            window_end,
+        ] = args
+            && option == "--owner-home"
+            && select == "--select-reply"
+            && start_flag == "--window-start"
+            && end_flag == "--window-end"
+        {
+            let report = launch::private_reply_candidates(
+                Path::new(owner_home),
+                loop_name,
+                run,
+                window_start,
+                window_end,
+            )?;
+            writeln!(io::stdout().lock(), "{report}")
+                .map_err(|error| LaneError::operation("stdout", error.to_string()))?;
+            return Ok(0);
+        }
+        if let [
+            _,
+            loop_name,
+            run,
+            option,
+            owner_home,
             round_flag,
             step,
             rest @ ..,

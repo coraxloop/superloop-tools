@@ -1914,6 +1914,8 @@ fn resume_with_program(
     };
     let mut driver_started = false;
     let mut child_end = build::ChildEnd::default();
+    let reply_window_start = loop_home::mail::instant::Instant::now()
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
     let result = build::run_checked_with_pid(
         entry_program,
         argv,
@@ -1942,6 +1944,8 @@ fn resume_with_program(
         "driver_end",
         super::driver_completion(&result, driver_started, &child_end),
     )?;
+    let reply_window_end = loop_home::mail::instant::Instant::now()
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
     let helper_stop = super::stop_helper_with_bound(&mut helper, &plan, &verified_runs, stop_bound);
     if let Some(status) = helper
         .try_wait()
@@ -1965,7 +1969,7 @@ fn resume_with_program(
     ];
     let settlement = build::run_checked_with_private_launch(
         &podman,
-        settle,
+        settle.clone(),
         &environment,
         owner_home,
         60,
@@ -2031,13 +2035,45 @@ fn resume_with_program(
         publish_reservation(&path, &saved)?;
         (round_dir, saved["thread_id"].clone(), saved)
     };
+    let mut report_publication = publication.clone();
+    if settlement.as_ref().err().is_some_and(|error| {
+        error
+            .line()
+            .contains(super::steering::MISSING_REPLY_BINDING)
+    }) {
+        let mut select_argv = settle;
+        select_argv.extend([
+            "--select-reply".into(),
+            "--window-start".into(),
+            reply_window_start.to_string(),
+            "--window-end".into(),
+            reply_window_end.to_string(),
+        ]);
+        report_publication["reply_candidate_observation"] = build::run_checked_with_private_launch(
+            &podman,
+            select_argv,
+            &environment,
+            owner_home,
+            60,
+            "reply-candidates",
+            &verified_home,
+            &root,
+            &verified_runs,
+            None,
+        )
+        .and_then(|output| {
+            serde_json::from_str::<Value>(&output)
+                .map_err(|error| LaneError::input("reply-candidates", error.to_string()))
+        })
+        .unwrap_or_else(|error| json!({"error":error.line()}));
+    }
     let report: Result<Value, LaneError> = (|| {
         let settlement_report = super::report::settlement_result(
             &settlement,
             &request.loop_name,
             &request.run,
             step,
-            &publication,
+            &report_publication,
         )?;
         let driver_report = result.as_ref().map_or_else(LaneError::line, Clone::clone);
         let publication = super::report::credential_publication(&publication)?;

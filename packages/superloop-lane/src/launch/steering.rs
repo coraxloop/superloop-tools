@@ -6,6 +6,7 @@ use nix::unistd::Uid;
 use serde_json::{Value, json};
 use std::fs::File;
 use std::io::{Read as _, Write as _};
+use std::os::fd::AsRawFd as _;
 use std::os::unix::fs::MetadataExt as _;
 use std::path::{Path, PathBuf};
 
@@ -49,6 +50,85 @@ impl Request {
     }
 }
 pub(super) const MISSING_REPLY_BINDING: &str = "reply has no verified mail binding; bind-reply LOOP RUN --step STEP --delivery UTC_INSTANT before settlement";
+
+/// List inbox names within the completed round's window without binding any delivery.
+/// The public binder verifies custody for whichever instant a session later chooses.
+///
+/// # Errors
+/// Refuses missing round evidence or an inbox that cannot be held beneath the home.
+pub(super) fn round_reply_candidates(
+    owner_home: &Path,
+    plan: &Plan,
+    run: &str,
+    start: &loop_home::mail::instant::Instant,
+    end: &loop_home::mail::instant::Instant,
+) -> Result<Value, LaneError> {
+    let root = plan
+        .driver_dir
+        .parent()
+        .ok_or_else(|| failure("runs root absent"))?;
+    let record = read_reservation(&reservation_path(root, run))?
+        .ok_or_else(|| failure("reservation absent"))?;
+    let identity = identity(&record)?;
+    let loop_name = record["loop"]
+        .as_str()
+        .ok_or_else(|| failure("loop absent"))?;
+    if start > end {
+        return Err(failure("round window end precedes start"));
+    }
+    let home = File::open(owner_home).map_err(failure)?;
+    let relative = Path::new(".var/loops").join(loop_name).join("mail/inbox");
+    let inbox = File::from(
+        nix::fcntl::openat2(
+            &home,
+            &relative,
+            nix::fcntl::OpenHow::new()
+                .flags(
+                    nix::fcntl::OFlag::O_RDONLY
+                        | nix::fcntl::OFlag::O_DIRECTORY
+                        | nix::fcntl::OFlag::O_CLOEXEC,
+                )
+                .resolve(
+                    nix::fcntl::ResolveFlag::RESOLVE_BENEATH
+                        | nix::fcntl::ResolveFlag::RESOLVE_NO_SYMLINKS,
+                ),
+        )
+        .map_err(failure)?,
+    );
+    let sender = format!("{loop_name}+{}", identity.name);
+    let mut candidates = Vec::new();
+    for entry in
+        std::fs::read_dir(format!("/proc/self/fd/{}", inbox.as_raw_fd())).map_err(failure)?
+    {
+        let name = entry.map_err(failure)?.file_name();
+        let Some((who, instant)) = name
+            .to_str()
+            .and_then(|name| name.strip_suffix(".letter"))
+            .and_then(|stem| {
+                stem.len().checked_sub(24).and_then(|split| {
+                    stem.get(..split)
+                        .zip(stem.get(split..))
+                        .and_then(|(who, instant)| who.strip_suffix('.').map(|who| (who, instant)))
+                })
+            })
+        else {
+            continue;
+        };
+        if who != sender {
+            continue;
+        }
+        let Ok(delivery) = loop_home::mail::instant::Instant::parse(instant) else {
+            continue;
+        };
+        if delivery >= *start && delivery <= *end {
+            candidates.push(instant.to_owned());
+        }
+    }
+    candidates.sort_unstable();
+    Ok(
+        json!({"window":{"start_utc":start.to_string(),"end_utc":end.to_string()},"candidate_count":candidates.len(),"candidate_deliveries":candidates}),
+    )
+}
 
 pub(super) fn late_reply_allowed(record: &Value, step: &str, reply: bool) -> bool {
     reply

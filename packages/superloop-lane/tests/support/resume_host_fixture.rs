@@ -83,7 +83,10 @@ impl Host {
         );
     }
     pub(super) fn deliver_reply(&self) {
-        delivery(&self.home, "package-canonical-reply");
+        let _delivery = delivery(&self.home, "package-canonical-reply");
+    }
+    pub(super) fn deliver_reply_now(&self) -> String {
+        delivery(&self.home, "package-canonical-reply-now")
     }
     pub(super) fn reply(&self) {
         self.bind_reply().expect("production reply binding");
@@ -101,7 +104,7 @@ impl Host {
         if !self.home.join("late-reply").exists()
             && record["mail_replies"].as_array().is_none_or(Vec::is_empty)
         {
-            delivery(&self.home, "package-canonical-reply");
+            let _delivery = delivery(&self.home, "package-canonical-reply");
         }
         let request = superloop_lane::launch::steering::Request::parse(&[
             "alpha".into(),
@@ -411,9 +414,9 @@ fn seed(home: &Path) {
         .fixture_output("host seed", Duration::from_secs(180))
         .expect("seed");
     assert!(result.status.success(), "{result:?}");
-    delivery(home, "package-canonical-inbound-seed");
+    let _delivery = delivery(home, "package-canonical-inbound-seed");
 }
-fn delivery(home: &Path, phase: &str) {
+fn delivery(home: &Path, phase: &str) -> String {
     let owner = File::open(home).expect("owner").into();
     let runs = File::open(home.join("runs")).expect("runs").into();
     let image = std::env::current_exe().expect("seed image");
@@ -452,10 +455,13 @@ fn delivery(home: &Path, phase: &str) {
         .wait()
         .expect("seed output");
     assert!(result.status.success(), "{result:?}");
-    assert!(
-        String::from_utf8_lossy(&result.stdout).contains("PACKAGE-DELIVERY"),
-        "{result:?}"
-    );
+    let output = String::from_utf8(result.stdout).expect("delivery output");
+    output
+        .split_whitespace()
+        .skip_while(|word| *word != "PACKAGE-DELIVERY")
+        .nth(1)
+        .expect("delivery instant")
+        .to_owned()
 }
 
 const MAP_SETUP: &str = r#"

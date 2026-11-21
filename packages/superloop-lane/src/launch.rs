@@ -4656,6 +4656,8 @@ fn run_with_program(
     publish_reservation(&reservation, &record)?;
     let mut driver_started = false;
     let mut child_end = build::ChildEnd::default();
+    let reply_window_start = loop_home::mail::instant::Instant::now()
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
     let result = crate::container_helper::host_launch_bound(&record).and_then(|bound| {
         build::run_checked_with_pid(
             entry,
@@ -4696,6 +4698,8 @@ fn run_with_program(
         "driver_end",
         driver_completion(&result, driver_started, &child_end),
     )?;
+    let reply_window_end = loop_home::mail::instant::Instant::now()
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
     let helper_stop = stop_helper(&mut helper, &plan, &verified_runs);
     if let Some(status) = helper
         .try_wait()
@@ -4765,7 +4769,7 @@ fn run_with_program(
     crate::pinned::owner_executable(Path::new(&exe_word), caller.0)?;
     let settlement = build::run_checked_with_private_launch(
         &request.podman_bin,
-        settle_argv,
+        settle_argv.clone(),
         &environment,
         owner_home,
         60,
@@ -4856,6 +4860,38 @@ fn run_with_program(
     );
     let round_dir = report::round_dir(&plan, &record, None)?;
     publish_reservation(&reservation, &record)?;
+    let mut report_record = record.clone();
+    if settlement
+        .as_ref()
+        .err()
+        .is_some_and(|error| error.line().contains(steering::MISSING_REPLY_BINDING))
+    {
+        let mut select_argv = settle_argv;
+        select_argv.extend([
+            "--select-reply".into(),
+            "--window-start".into(),
+            reply_window_start.to_string(),
+            "--window-end".into(),
+            reply_window_end.to_string(),
+        ]);
+        report_record["reply_candidate_observation"] = build::run_checked_with_private_launch(
+            &request.podman_bin,
+            select_argv,
+            &environment,
+            owner_home,
+            60,
+            "reply-candidates",
+            &verified_home,
+            &root,
+            &verified_runs,
+            None,
+        )
+        .and_then(|output| {
+            serde_json::from_str::<Value>(&output)
+                .map_err(|error| LaneError::input("reply-candidates", error.to_string()))
+        })
+        .unwrap_or_else(|error| json!({"error":error.line()}));
+    }
     let report: Result<Value, LaneError> = (|| {
         let settlement_report = report::settlement_result(
             &settlement,
@@ -4864,7 +4900,7 @@ fn run_with_program(
             record["active_round"]
                 .as_str()
                 .ok_or_else(|| LaneError::input("launch-report", "active round is absent"))?,
-            &record,
+            &report_record,
         )?;
         let output = result.as_ref().map_or_else(LaneError::line, Clone::clone);
         let publication = report::credential_publication(&record)?;
@@ -4982,6 +5018,31 @@ fn record_failed_pre_driver(
             || record["observer_end"]["state"] == "uncertain"
     );
     publish_reservation(reservation, &record)
+}
+
+/// List a completed round's candidate inbox names in the settlement namespace.
+///
+/// # Errors
+/// Refuses an invalid window, missing reservation or untrusted namespace.
+pub fn private_reply_candidates(
+    owner_home: &Path,
+    loop_name: &str,
+    run: &str,
+    window_start: &str,
+    window_end: &str,
+) -> Result<Value, LaneError> {
+    if !nix::unistd::Uid::effective().is_root() {
+        return Err(LaneError::input(
+            "namespace-owner",
+            "rootless namespace root is required",
+        ));
+    }
+    let (plan, _) = crate::load_plan_for_record(owner_home, loop_name, run, (0, 0))?;
+    let start = loop_home::mail::instant::Instant::parse(window_start)
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
+    let end = loop_home::mail::instant::Instant::parse(window_end)
+        .map_err(|error| LaneError::input("mail-delivery", error.to_string()))?;
+    steering::round_reply_candidates(owner_home, &plan, run, &start, &end)
 }
 
 /// Verify the driver directory and record the worker reply outside its home.
