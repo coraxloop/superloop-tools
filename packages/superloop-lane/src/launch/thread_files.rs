@@ -109,10 +109,13 @@ fn scan(
             .ok_or_else(|| refusal("session entry changed during scan"))?;
         let meta = file.metadata().map_err(refusal)?;
         if meta.is_dir() {
-            if backend == BoxBackend::Codex {
-                let child = open(&file, Path::new("."), OFlag::O_RDONLY | OFlag::O_DIRECTORY)?
-                    .ok_or_else(|| refusal("session directory vanished"))?;
-                present |= scan(&child, backend, thread, worker, depth + 1, remaining)?;
+            match backend {
+                BoxBackend::Codex => {
+                    let child = open(&file, Path::new("."), OFlag::O_RDONLY | OFlag::O_DIRECTORY)?
+                        .ok_or_else(|| refusal("session directory vanished"))?;
+                    present |= scan(&child, backend, thread, worker, depth + 1, remaining)?;
+                }
+                BoxBackend::Claude => {}
             }
         } else if meta.is_file() {
             let matches = match backend {

@@ -153,11 +153,18 @@ pub(crate) fn session_event(backend: BoxBackend, line: &[u8]) -> Result<Option<S
         return Ok(None);
     };
     let key = match backend {
-        BoxBackend::Codex if event["type"] == "thread.started" => "thread_id",
-        BoxBackend::Claude if event["type"] == "system" && event["subtype"] == "init" => {
+        BoxBackend::Codex => {
+            if event["type"] != "thread.started" {
+                return Ok(None);
+            }
+            "thread_id"
+        }
+        BoxBackend::Claude => {
+            if event["type"] != "system" || event["subtype"] != "init" {
+                return Ok(None);
+            }
             "session_id"
         }
-        _ => return Ok(None),
     };
     let session = event[key]
         .as_str()
