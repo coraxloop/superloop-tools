@@ -333,49 +333,52 @@ pub(super) fn known_hosts(rows: &[Row]) -> String {
 pub(super) fn render(rows: &[Row], owner: &Path, name: &str) -> BTreeMap<String, String> {
     let mut files = BTreeMap::new();
     let known = known_hosts(rows);
-    for (artifact, home, alias, identity) in [
+    for (backend, artifact, home, alias, identity) in [
         (
+            Some(crate::settings::BoxBackend::Codex),
             "codex",
             crate::signin_home::lane_home(owner, name),
             "worker_alias",
             "worker_identity",
         ),
         (
+            Some(crate::settings::BoxBackend::Claude),
             "claude",
             crate::signin_home::claude_home(owner, name),
             "worker_alias",
             "worker_identity",
         ),
         (
+            None,
             "session",
             PathBuf::from("~/.ssh"),
             "session_alias",
             "session_identity",
         ),
     ] {
-        let mut config = if artifact == "codex" {
-            super::signin_home::route_header(
+        let mut config = match backend {
+            Some(crate::settings::BoxBackend::Codex) => super::signin_home::route_header(
                 name,
                 &rows
                     .iter()
                     .map(|row| row["node"].as_str())
                     .collect::<Vec<_>>(),
-            )
-        } else {
-            String::new()
+            ),
+            Some(crate::settings::BoxBackend::Claude) | None => String::new(),
         };
-        let known_file = home.join(if artifact == "session" {
-            "known_hosts.clients"
-        } else {
-            "known_hosts.routes"
+        let known_file = home.join(match backend {
+            Some(crate::settings::BoxBackend::Codex | crate::settings::BoxBackend::Claude) => {
+                "known_hosts.routes"
+            }
+            None => "known_hosts.clients",
         });
         let policy = "yes";
         config.extend(rows.iter().map(|row| {
-            let key = if artifact == "codex" {
-                home.join("keys")
-                    .join(Path::new(&row[identity]).file_name().unwrap_or_default())
-            } else {
-                PathBuf::from(&row[identity])
+            let key = match backend {
+                Some(crate::settings::BoxBackend::Codex) => home
+                    .join("keys")
+                    .join(Path::new(&row[identity]).file_name().unwrap_or_default()),
+                Some(crate::settings::BoxBackend::Claude) | None => PathBuf::from(&row[identity]),
             };
             stanza(row, alias, &key, &known_file, policy)
         }));
@@ -519,6 +522,38 @@ pub fn command(args: &[OsString]) -> std::process::ExitCode {
         return std::process::ExitCode::from(1);
     }
     std::process::ExitCode::from(status)
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::{Row, render};
+    use std::path::Path;
+
+    /// ´test:unit:rendered-routes-keep-each-backends-identity-form´
+    #[test]
+    fn rendered_routes_keep_each_backends_identity_form() {
+        let row: Row = [
+            ("node", "node-a"),
+            ("hostname", "node.example"),
+            ("port", "22"),
+            ("account", "worker"),
+            ("host_key_algorithm", "ssh-ed25519"),
+            ("host_key", "fictional-key"),
+            ("worker_alias", "worker-a"),
+            ("session_alias", "session-a"),
+            ("worker_identity", "/identity/worker"),
+            ("session_identity", "/identity/session"),
+        ]
+        .into_iter()
+        .map(|(key, value)| (key.to_owned(), value.to_owned()))
+        .collect();
+        let files = render(&[row], Path::new("/owner"), "alpha");
+        assert!(files["codex.ssh_config"].contains("/keys/worker"));
+        assert!(!files["codex.ssh_config"].contains("/identity/worker"));
+        assert!(files["claude.ssh_config"].contains("/identity/worker"));
+        assert!(files["session.ssh_config"].contains("/identity/session"));
+        assert!(files["session.ssh_config"].contains("known_hosts.clients"));
+    }
 }
 
 #[cfg(test)]
