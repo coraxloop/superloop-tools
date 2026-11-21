@@ -8,7 +8,7 @@ fn refusal(detail: impl Into<String>) -> LaneError {
     LaneError::input("retire-absence", detail)
 }
 
-pub(super) fn hash(bytes: &[u8]) -> String {
+pub(in crate::launch) fn hash(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
         let _written = write!(text, "{byte:02x}");

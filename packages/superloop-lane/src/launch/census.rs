@@ -2,50 +2,101 @@
 
 use super::*;
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DesignationMember {
+    Absent,
+    Valid,
+    Invalid,
+}
+
+fn designation_member(round: &Value) -> DesignationMember {
+    let Some(member) = round.get("reply_designation") else {
+        return DesignationMember::Absent;
+    };
+    if member.as_object().is_some_and(|fields| fields.len() == 1) && member["state"] == "unmeasured"
+    {
+        DesignationMember::Valid
+    } else {
+        DesignationMember::Invalid
+    }
+}
+
+fn root_entries(root: &Path) -> Result<Vec<(String, PathBuf)>, LaneError> {
+    let mut entries = fs::read_dir(root)
+        .map_err(|error| LaneError::input("census-root", format!("{}: {error}", root.display())))?
+        .map(|entry| {
+            entry.map(|entry| {
+                (
+                    entry.file_name().to_string_lossy().into_owned(),
+                    entry.path(),
+                )
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| LaneError::input("census-root", error.to_string()))?;
+    entries.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(entries)
+}
+
 #[derive(Default)]
 struct DesignationCounts {
     live_without_member: usize,
     retired_without_member: usize,
+    live_invalid_member: usize,
+    retired_invalid_member: usize,
+    retained_records: usize,
+    retained_bytes: u64,
     pending_rollback_before_images: usize,
     stranded_rollback_before_images: usize,
     pending_absence_plans: usize,
     pending_census_rewrites: usize,
     pending_retirement_rewrites: usize,
     pending_node_retirement_rewrites: usize,
+    pending_reply_rewrites: usize,
     blockers: Vec<Value>,
+    rollback_evidence: Vec<Value>,
 }
 
 impl DesignationCounts {
     fn row(&mut self, record: &Value, retired: bool, loop_name: &str) {
         let run = record["run"].as_str().unwrap_or_default();
-        for (index, round) in record["rounds"]
-            .as_array()
-            .into_iter()
-            .flatten()
-            .enumerate()
-        {
-            if round.get("reply_designation").is_some() {
-                continue;
+        let mut absent = 0;
+        let mut invalid = 0;
+        for round in record["rounds"].as_array().into_iter().flatten() {
+            match designation_member(round) {
+                DesignationMember::Absent => absent += 1,
+                DesignationMember::Invalid => invalid += 1,
+                DesignationMember::Valid => {}
             }
-            if retired {
-                self.retired_without_member += 1;
-            } else {
-                self.live_without_member += 1;
-            }
-            self.blockers
-                .push(json!({"kind":"round-without-member","run":run,
-                "step":round["step"],"index":index,"next_command":null,
-                "clears_by":"A later row rewrite adds the member; none exists in this release."}));
+        }
+        if retired {
+            self.retired_without_member += absent;
+            self.retired_invalid_member += invalid;
+        } else {
+            self.live_without_member += absent;
+            self.live_invalid_member += invalid;
+        }
+        if absent > 0 {
+            self.blockers.push(json!({"kind":"rounds-without-member","run":run,
+                "retired":retired,"count":absent,
+                "next_command":format!("superloop-lane census rewrite-replies {loop_name} --dry-run"),
+                "apply_command":format!("superloop-lane census rewrite-replies {loop_name} --expect-digest HEX"),
+                "then":"Replace HEX with preview_sha256 from the dry run."}));
+        }
+        if invalid > 0 {
+            self.blockers.push(json!({"kind":"rounds-with-invalid-member","run":run,
+                "retired":retired,"count":invalid,"next_command":null,
+                "clears_by":"Repair the invalid protected row with its owner; conversion refuses it."}));
         }
         if !retired && record.get("round_rollback").is_some() {
             if record.get("dispatch_intent").is_some() {
                 self.stranded_rollback_before_images += 1;
-                self.blockers.push(json!({"kind":"rollback-after-dispatch-intent",
+                self.rollback_evidence.push(json!({"kind":"rollback-after-dispatch-intent",
                     "run":run,"next_command":null,
                     "clears_by":"No restore command exists after dispatch intent; retain the run for owner repair."}));
             } else {
                 self.pending_rollback_before_images += 1;
-                self.blockers.push(json!({"kind":"pending-round-rollback",
+                self.rollback_evidence.push(json!({"kind":"pending-round-rollback",
                     "run":run,"next_command":null,
                     "clears_by":"A live launch may restore before intent or consume the image at spawn receipt. A crash leaves no standalone restore command; retain the run for owner repair."}));
             }
@@ -80,6 +131,28 @@ impl DesignationCounts {
         root: &Path,
         loop_name: &str,
     ) -> Result<bool, LaneError> {
+        if name == ".census-replies-pending.json" {
+            let bytes = super::retire::absences::read_bytes(path)?.ok_or_else(|| {
+                LaneError::input("census-record", format!("{} vanished", path.display()))
+            })?;
+            let journal: Value = serde_json::from_slice(&bytes).map_err(|error| {
+                LaneError::input("census-record", format!("{}: {error}", path.display()))
+            })?;
+            let (plan, digest) = reply_rewrite::validate_journal(&journal, loop_name)?;
+            if journal["phase"] == "pending" {
+                self.pending_reply_rewrites += 1;
+                for run in plan["runs"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                {
+                    self.blockers.push(json!({"kind":"pending-reply-row-rewrite","run":run,
+                        "next_command":format!("superloop-lane census rewrite-replies {loop_name} --expect-digest {digest}")}));
+                }
+            }
+            return Ok(true);
+        }
         let kind = if name.starts_with(".census-rewrite-") && name.ends_with(".json") {
             0
         } else if name.starts_with(".retire-rewrite-") && name.ends_with(".json") {
@@ -212,19 +285,25 @@ impl DesignationCounts {
         });
         json!({
             "rows_without_member":{"live":self.live_without_member,"retired":self.retired_without_member},
+            "rows_with_invalid_member":{"live":self.live_invalid_member,"retired":self.retired_invalid_member},
+            "retained_records":self.retained_records,"retained_bytes":self.retained_bytes,
             "pending_rollback_before_images":self.pending_rollback_before_images,
             "stranded_rollback_before_images":self.stranded_rollback_before_images,
+            "rollback_evidence":self.rollback_evidence,
             "pending_absence_plans":self.pending_absence_plans,
             "pending_rewrite_transactions":{
                 "census":self.pending_census_rewrites,
                 "retirement":self.pending_retirement_rewrites,
                 "node_retirement":self.pending_node_retirement_rewrites,
+                "reply_rows":self.pending_reply_rewrites,
             },
             "blockers":self.blockers
         })
     }
 }
 
+#[path = "census_reply_rewrite.rs"]
+pub mod reply_rewrite;
 #[path = "census_rewrite.rs"]
 pub mod rewrite;
 
@@ -486,18 +565,12 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
     let mut retired = Vec::new();
     let mut designation_counts = DesignationCounts::default();
     let mut skipped_names = Vec::new();
-    let entries = fs::read_dir(root)
-        .map_err(|error| LaneError::input("census-root", format!("{}: {error}", root.display())))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| LaneError::input("census-root", error.to_string()))?;
+    let entries = root_entries(root)?;
     let root_names = entries
         .iter()
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .map(|(name, _)| name.clone())
         .collect::<std::collections::BTreeSet<_>>();
-    for entry in entries {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        let path = entry.path();
+    for (name, path) in entries {
         if let Some(run) = name
             .strip_prefix(".reservation-")
             .and_then(|part| part.strip_suffix(".json"))
@@ -519,6 +592,10 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                     format!("{} names another run", path.display()),
                 ));
             }
+            designation_counts.retained_records += 1;
+            designation_counts.retained_bytes += fs::metadata(&path)
+                .map_err(|error| LaneError::input("census-record", error.to_string()))?
+                .len();
             if migration {
                 migration_rows.push(super::migration_inventory::row(
                     owner_home, root, loop_name, &path, &record,
@@ -550,6 +627,10 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                     format!("{} is not a recorded retirement", path.display()),
                 ));
             }
+            designation_counts.retained_records += 1;
+            designation_counts.retained_bytes += fs::metadata(&path)
+                .map_err(|error| LaneError::input("census-record", error.to_string()))?
+                .len();
             if migration {
                 migration_rows.push(super::migration_inventory::row(
                     owner_home, root, loop_name, &path, &record,
@@ -568,7 +649,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
             )?);
         } else {
             designation_counts.rewrite(&name, &path, root, loop_name)?;
-            skipped_names.push(name.into_owned());
+            skipped_names.push(name);
         }
     }
     reservations.sort_by(|left, right| left["run"].as_str().cmp(&right["run"].as_str()));
@@ -745,13 +826,20 @@ mod tests {
             report["reply_designation_readiness"]["stranded_rollback_before_images"],
             1
         );
+        assert_eq!(report["reply_designation_readiness"]["retained_records"], 3);
+        assert!(
+            report["reply_designation_readiness"]["retained_bytes"]
+                .as_u64()
+                .unwrap_or_default()
+                > 0
+        );
         assert_eq!(
             report["reply_designation_readiness"]["pending_absence_plans"],
             1
         );
         assert_eq!(
             report["reply_designation_readiness"]["pending_rewrite_transactions"],
-            json!({"census":1,"retirement":1,"node_retirement":1})
+            json!({"census":1,"retirement":1,"node_retirement":1,"reply_rows":0})
         );
         let blockers = report["reply_designation_readiness"]["blockers"]
             .as_array()
@@ -792,23 +880,27 @@ mod tests {
             );
         }
         assert!(
-            blockers
+            report["reply_designation_readiness"]["rollback_evidence"]
+                .as_array()
+                .expect("rollback evidence")
                 .iter()
-                .any(|row| row["kind"] == "rollback-after-dispatch-intent"
-                    && row["run"] == "T"
-                    && row["next_command"].is_null())
+                .any(|row| row["kind"] == "rollback-after-dispatch-intent" && row["run"] == "T")
         );
         assert_eq!(
             blockers
                 .iter()
-                .filter(|row| row["kind"] == "round-without-member" && row["run"] == "R")
+                .filter(|row| row["kind"] == "rounds-without-member"
+                    && row["run"] == "R"
+                    && row["count"] == 2)
                 .count(),
-            2
+            1
         );
         assert_eq!(
             blockers
                 .iter()
-                .filter(|row| row["kind"] == "round-without-member" && row["run"] == "S")
+                .filter(|row| row["kind"] == "rounds-without-member"
+                    && row["run"] == "S"
+                    && row["count"] == 1)
                 .count(),
             1
         );

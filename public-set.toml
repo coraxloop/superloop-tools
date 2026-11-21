@@ -1907,6 +1907,9 @@ pattern = "packages/superloop-lane/src/launch/bound_roots.rs"
 pattern = "packages/superloop-lane/src/launch/census.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/census_reply_rewrite.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/census_rewrite.rs"
 
 [[include.rows]]
