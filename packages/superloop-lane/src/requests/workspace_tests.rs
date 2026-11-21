@@ -266,9 +266,10 @@ fn workspace_judgement_allowance_refuses_envelope_replays() {
     let store = fixture.store();
     let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
     let request = custodied_request(&fixture, &envelope);
-    let recorded = approved_record(&store, "R:1a", &envelope);
-    let allowance = crate::door::WorkspaceAllowance::from_judgement_record(&recorded, &request)
-        .expect("recorded allowance");
+    approved_record(&store, "R:1a", &envelope);
+    let allowance =
+        crate::door::WorkspaceAllowance::from_judgement_record(&store, "R:1a", &request)
+            .expect("recorded allowance");
     assert_eq!(allowance.evidence()["source"], "judgement");
     allowance.check(&request).expect("exact envelope");
     for changed in [
@@ -296,10 +297,14 @@ fn workspace_judgement_allowance_refuses_envelope_replays() {
             "door-workspace-context-differs"
         );
         assert_eq!(
-            crate::door::WorkspaceAllowance::from_judgement_record(&recorded, &changed_request)
-                .err()
-                .expect("replay refused")
-                .kind,
+            crate::door::WorkspaceAllowance::from_judgement_record(
+                &store,
+                "R:1a",
+                &changed_request
+            )
+            .err()
+            .expect("replay refused")
+            .kind,
             "door-workspace-context-differs"
         );
     }
@@ -316,9 +321,10 @@ fn workspace_judgement_allowance_refuses_changed_shell_text() {
         text: "printf original".into(),
     };
     let request = custodied_request(&fixture, &envelope);
-    let recorded = approved_record(&store, "R:1b", &envelope);
-    let allowance = crate::door::WorkspaceAllowance::from_judgement_record(&recorded, &request)
-        .expect("shell allowance");
+    approved_record(&store, "R:1b", &envelope);
+    let allowance =
+        crate::door::WorkspaceAllowance::from_judgement_record(&store, "R:1b", &request)
+            .expect("shell allowance");
     let mut changed = envelope;
     changed.execution = execute_command::workspace::Execution::Shell {
         shell: "/bin/sh".into(),
@@ -331,6 +337,35 @@ fn workspace_judgement_allowance_refuses_changed_shell_text() {
     );
 }
 
+/// ´test:unit:workspace-judgement-allowance-needs-stored-agent-allow-without-loop-refusal´
+#[test]
+fn workspace_judgement_allowance_needs_stored_agent_allow_without_loop_refusal() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1a", &envelope);
+    assert!(
+        crate::door::WorkspaceAllowance::from_judgement_record(&store, "R:9f", &request).is_err()
+    );
+    store
+        .triage(
+            "R",
+            &[json!({"id":"R:1a","action":"adjudicate",
+        "treatment":"refuse","reason":"fictional loop refusal"})],
+            "superloop",
+            "2",
+        )
+        .expect("loop refusal");
+    assert_eq!(
+        crate::door::WorkspaceAllowance::from_judgement_record(&store, "R:1a", &request)
+            .err()
+            .expect("loop refusal wins")
+            .kind,
+        "door-workspace-context-differs"
+    );
+}
+
 /// ´test:unit:workspace-learned-allowance-comes-from-the-store-lookup´
 #[test]
 fn workspace_learned_allowance_comes_from_the_store_lookup() {
@@ -338,12 +373,14 @@ fn workspace_learned_allowance_comes_from_the_store_lookup() {
     let store = fixture.store();
     let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
     let request = custodied_request(&fixture, &envelope);
+    let (allowance, fault) = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
+        .expect("unavailable learned store is a miss");
+    assert!(allowance.is_none());
+    assert!(fault.is_some());
     approved_record(&store, "R:1a", &envelope);
-    assert!(
-        crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
-            .expect("unanswered lookup")
-            .is_none()
-    );
+    let (allowance, fault) = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
+        .expect("unanswered lookup");
+    assert!(allowance.is_none() && fault.is_none());
     store
         .triage(
             "R",
@@ -355,6 +392,7 @@ fn workspace_learned_allowance_comes_from_the_store_lookup() {
         .expect("protected label");
     let allowance = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
         .expect("label lookup")
+        .0
         .expect("learned allow");
     assert_eq!(allowance.evidence()["source"], "learned");
     allowance.check(&request).expect("exact context");

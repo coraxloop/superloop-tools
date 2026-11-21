@@ -970,6 +970,7 @@ pub enum Scope {
 }
 
 mod workspace {
+    use std::io::{self, Write as _};
     use std::os::fd::OwnedFd;
 
     use execute_command::policy::DoorMode;
@@ -977,7 +978,7 @@ mod workspace {
     use serde_json::{Value, json};
 
     use crate::error::LaneError;
-    use crate::requests::{RequestRecord, store::Store};
+    use crate::requests::store::Store;
 
     use super::{Registration, Scope};
 
@@ -1104,11 +1105,11 @@ mod workspace {
         /// Read a learned allow from the protected store using this request's derived key.
         ///
         /// # Errors
-        /// Propagates a store fault or refuses inconsistent learned evidence.
+        /// Refuses inconsistent learned evidence; a learned-index fault accompanies a miss.
         pub fn from_store_lookup(
             store: &Store,
             request: &WorkspaceRequest,
-        ) -> Result<Option<Self>, LaneError> {
+        ) -> Result<(Option<Self>, Option<LaneError>), LaneError> {
             let key = learned_key(
                 "compute",
                 &request.envelope,
@@ -1120,9 +1121,19 @@ mod workspace {
                 LaneError::input("door-workspace-context-differs", "learned key differs")
             })?;
             let (decision, evidence, _) =
-                store.learned_judgement("compute", "compute-workspace", shape)?;
+                match store.learned_judgement("compute", "compute-workspace", shape) {
+                    Ok(lookup) => lookup,
+                    Err(error) => {
+                        let _logged = writeln!(
+                            io::stderr().lock(),
+                            "door workspace learned lookup: {}",
+                            error.line()
+                        );
+                        return Ok((None, Some(error)));
+                    }
+                };
             if decision["decision"] != "allow" {
-                return Ok(None);
+                return Ok((None, None));
             }
             if evidence["class"] != "compute"
                 || evidence["operation"] != "compute-workspace"
@@ -1133,17 +1144,20 @@ mod workspace {
                     "learned allowance evidence differs",
                 ));
             }
-            Self::bind(request, AllowanceOrigin::Store(evidence)).map(Some)
+            Self::bind(request, AllowanceOrigin::Store(evidence))
+                .map(|allowance| (Some(allowance), None))
         }
 
-        /// Bind an agent allowance only after the strict schema-seven record reader accepts it.
+        /// Bind an agent allowance only after a protected store read by request id.
         ///
         /// # Errors
         /// Refuses a non-agent decision or any changed execution or owner context.
         pub fn from_judgement_record(
-            record: &RequestRecord,
+            store: &Store,
+            id: &str,
             request: &WorkspaceRequest,
         ) -> Result<Self, LaneError> {
+            let record = store.request(id)?;
             let value = record.value();
             let detail = &value["effect"]["workspace"];
             if value["schema"] != 7
@@ -1151,6 +1165,7 @@ mod workspace {
                 || value["operation"] != "compute-workspace"
                 || value["would_do_source"] != "agent"
                 || value["would_do"]["decision"] != "allow"
+                || (!value["label"].is_null() && value["label"]["treatment"] != "allow")
                 || detail["envelope"] != json!(request.envelope)
                 || detail["grant"] != json!(request.grant)
                 || detail["policy_revision"] != request.grant.quick_policy_digest
