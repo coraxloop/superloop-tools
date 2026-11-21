@@ -1037,7 +1037,6 @@ mod workspace {
             || reservation["loop"] != registration.loop_name
             || reservation["run"] != registration.run
             || reservation["worker_uid"] != registration.worker_uid
-            || reservation["door_scope"] != registration.scope.name()
         {
             return Err(LaneError::input(
                 "door-workspace-context-differs",

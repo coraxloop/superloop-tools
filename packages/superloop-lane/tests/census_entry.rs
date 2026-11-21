@@ -440,7 +440,7 @@ fn retirement_node_absence_through_built_entry() {
                 config.join("door-known_hosts").display()
             ),
         );
-        write(&config.join("door-node-registration.json"), json!({"schema":1,"loop":"alpha","alias":"fixture","address":"fixture.invalid","port":22,"user":"fixture","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}).to_string());
+        write(&config.join("door-node-registration.json"), json!({"schema":1,"loop":"alpha","alias":"fixture","node":"fixture-node","address":"fixture.invalid","port":22,"user":"fixture","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}).to_string());
         write(
             &config.join("door-known_hosts"),
             "fixture.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",

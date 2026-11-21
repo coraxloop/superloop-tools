@@ -42,6 +42,8 @@ fn door_node_registration_public_command() {
                 "alpha",
                 "--alias",
                 "fixture",
+                "--node",
+                "fixture-node",
                 "--address",
                 address,
                 "--port",
@@ -84,6 +86,11 @@ fn door_node_registration_public_command() {
             & 0o777,
         0o600
     );
+    let registered: Value = serde_json::from_slice(
+        &fs::read(config.join("door-node-registration.json")).expect("registration"),
+    )
+    .expect("registered node");
+    assert_eq!(registered["node"], "fixture-node");
     assert!(!config.join("door-ssh_config").exists());
     let invalid = call(&["--dry-run"], "node\nProxyCommand false");
     assert_eq!(invalid.status.code(), Some(2));

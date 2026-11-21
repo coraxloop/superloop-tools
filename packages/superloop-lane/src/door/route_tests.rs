@@ -185,6 +185,8 @@ fn door_workspace_request_refuses_review_and_malformed_protected_plan() {
         .expect("review scope");
     assert_eq!(refusal.kind, "door-workspace-context-differs");
     assert!(refusal.detail.contains("work scope"));
+    workspace_request(&runs, &registration, owner, "fixture-node", &wire)
+        .expect("connection keeps its admitted work scope");
 
     saved["door_scope"] = json!("work");
     saved["plan"]["compute_workspace"]["digest"] = json!("0".repeat(64));

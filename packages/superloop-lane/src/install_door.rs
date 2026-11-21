@@ -2237,6 +2237,8 @@ mod tests {
             "alpha",
             "--alias",
             "fixture",
+            "--node",
+            "fixture-node",
             "--address",
             "2001:db8::2",
             "--port",
