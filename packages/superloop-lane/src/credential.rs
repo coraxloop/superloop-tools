@@ -5138,7 +5138,8 @@ mod tests {
     }
 
     /// # Panics
-    /// Panics if either backend's credential evidence changes from its pinned schema bytes.
+    /// Panics if either backend's pinned evidence bytes cease to pass the writer
+    /// validator or the saved-evidence envelope reader.
     /// ´test:unit:credential-evidence-schemas-are-byte-pinned´
     #[test]
     fn credential_evidence_schemas_are_byte_pinned() {
@@ -5168,6 +5169,10 @@ mod tests {
             } else {
                 assert_eq!(actual, expected.trim_end());
             }
+            let saved: Value = serde_json::from_str(expected).expect("saved evidence fixture");
+            let binding = &crate::runtime_admission::ReviewedProgramBinding::Schema;
+            validate_evidence(&saved, binding).expect("writer accepts saved evidence");
+            validate_evidence_envelope(&saved).expect("reader accepts saved evidence");
         }
     }
 
