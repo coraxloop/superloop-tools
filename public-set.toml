@@ -1730,6 +1730,9 @@ pattern = "packages/superloop-lane/src/bin/door-service.rs"
 pattern = "packages/superloop-lane/src/bin/door-ssh.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/bin/node-exec.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/build.rs"
 
 [[include.rows]]
@@ -3586,6 +3589,12 @@ pattern = "packages/superloop-lane/src/workspace_executor.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-lane/src/workspace_executor_tests.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/workspace_node.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/src/workspace_node_tests.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-credential-custody/src/main.rs"

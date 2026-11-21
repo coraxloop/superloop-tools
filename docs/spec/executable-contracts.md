@@ -8,7 +8,7 @@ Each correspondence binds its named interface to the ledger's installed, build-o
 |------------|---------|-----------|
 |`enter-loop`|`superloop`|search path|
 |`superloop-lane`|stays `superloop-lane`|search path|
-|`vendor-proxy`, `door-ssh`, `door-service`|stay in the lane release group|private directory|
+|`vendor-proxy`, `door-ssh`, `door-service`, `superloop-lane-node-exec`|stay in the lane release group|private directory|
 |`requests-helper`|stays in the permission/request release group|private directory|
 |`permission-triage-hook` binary|stays `hooks/permission-triage-hook`|private directory|
 |`superloop-claude-hook`|stays `hooks/superloop-claude-hook`|private directory|

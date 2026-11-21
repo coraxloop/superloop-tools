@@ -35,6 +35,7 @@ pub mod signin_home;
 pub mod vendor_net;
 pub mod worker_launch;
 pub mod workspace_executor;
+pub mod workspace_node;
 
 use std::path::{Path, PathBuf};
 

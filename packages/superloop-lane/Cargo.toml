@@ -46,6 +46,10 @@ path = "src/bin/door-ssh.rs"
 name = "superloop-lane-door-service"
 path = "src/bin/door-service.rs"
 
+[[bin]]
+name = "superloop-lane-node-exec"
+path = "src/bin/node-exec.rs"
+
 [[test]]
 name = "driver_claude_subprocess_contract"
 path = "tests/driver_claude/subprocess_contract.rs"
