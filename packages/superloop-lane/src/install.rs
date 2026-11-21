@@ -20,6 +20,7 @@ use crate::error::LaneError;
 use crate::settings::Settings;
 
 pub(crate) static NEXT_ALLOCATION_TEMP: AtomicU64 = AtomicU64::new(0);
+const PRIVATE_REPORT_LIMIT: usize = 1_048_576;
 
 /// The loop configuration directory held under its install lock.
 pub struct InstallGuard {
@@ -1113,14 +1114,35 @@ pub(crate) fn fixture_complete_claude_generation(
     publish_generation(path, generation)
 }
 
-fn private_report(spec: &ChildSpec, entry_bin: &Path, lane_bin: &Path) -> Result<Value, LaneError> {
+fn private_report(
+    spec: &ChildSpec,
+    entry_bin: &Path,
+    lane_bin: &Path,
+    sign_in_dir: &Path,
+) -> Result<Value, LaneError> {
     crate::pinned::owner_executable_word(entry_bin, nix::unistd::Uid::effective().as_raw())?;
     crate::pinned::owner_executable_word(lane_bin, nix::unistd::Uid::effective().as_raw())?;
-    let output = checked_output(spec, None)?;
-    if output.len() > 65_536 {
+    let output = checked_output(spec, None).map_err(|error| {
+        if error.kind == "install-private" && error.detail.ends_with("exceeded output limit") {
+            LaneError::operation(
+                "install-private",
+                format!(
+                    "private report for {} exceeded the child output bound; inspect unexpected sign-in tree growth and any partial installation before retrying; keep credential files in place",
+                    sign_in_dir.display()
+                ),
+            )
+        } else {
+            error
+        }
+    })?;
+    if output.len() > PRIVATE_REPORT_LIMIT {
         return Err(LaneError::operation(
             "install-private",
-            "private report exceeds 65536 bytes",
+            format!(
+                "private report exceeds {PRIVATE_REPORT_LIMIT} bytes ({} bytes) for {}; inspect unexpected sign-in tree growth and any partial installation before retrying; keep credential files in place",
+                output.len(),
+                sign_in_dir.display()
+            ),
         ));
     }
     serde_json::from_str(&output).map_err(|error| {
@@ -1925,7 +1947,11 @@ fn run_with_lane_bin_inner(
         None,
     )?
     .with_private_install(&verified_owner_home, &install_guard)?;
-    let private = private_report(&preflight_spec, entry_bin, lane_bin)?;
+    let sign_in_dir = owner_home
+        .join(".config/loops")
+        .join(&request.loop_name)
+        .join("lanes/codex");
+    let private = private_report(&preflight_spec, entry_bin, lane_bin, &sign_in_dir)?;
     let init_source = request.data_dir.join("box-init");
     let mut source_checks = vec![("init", init_source.as_path(), init_sha256)];
     for payload in &payloads {
@@ -2157,7 +2183,7 @@ fn run_with_lane_bin_inner(
     if pending_needed {
         publish_generation(&generation_path, &generation)?;
     }
-    let private_done = private_report(&install_spec, entry_bin, lane_bin)?;
+    let private_done = private_report(&install_spec, entry_bin, lane_bin, &sign_in_dir)?;
     if private_done["changed"].as_u64() != Some(private_changed) {
         return Err(LaneError::operation(
             "install-private",
@@ -2765,7 +2791,7 @@ mod tests {
             1,
             "install-private",
         );
-        let error = private_report(&spec, &entry, Path::new("/usr/bin/true"))
+        let error = private_report(&spec, &entry, Path::new("/usr/bin/true"), fixture.path())
             .expect_err("loop can replace entry");
         assert_eq!(error.kind, "owner-program");
     }
@@ -2791,7 +2817,7 @@ mod tests {
             1,
             "install-private",
         );
-        let error = private_report(&spec, &entry, Path::new("/usr/bin/true"))
+        let error = private_report(&spec, &entry, Path::new("/usr/bin/true"), fixture.path())
             .expect_err("entry changed after preflight");
         assert_eq!(error.kind, "owner-program");
     }
@@ -2818,7 +2844,7 @@ mod tests {
             1,
             "install-private",
         );
-        let error = private_report(&spec, Path::new("/usr/bin/true"), &lane_bin)
+        let error = private_report(&spec, Path::new("/usr/bin/true"), &lane_bin, fixture.path())
             .expect_err("replacement refused before private execution");
         assert_eq!(error.kind, "owner-program");
     }

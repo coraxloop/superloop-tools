@@ -83,14 +83,23 @@ impl SignInFixture {
         dispatch
     }
 
-    fn refuse(&self, name: &str) {
+    fn refuse(&self, path: &Path) {
         for worker in [3000, 3001] {
             for dry_run in [true, false] {
                 let error = self
                     .converge(worker, dry_run)
                     .expect_err("unsafe path refuses");
                 assert_eq!(error.kind, "sign-in-path");
-                assert!(error.detail.starts_with(&format!("{name}: ")), "{error:?}");
+                assert!(
+                    error.detail.starts_with(&format!("{}: ", path.display())),
+                    "{error:?}"
+                );
+                assert!(
+                    error
+                        .detail
+                        .contains("restore a regular entry before retrying install"),
+                    "{error:?}"
+                );
             }
         }
     }
@@ -195,7 +204,7 @@ fn sign_in_convergence_refuses_links_outside_dispatch_scratch() {
         }
         symlink(&fixture.target, &path).expect("forbidden link");
         let before = inode_metadata(&fixture.target);
-        fixture.refuse(path.file_name().expect("name").to_str().expect("text name"));
+        fixture.refuse(&path);
         assert_eq!(inode_metadata(&fixture.target), before);
         assert_eq!(
             fs::read_link(&path).expect("refused link remains"),
@@ -212,7 +221,7 @@ fn sign_in_convergence_refuses_linked_or_nondirectory_scratch_root() {
         let path = fixture.root.join(name);
         fs::create_dir_all(path.parent().expect("parent")).expect("scratch parent");
         symlink(fixture.home.path(), &path).expect("linked scratch boundary");
-        fixture.refuse(path.file_name().expect("name").to_str().expect("text name"));
+        fixture.refuse(&path);
         assert_eq!(
             fs::read_link(&path).expect("boundary remains"),
             fixture.home.path()
