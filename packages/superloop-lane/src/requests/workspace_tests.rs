@@ -261,6 +261,65 @@ fn workspace_judgement_reader_accepts_true_ascii_extra_flag() {
     RequestRecord::decode(row).expect("a true ASCII row is allowed beyond the floor");
 }
 
+/// ´test:unit:workspace-judgement-reader-refuses-false-grant-flag-and-display-shape´
+#[test]
+fn workspace_judgement_reader_refuses_false_grant_flag_and_display_shape() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let mut envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    envelope.execution = execute_command::workspace::Execution::Argv {
+        words: vec!["сargo".as_bytes().to_vec()],
+    };
+    let row = approved_record(&store, "R:2d", &envelope).into_value();
+    let flag = row["workspace_agent_input"]["flagged_code_points"]["rows"][0].clone();
+    let mutations = [
+        (
+            "grant",
+            "/workspace_agent_input/grant_summary/workspace",
+            json!("/work/other"),
+        ),
+        (
+            "first offset",
+            "/workspace_agent_input/flagged_code_points/rows/0/first_byte_offset",
+            json!(1),
+        ),
+        (
+            "count",
+            "/workspace_agent_input/flagged_code_points/rows/0/count",
+            json!(2),
+        ),
+        (
+            "unknown field",
+            "/workspace_agent_input/flagged_code_points/rows/0/field",
+            json!("execution.words[9]"),
+        ),
+        (
+            "display kind",
+            "/workspace_agent_input/execution_readable_display_only/kind",
+            json!("shell"),
+        ),
+    ];
+    for (name, pointer, value) in mutations {
+        let mut changed = row.clone();
+        *changed.pointer_mut(pointer).expect("fixture member") = value;
+        assert_eq!(
+            RequestRecord::decode(changed).unwrap_err().kind,
+            "requests-record-refusal",
+            "{name}"
+        );
+    }
+    let mut repeated = row;
+    repeated["workspace_agent_input"]["flagged_code_points"]["rows"]
+        .as_array_mut()
+        .expect("flag rows")
+        .push(flag);
+    assert_eq!(
+        RequestRecord::decode(repeated).unwrap_err().kind,
+        "requests-record-refusal",
+        "repeated row"
+    );
+}
+
 /// ´test:unit:workspace-judgement-input-refused-on-unjudged-intent´
 #[test]
 fn workspace_judgement_input_refused_on_unjudged_intent() {
@@ -519,6 +578,28 @@ fn preflight(check: &str, words: Value) -> Value {
     row["effect"]["ending"] = crate::requests::unobserved_ending();
     row["effect"]["preflight"]["words"] = words;
     row
+}
+
+/// ´test:unit:workspace-shared-preflight-refusals-use-empty-untagged-words´
+#[test]
+fn workspace_shared_preflight_refusals_use_empty_untagged_words() {
+    for check in [
+        "door-caller-authority-refusal",
+        "door-review-compute-refusal",
+    ] {
+        let row = preflight(check, json!([]));
+        assert_eq!(
+            RequestRecord::decode(row.clone()).unwrap().into_value(),
+            row,
+            "{check}"
+        );
+        let tagged = preflight(check, json!({"schema":3,"wire_bytes":[],"truncated":false}));
+        assert_eq!(
+            RequestRecord::decode(tagged).unwrap_err().kind,
+            "requests-record-refusal",
+            "{check}"
+        );
+    }
 }
 /// ´test:unit:workspace-preflight-reader-preserves-bounded-wire-evidence´
 #[test]
