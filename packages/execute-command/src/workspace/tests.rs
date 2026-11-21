@@ -393,13 +393,15 @@ fn workspace_agent_input_is_lossless_and_flags_code_points() {
         words: vec![
             b"program".to_vec(),
             vec![255, 254],
-            "a\u{202e}\n\u{200b}".as_bytes().to_vec(),
+            "a\u{2028}\u{2029}\u{202e}\n\u{200b}".as_bytes().to_vec(),
         ],
     };
     let input = agent_input(&e, &g, &["unknown".into()]).unwrap();
     assert_eq!(input["execution"], json!(e.execution));
     assert_eq!(input["execution"]["words"][1], json!([255, 254]));
-    assert_eq!(input["flagged_code_points"].as_array().unwrap().len(), 3);
+    assert_eq!(input["flagged_code_points"].as_array().unwrap().len(), 5);
+    assert!(input["flagged_code_points"].to_string().contains("U+2028"));
+    assert!(input["flagged_code_points"].to_string().contains("U+2029"));
     e.execution = Execution::Shell {
         shell: "/bin/sh".into(),
         text: "printf '\u{2066}x\u{2069}'".into(),
@@ -407,6 +409,34 @@ fn workspace_agent_input_is_lossless_and_flags_code_points() {
     let input = agent_input(&e, &g, &[]).unwrap();
     assert_eq!(input["execution"], json!(e.execution));
     assert_eq!(input["flagged_code_points"].as_array().unwrap().len(), 2);
+}
+/// ´test:unit:workspace-agent-input-pairs-readable-execution-with-exact-bytes´
+#[test]
+fn workspace_agent_input_pairs_readable_execution_with_exact_bytes() {
+    let (mut envelope, grant, _, _) = fixture();
+    envelope.execution = Execution::Sequence {
+        steps: vec![
+            vec![b"/usr/bin/printf".to_vec(), b"hello\nworld".to_vec()],
+            vec![b"/usr/bin/cat".to_vec(), vec![255, b'x']],
+        ],
+    };
+    let input = agent_input(&envelope, &grant, &["no rule".into()]).unwrap();
+    assert_eq!(input["execution"], json!(envelope.execution));
+    assert_eq!(input["execution"]["steps"][1][1], json!([255, 120]));
+    assert_eq!(
+        input["execution_readable_display_only"]["steps"][0][1],
+        "hello\\nworld"
+    );
+    assert_eq!(input["miss_reasons"], json!(["no rule"]));
+    envelope.execution = Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "printf hello\u{2028}world".into(),
+    };
+    let input = agent_input(&envelope, &grant, &[]).unwrap();
+    assert_eq!(input["execution"], json!(envelope.execution));
+    assert_eq!(input["execution_readable_display_only"]["kind"], "shell");
+    assert_eq!(input["flagged_code_points"][0]["code_point"], "U+2028");
+    assert_eq!(input["flagged_code_points"][0]["field"], "execution.text");
 }
 /// ´test:unit:workspace-grant-snapshot-binds-every-field´
 #[test]

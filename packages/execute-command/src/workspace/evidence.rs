@@ -3,7 +3,23 @@ use super::*;
 
 fn flagged(c: char) -> bool {
     c.is_control()
-        || matches!(u32::from(c), 0x00ad | 0x0600..=0x0605 | 0x061c | 0x06dd | 0x070f | 0x08e2 | 0x0890..=0x0891 | 0x180e | 0x200b..=0x200f | 0x202a..=0x202e | 0x2060..=0x2064 | 0x2066..=0x206f | 0xfeff | 0xfff9..=0xfffb | 0x110bd | 0x110cd | 0x13430..=0x13455 | 0x1bca0..=0x1bca3 | 0x1d173..=0x1d17a | 0xe0001 | 0xe0020..=0xe007f)
+        || matches!(u32::from(c), 0x00ad | 0x0600..=0x0605 | 0x061c | 0x06dd | 0x070f | 0x08e2 | 0x0890..=0x0891 | 0x180e | 0x200b..=0x200f | 0x2028..=0x202e | 0x2060..=0x2064 | 0x2066..=0x206f | 0xfeff | 0xfff9..=0xfffb | 0x110bd | 0x110cd | 0x13430..=0x13455 | 0x1bca0..=0x1bca3 | 0x1d173..=0x1d17a | 0xe0001 | 0xe0020..=0xe007f)
+}
+fn readable_word(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).escape_debug().to_string()
+}
+fn readable_execution(execution: &Execution) -> Value {
+    match execution {
+        Execution::Argv { words } => {
+            json!({"kind":"argv","words":words.iter().map(|word| readable_word(word)).collect::<Vec<_>>()})
+        }
+        Execution::Sequence { steps } => {
+            json!({"kind":"sequence","steps":steps.iter().map(|words| words.iter().map(|word| readable_word(word)).collect::<Vec<_>>()).collect::<Vec<_>>()})
+        }
+        Execution::Shell { shell, text } => {
+            json!({"kind":"shell","shell":shell.escape_debug().to_string(),"text":text.escape_debug().to_string()})
+        }
+    }
 }
 fn flags(path: &str, bytes: &[u8], rows: &mut Vec<Value>) {
     // Decode valid spans only. Invalid UTF-8 remains explicit bytes in execution.
@@ -74,7 +90,7 @@ pub fn agent_input(
         );
     }
     Ok(
-        json!({"execution":envelope.execution,"cwd":envelope.cwd,"env_additions":envelope.env_additions,"grant_summary":grant,"miss_reasons":reasons,"flagged_code_points":code_points}),
+        json!({"execution":envelope.execution,"execution_readable_display_only":readable_execution(&envelope.execution),"cwd":envelope.cwd,"env_additions":envelope.env_additions,"grant_summary":grant,"miss_reasons":reasons,"flagged_code_points":code_points}),
     )
 }
 /// Explicit outcome; absence of a measurement never becomes a successful exit.
