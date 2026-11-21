@@ -2660,6 +2660,18 @@ pattern = "packages/superloop-lane/tests/fixtures/plan.json"
 pattern = "packages/superloop-lane/tests/fixtures/plan-claude.json"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/plan-door-hosts.json"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/plan-claude-door-hosts.json"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/home-codex.json"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/home-claude.json"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/tests/fixtures/credential-evidence-codex.json"
 
 [[include.rows]]

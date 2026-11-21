@@ -419,6 +419,97 @@ fn claude_plan_is_pinned_for_the_fixture() {
     );
 }
 
+/// ´test:crate:door-and-host-plan-bytes-are-pinned-for-both-backends´
+#[test]
+fn door_and_host_plan_bytes_are_pinned_for_both_backends() {
+    for (backend, fixture) in [
+        ("codex", "plan-door-hosts.json"),
+        ("claude", "plan-claude-door-hosts.json"),
+    ] {
+        let temp = TempDir::new_in("/tmp").expect("fixture root");
+        let root = temp.path();
+        let template = root.join("template");
+        let sockets = root.join("sockets");
+        let custody = root.join(".config/loops/alpha");
+        fs::create_dir_all(template.join("libexec")).expect("template");
+        fs::create_dir_all(sockets.join("door")).expect("socket");
+        fs::create_dir_all(&custody).expect("custody");
+        fs::write(template.join("libexec/ssh"), b"fixture stub\n").expect("stub");
+        fs::write(custody.join("door-service"), b"fixture service\n").expect("service");
+        for (path, mode) in [
+            (template.join("libexec/ssh"), 0o550),
+            (custody.join("door-service"), 0o700),
+            (sockets.join("door"), 0o750),
+        ] {
+            fs::set_permissions(path, fs::Permissions::from_mode(mode)).expect("mode");
+        }
+        let stub = crate::build::sha256_bytes(b"fixture stub\n", root).expect("stub digest");
+        let service =
+            crate::build::sha256_bytes(b"fixture service\n", root).expect("service digest");
+        let generation = json!({"schema":2,"agent":{"source":"/fixture/door.toml","rubric_root":"/fixture","rubric_path":"/fixture/permissions/door.md","executable":"/fixture/codex","model":"fixture","effort":"medium","cap_ms":30000,"agent_expected_tokens":16384,"entry":"/fixture/entry","loop_home":"/fixture/home"},"phase":"complete","loop":"alpha","template_dir":template,"socket_dir":sockets,"stub_sha256":stub,"service_sha256":service,"unit_dir":custody.join("units"),"registered":["ssh"],"host_door_gid":nix::unistd::Gid::effective().as_raw()});
+        let generation_path = custody.join("door-install-generation.json");
+        fs::write(
+            &generation_path,
+            serde_json::to_vec(&generation).expect("generation"),
+        )
+        .expect("generation file");
+        fs::set_permissions(&generation_path, fs::Permissions::from_mode(0o600))
+            .expect("generation mode");
+        let mut settings = fixture_settings(Path::new("/opt/superloop/superloop"));
+        settings.backend_argv = std::collections::BTreeMap::from([(
+            backend.into(),
+            vec![format!("/usr/libexec/superloop/{backend}")],
+        )]);
+        settings.template_dir = Some(template);
+        settings.socket_dir = Some(sockets);
+        settings
+            .vendor_hosts
+            .insert(backend.into(), vec![format!("{backend}.example.test")]);
+        let plan = Plan::build_with_door(
+            root,
+            "alpha",
+            "R",
+            &settings,
+            &fixture_row(),
+            fixture_block(),
+            (1000, 1000),
+            true,
+            None,
+        )
+        .expect("door and hosts plan");
+        assert!(plan.document["door"].is_object());
+        assert_eq!(
+            plan.document["vendor_hosts"],
+            json!([format!("{backend}.example.test")])
+        );
+        let normalized = plan
+            .json()
+            .expect("JSON plan")
+            .replace(root.to_str().expect("fixture root UTF-8"), "/home/owner");
+        let mut document: serde_json::Value =
+            serde_json::from_str(&normalized).expect("normalized plan");
+        // The gate hashes the runtime vector before temporary paths are replaced.
+        // Bind its digest to the normalized vector so this pin is stable across runs.
+        let vector = serde_json::to_vec(&document["runtime_argv"]).expect("runtime vector");
+        document["box_gate"]["runtime_argv_sha256"] =
+            json!(crate::build::sha256_bytes(&vector, root).expect("normalized vector digest"));
+        let actual = serde_json::to_string(&document).expect("normalized plan JSON");
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture);
+        if std::env::var_os("UPDATE_LANE_PLAN").is_some() {
+            fs::write(fixture_path, format!("{actual}\n")).expect("write fixture");
+        } else {
+            assert_eq!(
+                actual,
+                fs::read_to_string(fixture_path)
+                    .expect("plan fixture")
+                    .trim_end()
+            );
+        }
+    }
+}
+
 /// ´test:crate:codex-state-is-per-run-and-only-auth-path-reaches-shared-sign-in´
 #[test]
 fn codex_state_is_per_run_and_only_auth_path_reaches_shared_sign_in() {
@@ -798,6 +889,103 @@ fn make_home_creates_three_roots_and_reports_unassigned_ownership() {
     .expect_err("existing roots");
     assert_eq!(failure.status, 2);
     assert_eq!(failure.kind, "already-exists");
+}
+
+/// ´test:crate:made-home-paths-and-modes-are-pinned-for-both-backends´
+#[test]
+fn made_home_paths_and_modes_are_pinned_for_both_backends() {
+    for (backend, fixture) in [("codex", "home-codex.json"), ("claude", "home-claude.json")] {
+        let (_temp, root, mut settings, row, caller) = setup();
+        settings.backend_argv = std::collections::BTreeMap::from([(
+            backend.into(),
+            vec![format!("/usr/libexec/superloop/{backend}")],
+        )]);
+        let plan = Plan::build(
+            &root,
+            "alpha",
+            "R",
+            &settings,
+            &row,
+            fixture_block(),
+            caller,
+        )
+        .expect("plan");
+        let home_parent = nix::fcntl::open(
+            root.join(".cache/tmp").as_path(),
+            nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY,
+            nix::sys::stat::Mode::empty(),
+        )
+        .expect("home parent");
+        let driver_parent = nix::fcntl::open(
+            root.join("runs").as_path(),
+            nix::fcntl::OFlag::O_RDONLY | nix::fcntl::OFlag::O_DIRECTORY,
+            nix::sys::stat::Mode::empty(),
+        )
+        .expect("driver parent");
+        let report = make_home_pinned(
+            &plan,
+            &settings,
+            b"Read back this letter.\n",
+            caller,
+            &home_parent,
+            &driver_parent,
+        )
+        .expect("made home");
+        let created = report["created"].as_array().expect("created rows");
+        let layout = created
+            .iter()
+            .map(|entry| {
+                let path = Path::new(entry["path"].as_str().expect("path"));
+                let relative = path.strip_prefix(&root).expect("beneath fixture root");
+                let metadata = fs::symlink_metadata(path).expect("created entry");
+                json!({"path": relative.to_str().expect("relative UTF-8"),
+                "kind": if metadata.is_dir() { "directory" } else { "file" },
+                "mode": format!("{:04o}", metadata.permissions().mode() & 0o7777)})
+            })
+            .collect::<Vec<_>>();
+        let actual = serde_json::to_string(&layout).expect("home layout JSON");
+        let fixture_path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/fixtures")
+            .join(fixture);
+        if std::env::var_os("UPDATE_LANE_HOME").is_some() {
+            fs::write(fixture_path, format!("{actual}\n")).expect("write fixture");
+        } else {
+            assert_eq!(
+                actual,
+                fs::read_to_string(fixture_path)
+                    .expect("home fixture")
+                    .trim_end()
+            );
+        }
+    }
+}
+
+/// ´test:crate:creation-purposes-are-pinned-in-order-for-both-backends´
+#[test]
+fn creation_purposes_are_pinned_in_order_for_both_backends() {
+    let shared = [
+        "owner-home",
+        "runs-root",
+        "entry-executable",
+        "podman-executable",
+        "hash-executable",
+        "configuration",
+        "loop-storage",
+        "private-storage",
+        "identity-executable",
+    ];
+    for (backend, credential) in [
+        (crate::settings::BoxBackend::Codex, "credential-client"),
+        (crate::settings::BoxBackend::Claude, "credential-claude"),
+    ] {
+        let preview = crate::creation_entry::preview(backend);
+        let expected = shared
+            .into_iter()
+            .chain([credential, "credential-clock", "letter-directory"])
+            .collect::<Vec<_>>();
+        assert_eq!(preview["purposes"], json!(expected));
+        assert_eq!(preview["optional_purposes"], json!(["rotation-source"]));
+    }
 }
 
 /// ´test:crate:make-home-pinned-cleans-bares-after-late-failure´
