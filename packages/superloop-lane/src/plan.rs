@@ -1269,6 +1269,11 @@ pub(crate) fn verify_box_attestation_admitted(
     admission.check(crate::settings::BoxBackend::from_plan(document)?)?;
     #[cfg(test)]
     admission.scope_plan(document)?;
+    verify_box_attestation_structure(document)
+}
+
+/// Check a candidate vector's attestation without admitting its runtime.
+pub(crate) fn verify_box_attestation_structure(document: &Value) -> Result<(), LaneError> {
     if document["box_gate"] != box_gate(document)? {
         return Err(LaneError::input(
             "box-gate",

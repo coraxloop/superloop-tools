@@ -774,8 +774,11 @@ fn driver_runtime_contract(
     owner_home: &Path,
     environment: &BTreeMap<String, String>,
     backend: crate::settings::BoxBackend,
+    preview: bool,
 ) -> Result<&'static str, LaneError> {
-    backend.require_runtime()?;
+    if !preview {
+        backend.require_runtime()?;
+    }
     let answer = build::run_checked(
         driver,
         [
@@ -805,6 +808,25 @@ fn driver_runtime_contract(
         ));
     }
     Ok("boxed-runtime 1")
+}
+
+fn preview_backend_gate(
+    owner_home: &Path,
+    loop_name: &str,
+    backend: crate::settings::BoxBackend,
+) -> Result<(), LaneError> {
+    if backend == crate::settings::BoxBackend::Codex {
+        return Ok(());
+    }
+    let custody = crate::credential::claude_source_custody_preview(owner_home, loop_name)?;
+    backend.require_runtime().map_err(|mut error| {
+        std::fmt::Write::write_fmt(
+            &mut error.detail,
+            format_args!("; all read-only launch preview checks passed; runtime admission remains closed; source custody {custody}; Claude driver contract is checked on launch"),
+        )
+        .expect("writing to a String cannot fail");
+        error
+    })
 }
 
 pub(crate) fn private_podman_environment_from(
@@ -3930,13 +3952,23 @@ fn run_with_program(
     let (_admission, mut generation_guard) =
         crate::install::lock_launch_generation(&config, request.dry_run)?;
     admission::ensure_open(&config, caller.0)?;
-    let (mut plan, settings) = crate::load_launch_plan(
-        owner_home,
-        &request.loop_name,
-        &request.run,
-        (0, 0),
-        request.backend,
-    )?;
+    let (mut plan, settings) = if request.dry_run {
+        crate::load_launch_preview_plan(
+            owner_home,
+            &request.loop_name,
+            &request.run,
+            (0, 0),
+            request.backend,
+        )?
+    } else {
+        crate::load_launch_plan(
+            owner_home,
+            &request.loop_name,
+            &request.run,
+            (0, 0),
+            request.backend,
+        )?
+    };
     let prior_workspace = read_reservation(&reservation_path(
         plan.driver_dir
             .parent()
@@ -3970,11 +4002,19 @@ fn run_with_program(
         .backend_argv
         .get(selected_backend.name())
         .and_then(|words| words.first())
-        .ok_or_else(|| LaneError::input("missing-setting", "backend_argv.codex is absent"))?;
+        .ok_or_else(|| {
+            LaneError::input(
+                "missing-setting",
+                format!("backend_argv.{} is absent", selected_backend.name()),
+            )
+        })?;
     if !Path::new(backend).is_absolute() {
         return Err(LaneError::input(
             "missing-setting",
-            "backend_argv.codex program is not absolute",
+            format!(
+                "backend_argv.{} program is not absolute",
+                selected_backend.name()
+            ),
         ));
     }
     if request.observe {
@@ -3985,7 +4025,10 @@ fn run_with_program(
         {
             return Err(LaneError::input(
                 "observe-conflict",
-                "vendor_hosts.codex is already set; use an enforcing launch",
+                format!(
+                    "vendor_hosts.{} is already set; use an enforcing launch",
+                    selected_backend.name()
+                ),
             ));
         }
         plan.observe_vendor()?;
@@ -3996,7 +4039,10 @@ fn run_with_program(
     {
         return Err(LaneError::input(
             "missing-setting",
-            "vendor_hosts.codex is empty; use --observe for one named first run",
+            format!(
+                "vendor_hosts.{} is empty; use --observe for one named first run",
+                selected_backend.name()
+            ),
         ));
     }
     let root = plan
@@ -4042,10 +4088,15 @@ fn run_with_program(
     let fresh_dir = planned_step_dir(&plan, "dispatch")?;
     let launch_argv = entry_argv(driver, &plan, request, &fresh_dir)?;
     let setup_argv = runtime_prepare_argv(&exe_word, &podman_word, owner_home, request)?;
+    let backend_check = if selected_backend == crate::settings::BoxBackend::Codex {
+        "backend_argv.codex program"
+    } else {
+        "backend_argv.claude program"
+    };
     let mut checks = vec![
         "box gate: container options, read-only root and template, worker-owned writable leaves, proxy route",
         "worker UID allocation",
-        "backend_argv.codex program",
+        backend_check,
         "bound mount roots",
         "installed template hashes",
         "recorded image identifier",
@@ -4072,10 +4123,24 @@ fn run_with_program(
     crate::pinned::owner_executable(Path::new(&podman_word), Uid::effective().as_raw())?;
     crate::pinned::owner_executable(entry, caller.0)?;
     executable(driver, "lane driver")?;
-    let driver_contract =
-        driver_runtime_contract(driver, owner_home, &environment, selected_backend)?;
+    let deferred_claude_contract =
+        request.dry_run && selected_backend == crate::settings::BoxBackend::Claude;
+    let driver_contract = if deferred_claude_contract {
+        checks_on_launch.push("Claude driver boxed-runtime contract");
+        "checked on launch"
+    } else {
+        driver_runtime_contract(
+            driver,
+            owner_home,
+            &environment,
+            selected_backend,
+            request.dry_run,
+        )?
+    };
     let driver_sha256 = sha256(driver)?;
-    checks.push("driver boxed-runtime contract");
+    if !deferred_claude_contract {
+        checks.push("driver boxed-runtime contract");
+    }
     checks.push("entry deployment and boxed interface version");
     let report = image_report(owner_home, &request.loop_name, selected_backend)?;
     if report["image_digest"] != image {
@@ -4134,6 +4199,7 @@ fn run_with_program(
         )?;
         if request.dry_run {
             checks.push("interrupted settlement process identities and complete attempt evidence");
+            preview_backend_gate(owner_home, &request.loop_name, selected_backend)?;
             return Ok(
                 json!({"schema":1,"command":"launch","dry_run":true,"plan":plan.document,"proxy_service":proxy_service,"bound_source_matrix":{"state":"not-applicable","reason":"interrupted settlement starts no new container"},"interrupted_settlement":preview,"checks_performed":checks,"changed":false,"wall_seconds":started.elapsed().as_secs_f64()}),
             );
@@ -4176,7 +4242,11 @@ fn run_with_program(
     let reservation_census =
         json!({"skipped_count":skipped_runs.len(),"skipped_names":skipped_runs});
     select_worker_identity(&mut plan, owner_home, &request.loop_name, worker_uid)?;
-    crate::plan::verify_box_attestation(&plan.document)?;
+    if request.dry_run {
+        crate::plan::verify_box_attestation_structure(&plan.document)?;
+    } else {
+        crate::plan::verify_box_attestation(&plan.document)?;
+    }
     let box_gate = plan.document["box_gate"].clone();
     let dry_recovery = if request.dry_run {
         preview_dead_preparation(
@@ -4268,6 +4338,7 @@ fn run_with_program(
             report["workspace_declaration_digest"] =
                 json!(workspace::declaration_digest(declaration)?);
         }
+        preview_backend_gate(owner_home, &request.loop_name, selected_backend)?;
         return Ok(report);
     }
     let _preparation_lease = lock_run_preparation(&root, &request.run, caller.0)?;
@@ -9701,6 +9772,7 @@ mod tests {
             fixture.path(),
             &BTreeMap::new(),
             crate::settings::BoxBackend::Claude,
+            false,
         )
         .expect_err("gate before driver probe");
         assert_eq!(error.status, 2);
@@ -9739,6 +9811,7 @@ mod tests {
                 fixture.path(),
                 &BTreeMap::new(),
                 crate::settings::BoxBackend::Codex,
+                false,
             );
             assert_eq!(result.is_ok(), accepted, "{script}: {result:?}");
             if !accepted {

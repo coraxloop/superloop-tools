@@ -39,15 +39,20 @@ impl Drop for ProtectedRoot {
     fn drop(&mut self) {
         if let Some(root) = self.0.take() {
             let path = root.path().to_path_buf();
-            let template = path
-                .join("home/.var/loops/alpha/runner-templates/codex")
-                .join("a".repeat(64));
-            for directory in [template.join("bin"), template.join("libexec"), template] {
-                if fs::symlink_metadata(&directory).is_ok_and(|entry| entry.file_type().is_dir()) {
-                    drop(fs::set_permissions(
-                        &directory,
-                        fs::Permissions::from_mode(0o700),
-                    ));
+            for vendor in ["codex", "claude"] {
+                let template = path
+                    .join("home/.var/loops/alpha/runner-templates")
+                    .join(vendor)
+                    .join("a".repeat(64));
+                for directory in [template.join("bin"), template.join("libexec"), template] {
+                    if fs::symlink_metadata(&directory)
+                        .is_ok_and(|entry| entry.file_type().is_dir())
+                    {
+                        drop(fs::set_permissions(
+                            &directory,
+                            fs::Permissions::from_mode(0o700),
+                        ));
+                    }
                 }
             }
             if let Err(error) = root.close() {
@@ -1405,10 +1410,220 @@ fn assert_dead_dispatch_attempt_wall(home: &std::path::Path, request: &LaunchReq
     fs::write(home.join("container-calls"), calls).expect("restore runtime call evidence");
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn assert_claude_dry_run(
+    home: &Path,
+    request: &mut LaunchRequest,
+    settings_path: &Path,
+    custody: &Path,
+    runs: &Path,
+    codex_template: &Path,
+    image: &str,
+) {
+    fs::remove_file(custody.join("door-install-generation.json"))
+        .expect("no Codex door generation");
+    fs::remove_file(custody.join("door-service")).expect("no Codex door service");
+    let template = codex_template
+        .parent()
+        .expect("image templates")
+        .parent()
+        .expect("template root")
+        .join("claude")
+        .join(codex_template.file_name().expect("image hash"));
+    fs::create_dir_all(template.join("bin")).expect("Claude template bin");
+    fs::create_dir_all(template.join("libexec")).expect("Claude template helpers");
+    for (path, bytes, mode) in [
+        (
+            template.join("bin/claude"),
+            b"fictional Claude program\n".as_slice(),
+            0o550,
+        ),
+        (template.join("settings.json"), b"{}\n".as_slice(), 0o440),
+        (
+            template.join("CLAUDE.md"),
+            b"fictional charter\n".as_slice(),
+            0o440,
+        ),
+        (
+            template.join("libexec/box-init"),
+            b"fixed init\n".as_slice(),
+            0o440,
+        ),
+    ] {
+        fs::write(&path, bytes).expect("Claude template file");
+        fs::set_permissions(&path, fs::Permissions::from_mode(mode)).expect("Claude pin mode");
+    }
+    let claude_hash = sha256(&template.join("bin/claude")).expect("Claude hash");
+    let config_hash = sha256(&template.join("settings.json")).expect("settings hash");
+    let charter_hash = sha256(&template.join("CLAUDE.md")).expect("charter hash");
+    let manifest = json!({"image_digest":image,"claude_sha256":claude_hash,
+        "config_sha256":config_hash,"charter_sha256":charter_hash});
+    let manifest_path = template.join("manifest");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest).expect("manifest JSON"),
+    )
+    .expect("manifest");
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o440)).expect("manifest mode");
+    for directory in [
+        template.join("bin"),
+        template.join("libexec"),
+        template.clone(),
+    ] {
+        fs::set_permissions(directory, fs::Permissions::from_mode(0o550)).expect("template mode");
+    }
+    fs::set_permissions(
+        template.parent().expect("vendor root"),
+        fs::Permissions::from_mode(0o711),
+    )
+    .expect("vendor root mode");
+    let original = fs::read_to_string(settings_path).expect("settings");
+    let common = original
+        .lines()
+        .filter(|line| !line.starts_with("backend_argv = ") && !line.starts_with("vendor_hosts = "))
+        .collect::<Vec<_>>()
+        .join("\n");
+    fs::write(
+        settings_path,
+        format!(
+            "{common}\nbackend_argv = {{ claude = [\"{}\"] }}\n",
+            crate::build::payload::CLAUDE_IMAGE_PROGRAM
+        ),
+    )
+    .expect("Claude settings");
+    let report_path = custody.join("image-build.json");
+    let mut report: serde_json::Value =
+        serde_json::from_slice(&fs::read(&report_path).expect("build report"))
+            .expect("build report JSON");
+    let help = [
+        "  -p, --print",
+        "  --output-format <format>  text, json or stream-json",
+        "  --verbose",
+        "  --permission-mode <mode>  acceptEdits, bypassPermissions, default or plan",
+        "  --dangerously-skip-permissions",
+        "  --model <model>",
+        "  --effort <level>",
+        "  -r, --resume [value]",
+        "  -h, --help",
+    ]
+    .join("\n");
+    report["claude_version"] = json!("0.1.0");
+    report["claude_sha256"] = json!(claude_hash);
+    report["claude_source"] = json!("https://fixture.example/claude");
+    report["claude_image_program"] = json!(crate::build::payload::CLAUDE_IMAGE_PROGRAM);
+    report["build_environment"]["claude_bin"] = json!(template.join("bin/claude"));
+    report["claude_exec_probe"] = json!({"argv":["--help"],"stdout":help,
+        "required_options":crate::build::payload::CLAUDE_EXEC_OPTIONS,
+        "claude_sha256":claude_hash,"image_digest":image,"companions":[]});
+    report["claude_runtime"] = json!({"image_digest":image,
+        "interpreter":{"path":"/lib64/ld-linux-x86-64.so.2","sha256":"c".repeat(64)},
+        "libraries":[{"path":"/lib64/libc.so.6","sha256":"d".repeat(64)}]});
+    fs::write(
+        &report_path,
+        serde_json::to_vec(&report).expect("build JSON"),
+    )
+    .expect("Claude build report");
+    let generation_path = custody.join("install-generation.json");
+    let mut generation: serde_json::Value =
+        serde_json::from_slice(&fs::read(&generation_path).expect("generation"))
+            .expect("generation JSON");
+    generation["claude_sha256"] = json!(claude_hash);
+    generation["claude_image_program"] = json!(crate::build::payload::CLAUDE_IMAGE_PROGRAM);
+    generation["claude_template_dir"] = json!(template);
+    fs::write(
+        &generation_path,
+        serde_json::to_vec(&generation).expect("generation JSON"),
+    )
+    .expect("Claude generation");
+    let source_dir = custody.join("claude");
+    fs::create_dir(&source_dir).expect("fictional source home");
+    fs::set_permissions(&source_dir, fs::Permissions::from_mode(0o700)).expect("source mode");
+    let source = source_dir.join(".credentials.json");
+    fs::write(&source, b"not a token document\n").expect("fictional invalid document");
+    fs::set_permissions(&source, fs::Permissions::from_mode(0o600)).expect("source file mode");
+    let source_before = fs::read(&source).expect("source before");
+    request.run = "PreviewClaude".into();
+    request.backend = Some(BoxBackend::Claude);
+    request.observe = true;
+    request.model = Some("fixture-claude".into());
+    let mut broken = manifest.clone();
+    broken["config_sha256"] = json!("f".repeat(64));
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o640)).expect("manifest edit");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&broken).expect("broken manifest"),
+    )
+    .expect("break template pin");
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o440)).expect("manifest mode");
+    let first = run(home, request).expect_err("installed pin refuses before admission");
+    assert_eq!(first.kind, "template-pin", "{first:?}");
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o640)).expect("manifest edit");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec(&manifest).expect("restored manifest"),
+    )
+    .expect("restore template pin");
+    fs::set_permissions(&manifest_path, fs::Permissions::from_mode(0o440)).expect("manifest mode");
+    let complete = run(home, request).expect_err("closed gate follows complete preview");
+    assert_eq!(complete.kind, "backend-unavailable", "{complete:?}");
+    assert!(
+        complete.detail.contains("checked at the act"),
+        "{complete:?}"
+    );
+    assert!(
+        complete
+            .detail
+            .contains("all read-only launch preview checks passed")
+    );
+    assert!(
+        complete
+            .detail
+            .contains("Claude driver contract is checked on launch")
+    );
+    let marker = source_dir.join(".boxed-refresh-mode");
+    fs::write(&marker, b"refresh\n").expect("cutover request");
+    fs::set_permissions(&marker, fs::Permissions::from_mode(0o600)).expect("mode marker");
+    let cutover = run(home, request).expect_err("closed cutover refuses in preview");
+    assert_eq!(cutover.kind, "credential-cutover-gate");
+    fs::remove_file(&marker).expect("remove cutover request");
+    let lock = source_dir.join(".refresh.lock");
+    fs::write(&lock, b"").expect("unsafe existing lock");
+    fs::set_permissions(&lock, fs::Permissions::from_mode(0o644)).expect("unsafe lock mode");
+    let unsafe_lock = run(home, request).expect_err("unsafe existing lock refuses");
+    assert_eq!(unsafe_lock.kind, "credential-lock");
+    fs::remove_file(&lock).expect("remove unsafe lock");
+    let second_link = source_dir.join("linked-source");
+    fs::hard_link(&source, &second_link).expect("second source link");
+    let linked = run(home, request).expect_err("hard link is a reported fact");
+    assert_eq!(linked.kind, "backend-unavailable");
+    fs::remove_file(&second_link).expect("remove second link");
+    assert_eq!(fs::read(&source).expect("source after"), source_before);
+    assert!(!source_dir.join(".refresh.lock").exists());
+    assert!(!runs.join(".reservation-PreviewClaude.json").exists());
+    request.observe = false;
+    let hosts = run(home, request).expect_err("selected vendor host list is required");
+    assert_eq!(hosts.kind, "missing-setting");
+    assert!(hosts.detail.contains("vendor_hosts.claude"));
+    request.observe = true;
+    request.dry_run = false;
+    let closed = run(home, request).expect_err("changing launch remains gated first");
+    assert_eq!(closed.kind, "backend-unavailable");
+}
+
 /// ´test:crate:public-preview-reads-dead-preparation-with-unreadable-driver´
 #[test]
-#[allow(clippy::too_many_lines)]
 fn public_preview_reads_dead_preparation_with_unreadable_driver() {
+    full_launch_preview_fixture(false);
+}
+
+/// ´test:crate:claude-dry-run-reaches-every-launch-check-before-the-gate´
+#[test]
+fn claude_dry_run_reaches_every_launch_check_before_the_gate() {
+    full_launch_preview_fixture(true);
+}
+
+#[allow(clippy::too_many_lines)]
+fn full_launch_preview_fixture(claude_preview: bool) {
     let fixture = ProtectedRoot::short_socket_root();
     fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
         .expect("host ancestor mode");
@@ -1451,7 +1666,7 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
     );
     executable(
         &driver,
-        "#!/bin/sh\nif [ \"$5\" = --runtime-contract ]; then printf 'boxed-runtime 1\\n'; fi\nexit 0\n",
+        "#!/bin/sh\nif [ \"$5\" = --runtime-contract ]; then\n  if [ \"$4\" = codex ]; then printf 'boxed-runtime 1\\n'; exit 0; fi\n  exit 2\nfi\nexit 0\n",
     );
     executable(&lane_bin, "#!/bin/sh\nexit 0\n");
     executable(&home.join("proxy-fixture"), "#!/bin/sh\nexit 0\n");
@@ -1572,6 +1787,18 @@ fn public_preview_reads_dead_preparation_with_unreadable_driver() {
         door_scope: crate::door::Scope::Work,
         rotation_source: None,
     };
+    if claude_preview {
+        assert_claude_dry_run(
+            home,
+            &mut request,
+            &settings,
+            &custody,
+            &runs,
+            &template,
+            &image,
+        );
+        return;
+    }
     // Mutations of the recorded entry response exercise the production launcher,
     // with both preview and changing forms refusing before any run reservation.
     let accepted_entry = fs::read(&entry).expect("entry fixture");
@@ -1816,10 +2043,18 @@ exit 2
     request.backend = Some(BoxBackend::Claude);
     assert_eq!(
         run(home, &request)
-            .expect_err("mixed configuration does not substitute Codex")
+            .expect_err("Claude dry run reaches installed door check")
+            .kind,
+        "door-generation"
+    );
+    request.dry_run = false;
+    assert_eq!(
+        run(home, &request)
+            .expect_err("changing Claude launch remains gated first")
             .kind,
         "backend-unavailable"
     );
+    request.dry_run = true;
     fs::write(&settings, &source).expect("restore Codex configuration");
     request.backend = None;
     assert_dead_dispatch_attempt_wall(home, &request);

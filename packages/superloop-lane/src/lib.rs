@@ -251,6 +251,18 @@ pub(crate) fn load_launch_plan(
     )
 }
 
+/// Build a launch candidate without opening runtime admission. Only the
+/// read-only dry-run branch may use this loader.
+pub(crate) fn load_launch_preview_plan(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    requested: Option<settings::BoxBackend>,
+) -> Result<(Plan, Settings), LaneError> {
+    load_launch_plan_core(home, loop_name, run, caller, requested, None)
+}
+
 pub(crate) fn load_launch_plan_admitted(
     home: &Path,
     loop_name: &str,
@@ -259,14 +271,31 @@ pub(crate) fn load_launch_plan_admitted(
     backend: Option<settings::BoxBackend>,
     admission: &crate::runtime_admission::RuntimeAdmission,
 ) -> Result<(Plan, Settings), LaneError> {
+    load_launch_plan_core(home, loop_name, run, caller, backend, Some(admission))
+}
+
+fn load_launch_plan_core(
+    home: &Path,
+    loop_name: &str,
+    run: &str,
+    caller: (u32, u32),
+    requested: Option<settings::BoxBackend>,
+    admission: Option<&crate::runtime_admission::RuntimeAdmission>,
+) -> Result<(Plan, Settings), LaneError> {
     let settings = read_plan_settings(home, loop_name, run)?;
-    let backend = settings.launch_backend(backend)?;
-    admission.check(backend)?;
+    let backend = settings.launch_backend(requested)?;
+    if let Some(admission) = admission {
+        admission.check(backend)?;
+    }
     #[cfg(test)]
-    admission.scope_names(home, loop_name, run)?;
+    if let Some(admission) = admission {
+        admission.scope_names(home, loop_name, run)?;
+    }
     let loaded = load_plan_with_settings(home, loop_name, run, caller, true, settings, backend)?;
     #[cfg(test)]
-    admission.scope_plan(&loaded.0.document)?;
+    if let Some(admission) = admission {
+        admission.scope_plan(&loaded.0.document)?;
+    }
     Ok(loaded)
 }
 

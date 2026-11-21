@@ -1361,6 +1361,55 @@ pub(crate) fn claude_sign_in_dir(owner_home: &Path, loop_name: &str) -> PathBuf 
         .join("claude")
 }
 
+/// Check the Claude source's custody for a launch preview without opening its
+/// contents or creating the refresh lock. Expiry is checked at publication.
+pub(crate) fn claude_source_custody_preview(
+    owner_home: &Path,
+    loop_name: &str,
+) -> Result<Value, LaneError> {
+    let source_home = claude_sign_in_dir(owner_home, loop_name);
+    admitted_claude_mode(&source_home)?;
+    let owner = owner_identity().0;
+    let dir = open_dir(&source_home, owner, owner, 0o700)?;
+    match fstatat(&dir, ".refresh.lock", AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(lock)
+            if lock.st_uid == owner
+                && lock.st_mode & 0o7777 == 0o600
+                && lock.st_mode & libc::S_IFMT == libc::S_IFREG
+                && lock.st_nlink == 1 => {}
+        Err(Errno::ENOENT) => {}
+        _ => {
+            return Err(failure(
+                "credential-lock",
+                "loop refresh lock owner, mode or type is unsafe",
+            ));
+        }
+    }
+    let file = openat2(
+        &dir,
+        ".credentials.json",
+        OpenHow::new()
+            .flags(OFlag::O_PATH | OFlag::O_CLOEXEC)
+            .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
+    )
+    .map_err(|_| failure("credential-sign-in", "Claude source is missing or unsafe"))?;
+    let stat = fstat(&file).map_err(|_| failure("credential-sign-in", "source stat failed"))?;
+    if stat.st_uid != owner
+        || stat.st_mode & 0o7777 != 0o600
+        || stat.st_mode & libc::S_IFMT != libc::S_IFREG
+        || stat.st_size < 0
+        || stat.st_size.cast_unsigned() > MAX_AUTH_BYTES
+    {
+        return Err(failure(
+            "credential-sign-in",
+            "Claude source owner, mode, type or size is unsafe",
+        ));
+    }
+    Ok(json!({"owner_uid":stat.st_uid,"mode":"0600","regular":true,
+        "hard_links":stat.st_nlink,"size_bytes":stat.st_size,
+        "expiry":"checked at the act"}))
+}
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum ClaudeMode {
     Read,
