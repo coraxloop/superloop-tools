@@ -20,6 +20,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Read only a saved plan without a backend field as the legacy Codex form, and refuse an explicit null backend as `backend-selection`, as the strict plan reader already does (``test:unit:saved-backend-reader-keeps-legacy-codex-default``). Compatibility: no released writer stores a null backend, so valid saved plans, reservations and records read as before.
+
 - Start each exercise probe box from a process whose soft and hard core limit is zero, set by the exercise command before it starts the container program, and refuse as `exercise-core-limit` if it cannot set it (``test:unit:exercise-probe-box-inherits-zero-core-limit``). Compatibility: the exercise command keeps the zero limit for the rest of its run; pinned box vectors, plans, reservations and records do not change, and no operator acts.
 
 - Withdraw a boxed worker's published sign-in projection when the helper cannot write the preparing reservation after publishing it, and keep the service's or the reservation's own refusal when the withdrawal cannot start or meets a changed entry (``test:unit:claude-fixture-service-round-reservation-write-withdraws-publication``; ``test:unit:helper-withdrawal-setup-refusal-keeps-service-error``). Compatibility: a failed preparing-reservation write now withdraws the projection it had just published before its refusal is returned; the refusal an operator reads keeps its kind and text, with any withdrawal failure appended as cleanup evidence; no pinned plan, reservation or record form changes.

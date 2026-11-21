@@ -117,7 +117,10 @@ impl BoxBackend {
     /// Saved reservations before backend selection was recorded name Codex.
     /// Explicit but invalid bindings still refuse through the regular reader.
     pub(crate) fn from_saved_plan(plan: &serde_json::Value) -> Result<Self, LaneError> {
-        if plan["backend"].is_null() {
+        if plan
+            .as_object()
+            .is_some_and(|object| !object.contains_key("backend"))
+        {
             Ok(Self::Codex)
         } else {
             Self::from_plan(plan)
@@ -710,6 +713,12 @@ mod tests {
         assert_eq!(
             BoxBackend::from_saved_plan(&serde_json::json!({"backend":7}))
                 .expect_err("malformed explicit backend")
+                .kind,
+            "backend-selection"
+        );
+        assert_eq!(
+            BoxBackend::from_saved_plan(&serde_json::json!({"backend":null}))
+                .expect_err("explicit null backend")
                 .kind,
             "backend-selection"
         );
