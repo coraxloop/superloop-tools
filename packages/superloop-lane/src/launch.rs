@@ -8006,6 +8006,32 @@ mod tests {
         );
     }
 
+    /// # Panics
+    /// Panics if the saved Claude plan no longer passes the box gate, attestation,
+    /// or pinned-plan comparison used by a resumed run.
+    /// ´test:unit:claude-plan-fixture-passes-its-saved-plan-readers´
+    #[test]
+    fn claude_plan_fixture_passes_its_saved_plan_readers() {
+        let saved: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/plan-claude.json"))
+                .expect("saved Claude plan fixture");
+        assert_eq!(
+            crate::settings::BoxBackend::from_plan(&saved).expect("saved backend"),
+            crate::settings::BoxBackend::Claude
+        );
+        crate::plan::box_gate(&saved).expect("saved box vector");
+        crate::plan::verify_box_attestation_structure(&saved).expect("saved attestation");
+        super::compare_pinned_plan(&saved, &saved).expect("unchanged saved plan");
+        let mut changed = saved.clone();
+        changed["resources"]["cpu_shares"] = serde_json::json!(1024);
+        assert_eq!(
+            super::compare_pinned_plan(&saved, &changed)
+                .expect_err("changed pinned resource")
+                .kind,
+            "plan-read"
+        );
+    }
+
     /// ´test:unit:changed-plan-detail-names-the-door-repin-route-and-other-pinned-inputs´
     #[test]
     fn changed_plan_detail_names_the_door_repin_route_and_other_pinned_inputs() {

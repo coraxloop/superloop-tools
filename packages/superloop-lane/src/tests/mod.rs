@@ -383,6 +383,14 @@ fn claude_plan_is_pinned_for_the_fixture() {
         "claude".into(),
         vec!["/usr/libexec/superloop/claude".into()],
     )]);
+    settings.driver_argv = vec![
+        "/opt/superloop/superloop-lane".into(),
+        "driver".into(),
+        "start".into(),
+        "--backend".into(),
+        "claude".into(),
+    ];
+    settings.driver_bin = Some(PathBuf::from("/opt/superloop/superloop-lane"));
     settings.template_dir = Some(PathBuf::from(
         "/home/owner/.var/loops/alpha/runner-templates/claude/DIGEST",
     ));
