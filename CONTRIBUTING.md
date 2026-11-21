@@ -31,7 +31,7 @@ The adopted contract sources below carry the repository's Invariant-kind stateme
 |``docs/spec/deployment.md``|(`sec:deployment:installation`)|
 |``docs/spec/linter-conformance.md``|(`sec:conformance:linter-frontier`)|
 |``docs/spec/output.md``|(`sec:output:agent-text-mode`)|
-|``packages/superloop-lane/README.md``|``inv:superlooplane:run-authority-separation``, ``inv:superlooplane:one-claude-source-refresher``, ``inv:superlooplane:box-inputs-exclude-recognized-credentials``, ``inv:superlooplane:door-agent-input-has-no-learned-history``, ``sec:readme:commands``, ``sec:readme:settings``|
+|``packages/superloop-lane/README.md``|``inv:superlooplane:reply-designation-association``, ``inv:superlooplane:run-authority-separation``, ``inv:superlooplane:one-claude-source-refresher``, ``inv:superlooplane:box-inputs-exclude-recognized-credentials``, ``inv:superlooplane:door-agent-input-has-no-learned-history``, ``sec:readme:commands``, ``sec:readme:settings``|
 
 The lane package is a separate label owner. Its row gives the document and its local mint and section labels as literal locators; search within that document. It does not invent a TOOLS-to-SUPERLOOPLANE citation edge. The package's Commands and Settings sections contain the remaining invariant heads.
 
