@@ -549,6 +549,7 @@ fn workspace_node_terminal_reasons_stay_separate_from_door_replies() {
         (CAUSE_MALFORMED, &timed_out, false, "node-malformed-control"),
         (CAUSE_OUTPUT_LIMIT, &timed_out, false, "node-output-limit"),
         (CAUSE_NONE, &completed, true, "node-output-incomplete"),
+        (CAUSE_NONE, &timed_out, true, "node-output-incomplete"),
         (CAUSE_NONE, &timed_out, false, "node-deadline"),
         (CAUSE_NONE, &completed, false, "node-complete"),
         (CAUSE_STOP, &timed_out, true, "node-stopped"),
