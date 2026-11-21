@@ -18,6 +18,32 @@ pub const KEYS: [&str; 12] = [
     "agent_observations",
 ];
 
+/// The registered receive envelope is answered locally; its ref is checked by transport.
+pub const REGISTERED_RECEIVE_RULE: &str = "registered-receive-transport";
+
+/// Record the door's built-in transport rule without claiming an agent or learned citation.
+pub fn registered_receive(record: &mut Value) {
+    record["would_do"] = json!({"decision":"allow","reason":REGISTERED_RECEIVE_RULE});
+    record["would_do_source"] = json!("transport-rule");
+    record["decision_tier"] = json!("transport-rule");
+    record["matched_rule"] =
+        json!({"rule":REGISTERED_RECEIVE_RULE,"mirror_ref":record["mirror_ref"]});
+}
+
+fn registered_receive_rule(record: &Value) -> bool {
+    let rule = &record["matched_rule"];
+    record["would_do_source"] == "transport-rule"
+        && (record["decision_tier"] == "transport-rule"
+            || (!record["label"].is_null() && record["decision_tier"] == "superloop"))
+        && record["class"] == "ssh"
+        && record["operation"] == "git-receive"
+        && record["would_do"]["decision"] == "allow"
+        && record["would_do"]["reason"] == REGISTERED_RECEIVE_RULE
+        && super::exact(rule, &["rule", "mirror_ref"])
+        && rule["rule"] == REGISTERED_RECEIVE_RULE
+        && rule["mirror_ref"] == record["mirror_ref"]
+}
+
 /// Initialize an intent or mechanically convert historical evidence.
 pub fn initialize(record: &mut Value) {
     record["effect"]["ending"] = super::unobserved_ending();
@@ -85,10 +111,10 @@ pub fn valid(record: &Value) -> bool {
     }
     if !matches!(
         record["decision_tier"].as_str(),
-        Some("fast-lane" | "agent" | "superloop")
+        Some("fast-lane" | "agent" | "superloop" | "transport-rule")
     ) || !matches!(
         record["would_do_source"].as_str(),
-        Some("fast-lane" | "agent" | "superloop")
+        Some("fast-lane" | "agent" | "superloop" | "transport-rule")
     ) {
         return false;
     }
@@ -99,6 +125,7 @@ pub fn valid(record: &Value) -> bool {
     }
     let rule = &record["matched_rule"];
     if !rule.is_null()
+        && !registered_receive_rule(record)
         && (!super::exact(rule, &["class", "operation", "shape_key", "request_ids"])
             || rule["class"] != record["class"]
             || rule["operation"] != record["operation"]
@@ -120,6 +147,7 @@ pub fn valid(record: &Value) -> bool {
                     Some("allow" | "refuse")
                 ),
                 Some("superloop") => record["would_do"]["decision"] == "undecided",
+                Some("transport-rule") => registered_receive_rule(record),
                 _ => false,
             };
     }
@@ -171,7 +199,7 @@ pub(super) fn invalid_field(record: &Value) -> &'static str {
     for key in ["decision_tier", "would_do_source"] {
         if !matches!(
             record[key].as_str(),
-            Some("fast-lane" | "agent" | "superloop")
+            Some("fast-lane" | "agent" | "superloop" | "transport-rule")
         ) {
             return key;
         }
@@ -264,6 +292,24 @@ pub(super) fn invalid_field(record: &Value) -> &'static str {
 mod tests {
     use super::*;
     use crate::requests::{Mode, RequestRecord, tests::waiting};
+
+    /// ´test:unit:registered-receive-rule-round-trips-and-binds-the-mirror-ref´
+    #[test]
+    fn registered_receive_rule_round_trips_and_binds_the_mirror_ref() {
+        let mut record = waiting("R", "1a", 3000, Mode::Enforce).into_value();
+        record["class"] = json!("ssh");
+        record["operation"] = json!("git-receive");
+        record["shape_key"] = json!("ssh:git-receive");
+        record["mirror_ref"] = json!("refs/heads/lane/R");
+        registered_receive(&mut record);
+        RequestRecord::decode(record.clone()).expect("registered receive rule");
+        let mut changed = record.clone();
+        changed["mirror_ref"] = json!("refs/heads/lane/S");
+        assert!(RequestRecord::decode(changed).is_err());
+        let mut changed = record;
+        changed["operation"] = json!("git-upload");
+        assert!(RequestRecord::decode(changed).is_err());
+    }
 
     /// ´test:unit:agent-observations-survive-strict-record-round-trip´
     #[test]
