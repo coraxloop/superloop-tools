@@ -443,6 +443,15 @@ fn withdraw(directory: &OwnedFd, prior: Option<&[u8]>) -> Result<(), LaneError> 
 ///
 /// Refuses malformed evidence, a changed host pin or an out-of-order phase before writing.
 pub fn run(owner_home: &Path, args: &[String], input: &mut impl Read) -> Result<Value, LaneError> {
+    run_with_attestation(owner_home, args, input, verify_box_attestation)
+}
+
+fn run_with_attestation(
+    owner_home: &Path,
+    args: &[String],
+    input: &mut impl Read,
+    attest: impl Fn(&Value) -> Result<(), LaneError>,
+) -> Result<Value, LaneError> {
     let [command, loop_name, run] = args else {
         return Err(LaneError::input(
             "network-evidence-usage",
@@ -467,13 +476,10 @@ pub fn run(owner_home: &Path, args: &[String], input: &mut impl Read) -> Result<
     if record["loop"] != loop_name.as_str() || record["run"] != run.as_str() {
         return Err(error("reservation identity differs"));
     }
-    verify_box_attestation(&record["plan"])?;
+    attest(&record["plan"])?;
     let pinned = host_words(&record["plan"]["vendor_hosts"])?;
-    let mut active = settings
-        .vendor_hosts
-        .get("codex")
-        .cloned()
-        .unwrap_or_default();
+    let (_, configured_hosts) = super::selected_vendor_hosts(&settings, &record["plan"])?;
+    let mut active = configured_hosts.to_vec();
     active.sort();
     if pinned != active {
         return Err(error("active host list differs from the run's pin"));
@@ -534,7 +540,7 @@ pub(crate) mod tests {
 
     use super::{
         ATTEMPT, FAIL_RECORD_WRITE, FAIL_VERIFY, FAIL_WITHDRAW, RECORD, attempt, custody, decode,
-        read, read_leaf, run, validate_event, write_leaf,
+        read, read_leaf, run, run_with_attestation, validate_event, write_leaf,
     };
 
     pub fn recorded_fixture(fixture: &Fixture) {
@@ -580,6 +586,38 @@ pub(crate) mod tests {
         let args = ["network-evidence".into(), "alpha".into(), "R".into()];
         let bytes = serde_json::to_vec(event).expect("event bytes");
         run(home, &args, &mut Cursor::new(bytes))
+    }
+
+    /// ´test:unit:network-evidence-selects-saved-backend-hosts´
+    #[test]
+    fn network_evidence_selects_saved_backend_hosts() {
+        let fixture = Fixture::new();
+        recorded_fixture(&fixture);
+        let settings_path = fixture.home.join(".config/loops/alpha/workers.toml");
+        let settings = fs::read_to_string(&settings_path).expect("settings");
+        fs::write(
+            &settings_path,
+            settings.replace(
+                "vendor_hosts = { codex = [\"api.example.com\"] }",
+                "vendor_hosts = { codex = [\"other.example.com\"], claude = [\"api.example.com\"] }",
+            ),
+        )
+        .expect("different reviewed lists");
+        let reservation = crate::launch::reservation_path(&fixture.home.join("runs"), "R");
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&reservation).expect("reservation"))
+                .expect("record JSON");
+        record["plan"]["backend"] = json!("claude");
+        crate::launch::publish_reservation(&reservation, &record).expect("Claude reservation");
+        let result = run_with_attestation(
+            &fixture.home,
+            &["network-evidence".into(), "alpha".into(), "R".into()],
+            &mut Cursor::new(serde_json::to_vec(&event("start", 0)).expect("event bytes")),
+            |_| Ok(()),
+        )
+        .expect("saved backend host list admits the observation");
+        assert_eq!(result["pinned_hosts"], json!(["api.example.com"]));
+        assert_eq!(result["events"], 1);
     }
 
     /// ´test:unit:network-evidence-records-three-phases-under-run-custody´

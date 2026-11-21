@@ -227,11 +227,8 @@ fn measure_with(
         Ok(hosts) => hosts,
         Err(error) => return Ok(incomplete(loop_name, run, &error.line())),
     };
-    let current = settings
-        .vendor_hosts
-        .get("codex")
-        .cloned()
-        .unwrap_or_default();
+    let (_, configured_hosts) = super::super::selected_vendor_hosts(&settings, document)?;
+    let current = configured_hosts.to_vec();
     let mut current_sorted = current.clone();
     current_sorted.sort();
     let pinned_match = hosts == current_sorted;

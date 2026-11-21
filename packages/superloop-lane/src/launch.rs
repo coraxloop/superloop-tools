@@ -29,6 +29,19 @@ use crate::plan::{Plan, protected_identifier_path, protected_identity_dir};
 use crate::settings::Settings;
 use crate::{load_plan, valid_run_name};
 
+/// Read the current host list for the backend bound into a protected plan.
+pub(crate) fn selected_vendor_hosts<'a>(
+    settings: &'a Settings,
+    plan: &Value,
+) -> Result<(crate::settings::BoxBackend, &'a [String]), LaneError> {
+    let backend = crate::settings::BoxBackend::from_plan(plan)?;
+    let hosts = settings
+        .vendor_hosts
+        .get(backend.name())
+        .map_or(&[][..], Vec::as_slice);
+    Ok((backend, hosts))
+}
+
 pub mod admission;
 pub mod bound_roots;
 pub mod census;
@@ -1770,6 +1783,16 @@ pub(crate) fn record_hosts_with_lane_bin_from(
         crate::install::lock_loop_config(&config, request.dry_run || request.list)?;
     let (plan, settings) =
         crate::load_plan_for_record(owner_home, &request.loop_name, &request.run, (0, 0))?;
+    let (backend, configured_hosts) = selected_vendor_hosts(&settings, &plan.document)?;
+    if !settings.backend_argv.contains_key(backend.name()) {
+        return Err(LaneError::input(
+            "missing-setting",
+            format!(
+                "backend_argv.{} is absent for this saved run",
+                backend.name()
+            ),
+        ));
+    }
     crate::pinned::owner_executable(&request.podman_bin, Uid::effective().as_raw())?;
     let environment = launch_environment(owner_home)?;
     let verified_home =
@@ -1838,15 +1861,14 @@ pub(crate) fn record_hosts_with_lane_bin_from(
             ));
         }
     }
-    let previous = settings
-        .vendor_hosts
-        .get("codex")
-        .cloned()
-        .unwrap_or_default();
+    let previous = configured_hosts.to_vec();
     if !previous.is_empty() && previous != request.hosts {
         return Err(LaneError::input(
             "host-list",
-            "vendor_hosts.codex already differs; a separate reviewed update is required",
+            format!(
+                "vendor_hosts.{} already differs; a separate reviewed update is required",
+                backend.name()
+            ),
         ));
     }
     let changed = previous.is_empty();
@@ -1862,7 +1884,7 @@ pub(crate) fn record_hosts_with_lane_bin_from(
         .cloned()
         .unwrap_or_default();
     vendor_hosts.insert(
-        "codex".into(),
+        backend.name().into(),
         toml::Value::Array(
             request
                 .hosts
@@ -1882,7 +1904,7 @@ pub(crate) fn record_hosts_with_lane_bin_from(
         build::publish(&settings_path, updated.as_bytes())?;
         let check = Settings::read(&settings_path)?;
         check.validate_grant(owner_home, &request.loop_name)?;
-        if check.vendor_hosts.get("codex") != Some(&request.hosts) {
+        if check.vendor_hosts.get(backend.name()) != Some(&request.hosts) {
             return Err(LaneError::operation(
                 "settings-write",
                 "host list check differs",
@@ -7347,16 +7369,12 @@ pub fn private_prepare_runtime(
             "verified runs root differs from the registry plan",
         ));
     }
+    let (backend, configured_hosts) = selected_vendor_hosts(&settings, &plan.document)?;
     let observed = plan.document["vendor_mode"].is_string();
-    if observed
-        && settings
-            .vendor_hosts
-            .get("codex")
-            .is_some_and(|hosts| !hosts.is_empty())
-    {
+    if observed && !configured_hosts.is_empty() {
         return Err(LaneError::input(
             "observe-conflict",
-            "vendor_hosts.codex is already set",
+            format!("vendor_hosts.{} is already set", backend.name()),
         ));
     }
     let birth: loop_home::mail::birth::Identity =
