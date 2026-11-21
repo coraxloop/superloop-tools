@@ -432,7 +432,7 @@ fn door_agent_sees_no_learned_history_on_cross_run_miss() {
     ] {
         let registration = concurrent_registration(3000);
         let row = super::request_record(
-            &registration, "ssh", Operation::GitReceive, &setting,
+            &registration, "ssh", Operation::GitUpload, &setting,
             &json!({"decision":"undecided","reason":"old-verdict-marker"}), true, &[],
         ).expect("old request");
         let id = row.id().to_owned();
@@ -441,7 +441,7 @@ fn door_agent_sees_no_learned_history_on_cross_run_miss() {
             "treatment":treatment,"reason":reason})], "fixture-loop", "2")
             .expect("old request labelled");
     }
-    let (decision, _, history) = store.learned_judgement("ssh", "git-receive", "ssh:git-receive")
+    let (decision, _, history) = store.learned_judgement("ssh", "git-upload", "ssh:git-upload")
         .expect("conflicted group");
     assert_eq!(decision["decision"], "undecided");
     let old = history.to_string();
@@ -467,7 +467,7 @@ fn door_agent_sees_no_learned_history_on_cross_run_miss() {
     let handler = thread::spawn(move || super::serve_request_with_agent(
         &mut server, &registration, 3000,
         &json!({"schema":2,"argv":[b"fixture".to_vec(),
-            b"git-receive-pack '~/mirrors/S.git'".to_vec()],"deadline_ms":120_000}),
+            b"git-upload-pack '~/mirrors/S.git'".to_vec()],"deadline_ms":120_000}),
         Some(&route), Some(&runner), Some(&home), None, Some(&new_store),
         Some(&agent), None, Instant::now(),
     ));

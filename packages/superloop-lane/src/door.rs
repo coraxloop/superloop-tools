@@ -2694,31 +2694,42 @@ fn serve_request_with_agent_at(
     } else {
         format!("{class}:{}", operation.name())
     };
-    let (mut would_do, matched_rule, _history) = match rubric.map_or_else(
-        || {
-            store
-                .learned_judgement(class, operation.name(), &shape_key)
-                .or_else(|error| {
-                    if wait.stop(deadline).is_some()
-                        || crate::requests::store::is_lock_contention(&error)
-                    {
-                        return Err(error);
-                    }
-                    Ok((
-                        json!({"decision":"undecided","reason":error.line()}),
-                        Value::Null,
-                        json!([]),
-                    ))
-                })
-        },
-        |rubric| {
-            Ok((
-                rubric.would_do(class, operation.name(), &shape_key),
-                Value::Null,
-                json!([]),
-            ))
-        },
-    ) {
+    // The registered receive envelope names only this run's mirror. The first
+    // Git command packet is checked against mirror_ref before forwarding bytes.
+    let registered_receive = operation == transport::Operation::GitReceive;
+    let (mut would_do, matched_rule, _history) = match if registered_receive {
+        Ok((
+            json!({"decision":"allow","reason":crate::requests::judgement::REGISTERED_RECEIVE_RULE}),
+            Value::Null,
+            json!([]),
+        ))
+    } else {
+        rubric.map_or_else(
+            || {
+                store
+                    .learned_judgement(class, operation.name(), &shape_key)
+                    .or_else(|error| {
+                        if wait.stop(deadline).is_some()
+                            || crate::requests::store::is_lock_contention(&error)
+                        {
+                            return Err(error);
+                        }
+                        Ok((
+                            json!({"decision":"undecided","reason":error.line()}),
+                            Value::Null,
+                            json!([]),
+                        ))
+                    })
+            },
+            |rubric| {
+                Ok((
+                    rubric.would_do(class, operation.name(), &shape_key),
+                    Value::Null,
+                    json!([]),
+                ))
+            },
+        )
+    } {
         Ok(judgement) => judgement,
         Err(error)
             if wait.stop(deadline).is_some()
@@ -2807,7 +2818,11 @@ fn serve_request_with_agent_at(
         &words,
     )?;
     let mut value = record.into_value();
-    value["matched_rule"] = matched_rule;
+    if registered_receive {
+        crate::requests::judgement::registered_receive(&mut value);
+    } else {
+        value["matched_rule"] = matched_rule;
+    }
     let record = RequestRecord::decode(value).map_err(io::Error::other)?;
     let id = record.id().to_owned();
     let store = store.with_request_id(&id);
@@ -7221,6 +7236,130 @@ mod tests {
             assert_eq!(record.value()["effect"]["state"], "completed");
             assert_eq!(agent.0.load(Ordering::SeqCst), 0);
             assert_eq!(effects.load(Ordering::SeqCst), iteration + 1);
+        }
+    }
+
+    /// ´test:unit:door-registered-receive-rule-skips-agent-and-keeps-packet-refusal´
+    #[test]
+    fn door_registered_receive_rule_skips_agent_and_keeps_packet_refusal() {
+        struct NoAgent;
+        impl super::agent::AgentRunner for NoAgent {
+            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+                panic!("registered receive invoked agent")
+            }
+        }
+        let old = "0".repeat(40);
+        let new = "1".repeat(40);
+        for (mode, reference, expected) in [
+            (Mode::Allow, "refs/heads/lane/R", "door-complete"),
+            (Mode::Enforce, "refs/heads/lane/R", "door-complete"),
+            (Mode::Allow, "refs/heads/lane/S", "door-changed-ref-refusal"),
+            (
+                Mode::Enforce,
+                "refs/heads/lane/S",
+                "door-changed-ref-refusal",
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, mode);
+            let registration = concurrent_registration(3000);
+            let route = route_for(&fixture.home);
+            let (runner, calls, _) = counting_runner(&fixture);
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
+            let command = format!("{old} {new} {reference}\0 report-status\n");
+            let mut packet = format!("{:04x}", command.len() + 4).into_bytes();
+            packet.extend(command.as_bytes());
+            packet.extend(b"0000");
+            peer.wire().write_all(&packet).expect("Git command packet");
+            peer.shutdown(Shutdown::Write).expect("end Git input");
+            let (reply, _) = super::serve_request_with_agent(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"fixture".to_vec(),b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                Some(&NoAgent),
+                None,
+                Instant::now(),
+            )
+            .expect("receive reply");
+            assert_eq!(reply["reason"], expected, "{mode:?} {reference}");
+            assert_eq!(peer.answer()["reason"], expected);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let rows = store.list_run("R").expect("receive record");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].value()["would_do_source"], "transport-rule");
+            assert_eq!(
+                rows[0].value()["matched_rule"]["rule"],
+                "registered-receive-transport"
+            );
+            assert!(rows[0].value()["agent_status"].is_null());
+            assert_eq!(rows[0].value()["effect"]["reason"], expected);
+        }
+    }
+
+    /// ´test:unit:door-registered-receive-audit-waits-and-other-targets-refuse´
+    #[test]
+    fn door_registered_receive_audit_waits_and_other_targets_refuse() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        set_fixture_mode(&store, Mode::Audit);
+        let registration = concurrent_registration(3000);
+        let route = route_for(&fixture.home);
+        let (runner, calls, _) = counting_runner(&fixture);
+        let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
+        peer.shutdown(Shutdown::Write).expect("end input");
+        super::REQUEST_READY.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|_| Ok(Instant::now())));
+        });
+        let (reply, _) = super::serve_request_with_agent(
+            &mut stream,
+            &registration,
+            3000,
+            &json!({"schema":2,"argv":[b"fixture".to_vec(),b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":120_000}),
+            Some(&route), Some(&runner), Some(&fixture.home), None, Some(&store), None, None,
+            Instant::now(),
+        ).expect("audit reply");
+        assert_ne!(reply["reason"], "door-complete");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.list_run("R").expect("record")[0].value()["would_do_source"],
+            "transport-rule"
+        );
+        let _answer = peer.answer();
+        for scope in [Scope::Work, Scope::Review] {
+            let registration = Registration::from_row(
+                &json!({"name":"alpha","uid":41001}),
+                "alpha",
+                "R",
+                3000,
+                scope,
+            )
+            .expect("registration");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
+            let target = if scope == Scope::Work { "S" } else { "R" };
+            let (reply, _) = super::serve_request_with_agent(
+                &mut stream, &registration, 3000,
+                &json!({"schema":2,"argv":[b"fixture".to_vec(),format!("git-receive-pack '~/mirrors/{target}.git'").into_bytes()],"deadline_ms":120_000}),
+                Some(&route), Some(&runner), Some(&fixture.home), None, Some(&store), None, None,
+                Instant::now(),
+            ).expect("preflight reply");
+            assert_eq!(
+                reply["reason"],
+                if scope == Scope::Work {
+                    "door-caller-authority-refusal"
+                } else {
+                    "door-review-compute-refusal"
+                }
+            );
+            assert_eq!(peer.answer()["reason"], reply["reason"]);
         }
     }
 
