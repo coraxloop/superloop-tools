@@ -5138,6 +5138,40 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if either backend's credential evidence changes from its pinned schema bytes.
+    /// ´test:unit:credential-evidence-schemas-are-byte-pinned´
+    #[test]
+    fn credential_evidence_schemas_are_byte_pinned() {
+        let report = Ok(fixture_report(1_900_000_000));
+        for (backend, path, expected) in [
+            (
+                BoxBackend::Codex,
+                "tests/fixtures/credential-evidence-codex.json",
+                include_str!("../tests/fixtures/credential-evidence-codex.json"),
+            ),
+            (
+                BoxBackend::Claude,
+                "tests/fixtures/credential-evidence-claude.json",
+                include_str!("../tests/fixtures/credential-evidence-claude.json"),
+            ),
+        ] {
+            let actual = serde_json::to_string(
+                &evidence_for_check(&report, true, backend).expect("fictional credential evidence"),
+            )
+            .expect("evidence JSON");
+            if std::env::var_os("UPDATE_LANE_PLAN").is_some() {
+                fs::write(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join(path),
+                    format!("{actual}\n"),
+                )
+                .expect("write evidence fixture");
+            } else {
+                assert_eq!(actual, expected.trim_end());
+            }
+        }
+    }
+
+    /// # Panics
     /// Panics if production evidence differs from its reviewed program binding.
     /// ´test:unit:claude-reviewed-binding-keeps-schema-evidence´
     #[test]

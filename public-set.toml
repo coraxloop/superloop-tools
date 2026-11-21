@@ -2654,6 +2654,15 @@ pattern = "packages/superloop-lane/tests/fixtures/handover-no-next.txt"
 pattern = "packages/superloop-lane/tests/fixtures/plan.json"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/plan-claude.json"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/credential-evidence-codex.json"
+
+[[include.rows]]
+pattern = "packages/superloop-lane/tests/fixtures/credential-evidence-claude.json"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/tests/fixtures/reconcile-host.c"
 
 [[include.rows]]

@@ -375,6 +375,42 @@ fn full_plan_is_pinned_for_the_fixture() {
     );
 }
 
+/// ´test:crate:claude-plan-is-pinned-for-the-fixture´
+#[test]
+fn claude_plan_is_pinned_for_the_fixture() {
+    let mut settings = fixture_settings(Path::new("/opt/superloop/superloop"));
+    settings.backend_argv = std::collections::BTreeMap::from([(
+        "claude".into(),
+        vec!["/usr/libexec/superloop/claude".into()],
+    )]);
+    settings.template_dir = Some(PathBuf::from(
+        "/home/owner/.var/loops/alpha/runner-templates/claude/DIGEST",
+    ));
+    let plan = Plan::build(
+        Path::new("/home/owner"),
+        "alpha",
+        "R",
+        &settings,
+        &fixture_row(),
+        fixture_block(),
+        (1000, 1000),
+    )
+    .expect("fictional Claude plan");
+    let actual = plan.json().expect("JSON plan");
+    if std::env::var_os("UPDATE_LANE_PLAN").is_some() {
+        fs::write(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/plan-claude.json"),
+            format!("{actual}\n"),
+        )
+        .expect("write Claude fixture");
+        return;
+    }
+    assert_eq!(
+        actual,
+        include_str!("../../tests/fixtures/plan-claude.json").trim_end()
+    );
+}
+
 /// ´test:crate:codex-state-is-per-run-and-only-auth-path-reaches-shared-sign-in´
 #[test]
 fn codex_state_is_per_run_and_only_auth_path_reaches_shared_sign_in() {
