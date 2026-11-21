@@ -23,6 +23,7 @@ mod agent_probes;
 pub mod config;
 mod lifetime;
 pub mod metadata;
+pub use workspace::{WorkspaceRequest, workspace_request};
 
 /// Format the final door reply for the SSH command boundary.
 #[must_use]
@@ -968,57 +969,99 @@ pub enum Scope {
     Review,
 }
 
-/// A schema-three request bound to the owner-held reservation, before judgement.
-pub struct WorkspaceRequest {
-    pub envelope: execute_command::workspace::Envelope,
-    pub grant: execute_command::workspace::Grant,
-}
+mod workspace {
+    use std::os::fd::OwnedFd;
 
-/// Decode the original wire once and read its grant under the door's held runs descriptor.
-///
-/// The caller supplies the node identity authenticated by the route; this reader
-/// never accepts the request's digest as a substitute for the protected grant.
-/// # Errors
-/// Refuses malformed wire, a missing grant or a changed run, worker or node.
-pub fn workspace_request(
-    runs: &OwnedFd,
-    registration: &Registration,
-    owner: u32,
-    node: &str,
-    wire: &[u8],
-) -> Result<WorkspaceRequest, LaneError> {
-    let envelope = execute_command::workspace::Envelope::from_bytes(wire)
-        .map_err(|error| LaneError::input(error.kind, error.detail))?;
-    let reservation = crate::launch::door_reservation(runs, &registration.run, owner)?;
-    if reservation["phase"] != "started"
-        || reservation["loop"] != registration.loop_name
-        || reservation["run"] != registration.run
-        || reservation["worker_uid"] != registration.worker_uid
-        || reservation["door_scope"] != registration.scope.name()
-    {
-        return Err(LaneError::input(
-            "door-workspace-context-differs",
-            "workspace reservation and registered worker differ",
-        ));
+    use crate::error::LaneError;
+
+    use super::{Registration, Scope};
+
+    /// A schema-three request bound to the owner-held reservation, before judgement.
+    pub struct WorkspaceRequest {
+        envelope: execute_command::workspace::Envelope,
+        grant: execute_command::workspace::Grant,
     }
-    let snapshot = crate::plan::workspace_snapshot(&reservation["plan"])?;
-    let grant = snapshot
-        .ok_or_else(|| {
+
+    impl WorkspaceRequest {
+        /// The exact request decoded from the original wire.
+        #[must_use]
+        pub const fn envelope(&self) -> &execute_command::workspace::Envelope {
+            &self.envelope
+        }
+
+        /// The grant read from the protected reservation.
+        #[must_use]
+        pub const fn grant(&self) -> &execute_command::workspace::Grant {
+            &self.grant
+        }
+    }
+
+    /// Decode the original wire once and read its grant under the door's held runs descriptor.
+    ///
+    /// The caller supplies the node identity authenticated by the route; this reader
+    /// never accepts the request's digest as a substitute for the protected grant.
+    /// # Errors
+    /// Refuses malformed wire, a missing grant or a changed run, worker or node.
+    pub fn workspace_request(
+        runs: &OwnedFd,
+        registration: &Registration,
+        owner: u32,
+        node: &str,
+        wire: &[u8],
+    ) -> Result<WorkspaceRequest, LaneError> {
+        let envelope = execute_command::workspace::Envelope::from_bytes(wire)
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+        if registration.scope != Scope::Work {
+            return Err(LaneError::input(
+                "door-workspace-context-differs",
+                "workspace route requires work scope",
+            ));
+        }
+        let reservation =
+            crate::launch::door_reservation(runs, &registration.run, owner).map_err(|error| {
+                LaneError::input(
+                    "door-workspace-context-differs",
+                    format!(
+                        "protected workspace reservation is unavailable: {}",
+                        error.line()
+                    ),
+                )
+            })?;
+        if reservation["phase"] != "started"
+            || reservation["loop"] != registration.loop_name
+            || reservation["run"] != registration.run
+            || reservation["worker_uid"] != registration.worker_uid
+            || reservation["door_scope"] != registration.scope.name()
+        {
+            return Err(LaneError::input(
+                "door-workspace-context-differs",
+                "workspace reservation and registered worker differ",
+            ));
+        }
+        let snapshot = crate::plan::workspace_snapshot(&reservation["plan"]).map_err(|error| {
             LaneError::input(
-                "door-workspace-unregistered",
-                "no protected workspace grant",
+                "door-workspace-context-differs",
+                format!("protected workspace plan differs: {}", error.line()),
             )
-        })?
-        .grant;
-    execute_command::workspace::admit(
-        &envelope,
-        Some(&grant),
-        &registration.loop_name,
-        &registration.run,
-        node,
-    )
-    .map_err(|error| LaneError::input(error.kind, error.detail))?;
-    Ok(WorkspaceRequest { envelope, grant })
+        })?;
+        let grant = snapshot
+            .ok_or_else(|| {
+                LaneError::input(
+                    "door-workspace-unregistered",
+                    "no protected workspace grant",
+                )
+            })?
+            .grant;
+        execute_command::workspace::admit(
+            &envelope,
+            Some(&grant),
+            &registration.loop_name,
+            &registration.run,
+            node,
+        )
+        .map_err(|error| LaneError::input(error.kind, error.detail))?;
+        Ok(WorkspaceRequest { envelope, grant })
+    }
 }
 
 impl Registration {
