@@ -1196,11 +1196,7 @@ fn retire_record_confirmed_with(
         ));
     }
     if dry_run {
-        let backend = if saved["plan"]["backend"].is_null() {
-            crate::settings::BoxBackend::Codex
-        } else {
-            crate::settings::BoxBackend::from_plan(&saved["plan"])?
-        };
+        let backend = crate::settings::BoxBackend::from_saved_plan(&saved["plan"])?;
         let projection = match backend {
             crate::settings::BoxBackend::Codex => worker_home.join(".codex/auth.json"),
             crate::settings::BoxBackend::Claude => worker_home.join(".claude/.credentials.json"),

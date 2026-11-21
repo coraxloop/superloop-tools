@@ -114,6 +114,16 @@ impl BoxBackend {
         Self::parse(name)
     }
 
+    /// Saved reservations before backend selection was recorded name Codex.
+    /// Explicit but invalid bindings still refuse through the regular reader.
+    pub(crate) fn from_saved_plan(plan: &serde_json::Value) -> Result<Self, LaneError> {
+        if plan["backend"].is_null() {
+            Ok(Self::Codex)
+        } else {
+            Self::from_plan(plan)
+        }
+    }
+
     /// Refuse a vendor whose boxed runtime and credential adapter are not ready.
     ///
     /// # Errors
@@ -683,6 +693,27 @@ fn configured_driver(table: &toml::Table) -> Result<Vec<String>, LaneError> {
 #[cfg(test)]
 mod tests {
     use super::{Resources, bounded_cpu_shares, page_aligned_memory, split_local_policies};
+
+    /// ´test:unit:saved-backend-reader-keeps-legacy-codex-default´
+    #[test]
+    fn saved_backend_reader_keeps_legacy_codex_default() {
+        use super::BoxBackend;
+        assert_eq!(
+            BoxBackend::from_saved_plan(&serde_json::json!({})).expect("legacy record"),
+            BoxBackend::Codex
+        );
+        assert_eq!(
+            BoxBackend::from_saved_plan(&serde_json::json!({"backend":"claude"}))
+                .expect("explicit Claude"),
+            BoxBackend::Claude
+        );
+        assert_eq!(
+            BoxBackend::from_saved_plan(&serde_json::json!({"backend":7}))
+                .expect_err("malformed explicit backend")
+                .kind,
+            "backend-selection"
+        );
+    }
 
     /// ´test:unit:settings-reader-validates-directory-and-file-acl-masks´
     #[test]

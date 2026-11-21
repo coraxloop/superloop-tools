@@ -331,11 +331,7 @@ pub(crate) fn load_plan_for_record_with_door(
     let backend = if let Some(root) = registry.runs_root(loop_name) {
         let path = launch::reservation_path(root, run);
         if let Some(record) = launch::read_reservation(&path)? {
-            if record["plan"]["backend"].is_null() {
-                settings::BoxBackend::Codex
-            } else {
-                settings::BoxBackend::from_plan(&record["plan"])?
-            }
+            settings::BoxBackend::from_saved_plan(&record["plan"])?
         } else {
             settings::BoxBackend::Codex
         }

@@ -2374,7 +2374,8 @@ fn publish_helper_identity_admitted(
     record["helper_pid"] = json!(pid);
     record["helper_start"] = json!(process_start(pid)?);
     publish_round_credential_admitted(owner_home, loop_name, &mut record, admission)?;
-    crate::launch::publish_reservation(&reservation, &record)?;
+    crate::launch::publish_reservation(&reservation, &record)
+        .or_else(|error| finish_with_projection_withdrawal(Err(error), &record, backend))?;
     Ok(backend)
 }
 
@@ -2666,9 +2667,13 @@ impl Drop for ServiceResources {
 ///
 /// Refuses a changed saved request, a foreign peer, or a failed bounded child.
 pub fn serve(run_dir: &Path) -> Result<(), LaneError> {
-    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)
-        .map_err(|error| LaneError::operation("helper-core-limit", error.to_string()))?;
+    limit_helper_core()?;
     serve_admitted(run_dir, &RuntimeAdmission::Gate)
+}
+
+fn limit_helper_core() -> Result<(), LaneError> {
+    nix::sys::resource::setrlimit(nix::sys::resource::Resource::RLIMIT_CORE, 0, 0)
+        .map_err(|error| LaneError::operation("helper-core-limit", error.to_string()))
 }
 
 fn serve_admitted(run_dir: &Path, admission: &RuntimeAdmission) -> Result<(), LaneError> {
@@ -2687,6 +2692,7 @@ pub(crate) fn fixture_serve_admitted_at(
     run_dir: &Path,
     admission: &RuntimeAdmission,
 ) -> Result<(), LaneError> {
+    limit_helper_core()?;
     serve_admitted_at(owner_home, run_dir, admission)
 }
 
@@ -2797,18 +2803,16 @@ fn finish_with_projection_withdrawal(
     record: &Value,
     backend: BoxBackend,
 ) -> Result<(), LaneError> {
-    let withdrawal = crate::credential::withdraw_worker_projection(
-        Path::new(
-            record["plan"]["home"]
-                .as_str()
-                .ok_or_else(|| LaneError::input("credential-withdraw", "run home is absent"))?,
-        ),
-        record["worker_uid"]
+    let withdrawal = (|| {
+        let home = record["plan"]["home"]
+            .as_str()
+            .ok_or_else(|| LaneError::input("credential-withdraw", "run home is absent"))?;
+        let uid = record["worker_uid"]
             .as_u64()
             .and_then(|uid| u32::try_from(uid).ok())
-            .ok_or_else(|| LaneError::input("credential-withdraw", "worker UID is absent"))?,
-        backend,
-    );
+            .ok_or_else(|| LaneError::input("credential-withdraw", "worker UID is absent"))?;
+        crate::credential::withdraw_worker_projection(Path::new(home), uid, backend)
+    })();
     match (result, withdrawal) {
         (Ok(()), withdrawal) => withdrawal,
         (Err(mut primary), Err(secondary)) => {
@@ -3098,6 +3102,77 @@ mod tests {
             std::fs::read(&projection).expect("next round file"),
             b"next fictional access"
         );
+    }
+
+    /// ´test:unit:helper-serve-child-sets-zero-core-limit´
+    #[test]
+    fn helper_serve_child_sets_zero_core_limit() {
+        const CHILD: &str = "SUPERLOOP_TEST_CORE_LIMIT_CHILD";
+        if std::env::var_os(CHILD).is_some() {
+            let _result = super::serve(std::path::Path::new("/nonexistent-helper-run"));
+            let (soft, hard) =
+                nix::sys::resource::getrlimit(nix::sys::resource::Resource::RLIMIT_CORE)
+                    .expect("child core limit");
+            assert_eq!((soft, hard), (0, 0), "serve must lower both limits");
+            return;
+        }
+        let output = crate::fixture_exec::test_image_command(
+            "container_helper::tests::helper_serve_child_sets_zero_core_limit",
+        )
+        .env(CHILD, "1")
+        .output()
+        .expect("isolated helper child");
+        assert!(
+            output.status.success(),
+            "helper child: {}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    /// ´test:unit:helper-withdrawal-setup-refusal-keeps-service-error´
+    #[test]
+    fn helper_withdrawal_setup_refusal_keeps_service_error() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for record in [
+            serde_json::json!({"worker_uid": 3000}),
+            serde_json::json!({"plan": {"home": "/unused"}}),
+        ] {
+            let error = super::finish_with_projection_withdrawal(
+                Err(crate::LaneError::operation("service-fault", "primary")),
+                &record,
+                crate::settings::BoxBackend::Codex,
+            )
+            .expect_err("service failure remains primary");
+            assert_eq!(error.kind, "service-fault");
+            assert!(
+                error.detail.contains("cleanup credential-withdraw"),
+                "{error:?}"
+            );
+        }
+        let root = tempfile::tempdir().expect("worker home");
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let state = root.path().join(".codex");
+        std::fs::create_dir(&state).expect("worker state");
+        std::fs::set_permissions(&state, std::fs::Permissions::from_mode(0o700))
+            .expect("worker state mode");
+        let projection = state.join("auth.json");
+        std::fs::write(&projection, b"fictional access").expect("projection");
+        std::fs::set_permissions(&projection, std::fs::Permissions::from_mode(0o640))
+            .expect("changed mode");
+        let record = serde_json::json!({"plan":{"home":root.path()},"worker_uid":uid});
+        let error = super::finish_with_projection_withdrawal(
+            Err(crate::LaneError::operation("service-fault", "primary")),
+            &record,
+            crate::settings::BoxBackend::Codex,
+        )
+        .expect_err("service failure remains primary");
+        assert_eq!(error.kind, "service-fault");
+        assert!(
+            error.detail.contains("cleanup credential-withdraw"),
+            "{error:?}"
+        );
+        assert!(projection.exists(), "changed entry is not removed");
     }
 
     /// ´test:unit:helper-service-setup-failures-clean-owned-sockets´

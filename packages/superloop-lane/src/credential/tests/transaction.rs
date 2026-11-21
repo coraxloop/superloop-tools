@@ -429,6 +429,42 @@ fn mapped_storage(root: &FixtureRoot) -> PathBuf {
     worker
 }
 
+fn wrong_projection_owner_body(enclosing: &Path) {
+    transaction_body(enclosing, |_, _, _, worker, _, _, _| {
+        let projection = worker.join(".claude/.credentials.json");
+        fs::write(&projection, b"fictional access").expect("projection entry");
+        fs::set_permissions(&projection, fs::Permissions::from_mode(0o600))
+            .expect("projection mode");
+        nix::unistd::chown(&projection, Some(Uid::from_raw(0)), Some(Gid::from_raw(0)))
+            .expect("wrong projection owner");
+        let error = withdraw_worker_projection(worker, 3000, BoxBackend::Claude)
+            .expect_err("changed owner refuses withdrawal");
+        assert_eq!(error.kind, "credential-withdraw", "{error:?}");
+        assert_eq!(
+            fs::read(&projection).expect("entry remains"),
+            b"fictional access"
+        );
+    });
+}
+
+/// # Panics
+/// Panics if a wrong-owned projection is removed or the mapped fixture leaks.
+/// ´test:unit:claude-fixture-withdrawal-refuses-wrong-projection-owner´
+#[test]
+fn claude_fixture_withdrawal_refuses_wrong_projection_owner() {
+    if enter(
+        "claude_fixture_withdrawal_refuses_wrong_projection_owner",
+        wrong_projection_owner_body,
+    ) {
+        return;
+    }
+    let mut host = launch("claude_fixture_withdrawal_refuses_wrong_projection_owner");
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
 /// # Panics
 /// Panics if the admitted round fails its mapped custody or projection contract.
 /// ´test:unit:claude-fixture-admitted-round´
@@ -755,6 +791,7 @@ fn claude_fixture_service_builder_publishes_image_report() {
 enum ServiceCase {
     NoClient,
     Due,
+    ReservationWrite,
     Attempt,
     OutsideSession,
 }
@@ -939,12 +976,22 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
             let launcher_start = crate::container_helper::process_start(launcher_pid)
                 .expect("namespace-local launcher start");
             let reservation = runs.join(".reservation-R.json");
-            let record = json!({
+            let mut record = json!({
                 "schema":1,"phase":"preparing","loop":"alpha","run":"R",
                 "worker_uid":3000,"launcher_pid":launcher_pid,"launcher_start":launcher_start,
                 "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}],
                 "plan":plan.document,"model_selection":selection,"letter_source":letter
             });
+            if scenario == ServiceCase::ReservationWrite {
+                let headroom = 16_usize;
+                let current = serde_json::to_vec(&record)
+                    .expect("reservation bytes")
+                    .len();
+                let padding = usize::try_from(crate::launch::MAX_RESERVATION_BYTES)
+                    .expect("reservation bound")
+                    .saturating_sub(current + "\"padding\":\"\"".len() + headroom);
+                record["padding"] = json!("x".repeat(padding));
+            }
             crate::launch::publish_reservation(&reservation, &record)
                 .expect("preparing service reservation");
             let before = fs::read(&reservation).expect("reservation before service");
@@ -961,7 +1008,7 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
                 .count();
             let service_done = Arc::new(std::sync::atomic::AtomicBool::new(false));
 
-            let release = if scenario == ServiceCase::Due {
+            let release = if matches!(scenario, ServiceCase::Due | ServiceCase::ReservationWrite) {
                 None
             } else {
                 let input = launcher.stdin.take().expect("launcher input");
@@ -1145,8 +1192,13 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
                     assert_eq!(evidence["attempt"], 1, "{evidence}");
                 }
             } else {
-                let error = outcome.expect_err("due owner source refuses at service entry");
-                assert_eq!(error.kind, "credential-read-due", "{error:?}");
+                let error = outcome.expect_err("service entry refuses");
+                let expected = if scenario == ServiceCase::Due {
+                    "credential-read-due"
+                } else {
+                    "reservation-size"
+                };
+                assert_eq!(error.kind, expected, "{error:?}");
                 assert_eq!(
                     fs::read(&reservation).expect("reservation after refusal"),
                     before
@@ -1201,7 +1253,7 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
                 !home.join(".fixture-refresh-sentinel").exists(),
                 "read-mode service never runs the owner program"
             );
-            if scenario != ServiceCase::Due {
+            if !matches!(scenario, ServiceCase::Due | ServiceCase::ReservationWrite) {
                 let (metadata, projected_bytes) = projected_rx
                     .recv()
                     .expect("publication observed before launcher exit");
@@ -1295,6 +1347,27 @@ fn claude_fixture_service_round_due_refuses_without_publication() {
     }
     let mut host = launch_with_builder(
         "claude_fixture_service_round_due_refuses_without_publication",
+        true,
+    );
+    let path = host.root.as_ref().expect("enclosure").path().to_owned();
+    finish(&mut host, true);
+    host.cleanup();
+    assert!(!path.exists());
+}
+
+/// # Panics
+/// Panics if a failed reservation write leaves the already published worker projection.
+/// ´test:unit:claude-fixture-service-round-reservation-write-withdraws-publication´
+#[test]
+fn claude_fixture_service_round_reservation_write_withdraws_publication() {
+    if enter(
+        "claude_fixture_service_round_reservation_write_withdraws_publication",
+        |enclosing| service_round_body(enclosing, ServiceCase::ReservationWrite),
+    ) {
+        return;
+    }
+    let mut host = launch_with_builder(
+        "claude_fixture_service_round_reservation_write_withdraws_publication",
         true,
     );
     let path = host.root.as_ref().expect("enclosure").path().to_owned();

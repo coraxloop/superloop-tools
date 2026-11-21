@@ -2579,6 +2579,45 @@ mod tests {
         );
     }
 
+    /// ´test:unit:worker-projection-withdrawal-refuses-changed-entry´
+    #[test]
+    fn worker_projection_withdrawal_refuses_changed_entry() {
+        use std::os::unix::fs::symlink;
+        let root = claude_fixture_root();
+        let uid = owner_identity().0;
+        let directory = root.path().join(".codex");
+        fs::create_dir(&directory).expect("worker state");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("worker state mode");
+        let projection = directory.join("auth.json");
+        let expect_refusal = || {
+            let error = withdraw_worker_projection(root.path(), uid, BoxBackend::Codex)
+                .expect_err("changed entry refuses withdrawal");
+            assert_eq!(error.kind, "credential-withdraw", "{error:?}");
+            assert!(projection.exists() || projection.symlink_metadata().is_ok());
+        };
+        fs::write(&projection, b"fictional access").expect("projection");
+        fs::set_permissions(&projection, fs::Permissions::from_mode(0o640)).expect("wrong mode");
+        expect_refusal();
+        fs::remove_file(&projection).expect("remove wrong mode");
+        symlink("config.toml", &projection).expect("link projection");
+        expect_refusal();
+        fs::remove_file(&projection).expect("remove link");
+        fs::create_dir(&projection).expect("directory projection");
+        expect_refusal();
+        fs::remove_dir(&projection).expect("remove directory");
+        fs::write(&projection, b"fictional access").expect("projection");
+        fs::set_permissions(&projection, fs::Permissions::from_mode(0o600)).expect("correct mode");
+        let error =
+            withdraw_worker_projection(root.path(), uid.saturating_add(1), BoxBackend::Codex)
+                .expect_err("wrong worker owner refuses withdrawal");
+        assert!(error.line().contains("credential"), "{error:?}");
+        assert_eq!(
+            fs::read(&projection).expect("unchanged projection"),
+            b"fictional access"
+        );
+    }
+
     /// # Panics
     /// Panics if unheld executable custody can read authority or replace a worker file.
     /// ´test:unit:claude-program-pin-precedes-owner-authority´
