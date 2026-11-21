@@ -240,8 +240,6 @@ fn preflight_words(check: &str, value: &Value) -> bool {
             "door-workspace-unregistered"
                 | "door-workspace-context-differs"
                 | "door-workspace-protocol-refusal"
-                | "door-caller-authority-refusal"
-                | "door-review-compute-refusal"
         ) && exact(value, &["schema", "wire_bytes", "truncated"])
             && value["schema"] == 3
             && value["wire_bytes"].as_array().is_some_and(|bytes| {

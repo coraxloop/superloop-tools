@@ -23,7 +23,7 @@ mod agent_probes;
 pub mod config;
 mod lifetime;
 pub mod metadata;
-pub use workspace::{WorkspaceRequest, workspace_request};
+pub use workspace::{WorkspaceAllowance, WorkspaceRequest, workspace_request};
 
 /// Format the final door reply for the SSH command boundary.
 #[must_use]
@@ -972,7 +972,12 @@ pub enum Scope {
 mod workspace {
     use std::os::fd::OwnedFd;
 
+    use execute_command::policy::DoorMode;
+    use execute_command::workspace::{Classification, Disposition, canonical_digest, learned_key};
+    use serde_json::{Value, json};
+
     use crate::error::LaneError;
+    use crate::requests::{RequestRecord, store::Store};
 
     use super::{Registration, Scope};
 
@@ -1061,6 +1066,167 @@ mod workspace {
         )
         .map_err(|error| LaneError::input(error.kind, error.detail))?;
         Ok(WorkspaceRequest { envelope, grant })
+    }
+
+    /// An allow bound to one exact request and to the custody that answered it.
+    pub struct WorkspaceAllowance {
+        envelope_digest: String,
+        context_key: Value,
+        policy_revision: String,
+        origin: AllowanceOrigin,
+    }
+
+    enum AllowanceOrigin {
+        Store(Value),
+        Judgement(String),
+    }
+
+    impl WorkspaceAllowance {
+        fn bind(request: &WorkspaceRequest, origin: AllowanceOrigin) -> Result<Self, LaneError> {
+            let policy_revision = request.grant.quick_policy_digest.clone();
+            let context_key = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &policy_revision,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let envelope_digest = canonical_digest(&request.envelope)
+                .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            Ok(Self {
+                envelope_digest,
+                context_key,
+                policy_revision,
+                origin,
+            })
+        }
+
+        /// Read a learned allow from the protected store using this request's derived key.
+        ///
+        /// # Errors
+        /// Propagates a store fault or refuses inconsistent learned evidence.
+        pub fn from_store_lookup(
+            store: &Store,
+            request: &WorkspaceRequest,
+        ) -> Result<Option<Self>, LaneError> {
+            let key = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &request.grant.quick_policy_digest,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let shape = key[2].as_str().ok_or_else(|| {
+                LaneError::input("door-workspace-context-differs", "learned key differs")
+            })?;
+            let (decision, evidence, _) =
+                store.learned_judgement("compute", "compute-workspace", shape)?;
+            if decision["decision"] != "allow" {
+                return Ok(None);
+            }
+            if evidence["class"] != "compute"
+                || evidence["operation"] != "compute-workspace"
+                || evidence["shape_key"] != shape
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "learned allowance evidence differs",
+                ));
+            }
+            Self::bind(request, AllowanceOrigin::Store(evidence)).map(Some)
+        }
+
+        /// Bind an agent allowance only after the strict schema-seven record reader accepts it.
+        ///
+        /// # Errors
+        /// Refuses a non-agent decision or any changed execution or owner context.
+        pub fn from_judgement_record(
+            record: &RequestRecord,
+            request: &WorkspaceRequest,
+        ) -> Result<Self, LaneError> {
+            let value = record.value();
+            let detail = &value["effect"]["workspace"];
+            if value["schema"] != 7
+                || value["class"] != "compute"
+                || value["operation"] != "compute-workspace"
+                || value["would_do_source"] != "agent"
+                || value["would_do"]["decision"] != "allow"
+                || detail["envelope"] != json!(request.envelope)
+                || detail["grant"] != json!(request.grant)
+                || detail["policy_revision"] != request.grant.quick_policy_digest
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "judgement allowance and exact workspace request differ",
+                ));
+            }
+            Self::bind(request, AllowanceOrigin::Judgement(record.id().to_owned()))
+        }
+
+        /// Whether this evidence still belongs to the exact wire and owner grant.
+        ///
+        /// # Errors
+        /// Refuses a changed envelope, grant or policy identity.
+        pub fn check(&self, request: &WorkspaceRequest) -> Result<(), LaneError> {
+            let same_envelope = canonical_digest(&request.envelope)
+                .map_err(|error| LaneError::input(error.kind, error.detail))?
+                == self.envelope_digest;
+            let same_context = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &self.policy_revision,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?
+                == self.context_key;
+            if !same_envelope
+                || !same_context
+                || self.policy_revision != request.grant.quick_policy_digest
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "allowance belongs to another exact workspace request",
+                ));
+            }
+            Ok(())
+        }
+
+        /// Protected evidence the later record adapter cites.
+        #[must_use]
+        pub fn evidence(&self) -> Value {
+            match &self.origin {
+                AllowanceOrigin::Store(rule) => json!({"source":"learned","rule":rule}),
+                AllowanceOrigin::Judgement(id) => json!({"source":"judgement","request_id":id}),
+            }
+        }
+    }
+
+    impl WorkspaceRequest {
+        /// Select a miss's wait after any allowance is checked against this exact request.
+        ///
+        /// A miss with no learned or recorded allowance waits in allow, audit and enforce.
+        /// # Errors
+        /// Refuses an allowance replayed against another request or malformed context.
+        pub fn disposition(
+            &self,
+            mode: DoorMode,
+            classification: &Classification,
+            allowance: Option<&WorkspaceAllowance>,
+        ) -> Result<Disposition, LaneError> {
+            if let Some(allowance) = allowance {
+                allowance.check(self)?;
+            }
+            let learned = allowance.map(|allowance| &allowance.context_key);
+            execute_command::workspace::disposition(
+                mode,
+                classification,
+                &self.envelope,
+                &self.grant,
+                &self.grant.quick_policy_digest,
+                learned,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))
+        }
     }
 }
 
