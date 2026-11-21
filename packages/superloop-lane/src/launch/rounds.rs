@@ -1331,7 +1331,7 @@ pub(super) fn continuation_round(
         .round
         .as_deref()
         .ok_or_else(|| LaneError::input("round-step", "round is absent"))?;
-    let mut round = json!({"step":step,"budget_seconds":request.budget,"mail":letter,"phase":"running","driver_dir":directory,"ended_by":null,"in_round_letters":[]});
+    let mut round = json!({"step":step,"budget_seconds":request.budget,"mail":letter,"phase":"running","driver_dir":directory,"ended_by":null,"in_round_letters":[],"reply_designation":{"state":"unmeasured"}});
     if require_thread_choice(record, request.thread_choice)? {
         round["fresh_thread"] = json!(true);
     }
@@ -5016,12 +5016,17 @@ mod choice_tests {
             .expect("request");
             let round =
                 continuation_round(&saved, &request, &directory, &saved["mail"][0]).expect("next");
+            assert_eq!(round["reply_designation"], json!({"state":"unmeasured"}));
             saved["rounds"].as_array_mut().expect("rounds").push(round);
             saved["rounds"][1]["phase"] = json!("awaiting-settlement");
             saved["phase"] = json!("started");
             saved["active_round"] = json!("review");
             let path = reservation_path(root.path(), "R");
             publish_reservation(&path, &saved).expect("new round");
+            assert_eq!(
+                read_reservation(&path).expect("read").expect("saved")["rounds"][1]["reply_designation"],
+                json!({"state":"unmeasured"})
+            );
             let reply = json!({"bytes":1});
             record_settlement_with_recovery(&plan, "R", &reply, false).expect_err("no start yet");
             assert_eq!(
@@ -5045,6 +5050,10 @@ mod choice_tests {
             assert_eq!(
                 read_reservation(&path).expect("read").expect("saved")["thread_id"],
                 "new-thread"
+            );
+            assert_eq!(
+                read_reservation(&path).expect("read").expect("saved")["rounds"][1]["reply_designation"],
+                json!({"state":"unmeasured"})
             );
         }
     }

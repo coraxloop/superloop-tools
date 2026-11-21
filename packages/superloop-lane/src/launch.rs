@@ -6878,7 +6878,7 @@ fn record_dispatch_letter(
     directory: &Path,
 ) -> Result<(), LaneError> {
     record["active_round"] = json!("dispatch");
-    record["rounds"] = json!([{"step":"dispatch","budget_seconds":budget,"letter":"dispatch.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":placed_at,"in_round_letters":[]}]);
+    record["rounds"] = json!([{"step":"dispatch","budget_seconds":budget,"letter":"dispatch.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":placed_at,"in_round_letters":[],"reply_designation":{"state":"unmeasured"}}]);
     record["initial_brief"] = json!({"step":"dispatch","name":"brief.txt","in_round":false,"stop":stop,"bytes":letter.len(),"sha256":build::sha256_bytes(letter, owner_home)?,"placed_at_unix_ns":placed_at,"state":"placed"});
     record["mail"] = json!([]);
     record["mail_replies"] = json!([]);
@@ -9227,6 +9227,10 @@ mod tests {
             .find(|pair| pair[0] == "-d")
             .expect("explicit directory argument");
         assert_eq!(record["rounds"][0]["driver_dir"], json!(supplied[1]));
+        assert_eq!(
+            record["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
         assert!(!directory.exists());
     }
 
@@ -9262,6 +9266,10 @@ mod tests {
             .expect("record");
         assert_eq!(saved["rounds"][0]["phase"], "running");
         assert_eq!(saved["rounds"][0]["driver_dir"], json!(directory));
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
     }
 
     /// ´test:unit:launch-settlement-document-carries-each-recorded-round-end´
