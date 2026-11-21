@@ -6,11 +6,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Accept the door's registered receive transport rule as a request record's decision source, `transport-rule`, kept on the deterministic rung of retained decisions and bound to the record's mirror ref (``test:unit:registered-receive-rule-round-trips-and-binds-the-mirror-ref``). Compatibility: no door writes this form yet and existing records keep theirs; every door loop installs this release and restarts its door on it before any later release that writes transport-rule records is installed, and a rollback from that later release returns to this release, not to 0.8.2, whose readers refuse the new source.
+
+- Read a door's workspace request against the grant its loop declared at launch, taken from the run's protected reservation through the registered runs descriptor and checked against the registered loop, run, worker and scope and the caller's node, with the request's original wire decoded once by the strict envelope decoder (``test:unit:door-workspace-request-binds-protected-grant-and-raw-wire``). Compatibility: no production caller selects this reader yet, so door requests, records and answers are unchanged and no operator acts.
+
+- Pair the workspace classifier's exact agent input with an escaped, display-only rendering of each execution word and shell text, and flag the U+2028 and U+2029 line separators with their field and byte offset (``test:unit:workspace-agent-input-pairs-readable-execution-with-exact-bytes``). Compatibility: no door request, record or route changes and no operator acts; the rendering appears only when a later release activates the workspace route.
+
 ### Changed
 
 - Default the boxed Claude helper's owner credential path to access-only reads and publication; due or expired authority refuses without invoking the vendor program. An owner-held cutover request remains refused until carrier exclusion can be proved (``inv:superlooplane:one-claude-source-refresher``). Compatibility: the production Claude gate remains closed, Codex boxes are unchanged, and Claude owner checks can now refuse as `credential-read-due`, `credential-read-expired`, `credential-mode` or `credential-cutover-gate`.
 
-- Refuse named vendor credential variables in a box plan, owner sign-in binds at launch, and recognized credential files in image and install inputs as `credential-environment`, `credential-mount` and `credential-image-input`; pin the Claude periodic cutover refusal at its production entry (``inv:superlooplane:box-inputs-exclude-recognized-credentials``). Compatibility: the production Claude gate remains closed; Codex plans, builds and installs now refuse the same recognized credential inputs, while ordinary Codex boxes and harvest keep their existing forms.
+- Refuse named vendor credential variables in a box plan, owner sign-in binds at launch, and recognized credential files in image and install inputs as `credential-environment`, `credential-mount` and `credential-image-input`; pin the Claude periodic cutover refusal at its production entry (``inv:superlooplane:box-inputs-exclude-recognized-credentials``). Compatibility: the production Claude gate remains closed; Codex plans, launches, builds and installs now refuse the same recognized credential inputs, while ordinary Codex boxes and harvest keep their existing forms; a loop whose inputs are refused removes the named variable, bind or file and reruns the command.
 
 ### Fixed
 
