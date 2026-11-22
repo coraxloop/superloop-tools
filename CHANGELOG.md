@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-11-22
+
 ### Added
 
 - Let a loop preview and digest-bind a `superloop-lane set-door-scope` change on an existing unretired run, with a bounded history; census now shows each run's `door_scope` (`prin:publictools:well-made-and-good-to-use`). Compatibility: install the lane command without restarting the door; old records read with empty history and gain it only on change, and a release without this command reads a changed record by its new scope and ignores the history, so a rollback needs no step. Started runs use the new scope at their next request read, settled runs at their next round; requests already read keep their admitted scope. Preparing, retiring and rotated runs refuse; outstanding digest-bound previews must be repeated after a change. Switching to `work` does not seed the node mirror or a remote in the worker clone.
@@ -1163,7 +1165,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.9.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.10.0...HEAD
+[0.10.0]: https://github.com/coraxloop/superloop-tools/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/coraxloop/superloop-tools/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/coraxloop/superloop-tools/compare/v0.8.1...v0.8.2
 [0.8.1]: https://github.com/coraxloop/superloop-tools/compare/v0.8.0...v0.8.1
