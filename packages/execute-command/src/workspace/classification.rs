@@ -219,6 +219,13 @@ pub fn classify(
         return Ok(miss("repeated environment names require judgement"));
     }
     let Some(steps) = envelope.execution.steps() else {
+        if let Execution::Shell { shell, .. } = &envelope.execution
+            && !grant.shells.contains(shell)
+        {
+            return Ok(miss(
+                "undeclared shell; syntax analysis is not authoritative",
+            ));
+        }
         return Ok(miss("shell text never matches a quick rule"));
     };
     for rule in policy

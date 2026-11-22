@@ -321,12 +321,30 @@ fn workspace_identity_refusals_precede_classification() {
         shell: "/bin/foreign".into(),
         text: "true".into(),
     };
+    admit(&bad, Some(&g), "example", "R", "node-fingerprint").unwrap();
+}
+/// ´test:unit:workspace-undeclared-shell-reaches-judgement-with-mark´
+#[test]
+fn workspace_undeclared_shell_reaches_judgement_with_mark() {
+    let (mut envelope, mut grant, policy, blacklist) = fixture();
+    envelope.execution = Execution::Shell {
+        shell: "/bin/foreign".into(),
+        text: "printf '%s' 'fictional'".into(),
+    };
+    rebind(&mut envelope, &mut grant, &policy, &blacklist);
+    admit(&envelope, Some(&grant), "example", "R", "node-fingerprint").unwrap();
+    let Classification::Miss { reasons } =
+        classify(&envelope, &grant, &policy, &blacklist).unwrap()
+    else {
+        panic!("an undeclared shell must reach judgement");
+    };
     assert_eq!(
-        admit(&bad, Some(&g), "example", "R", "node-fingerprint")
-            .unwrap_err()
-            .kind,
-        "door-workspace-protocol-refusal"
+        reasons,
+        vec!["undeclared shell; syntax analysis is not authoritative"]
     );
+    let input = agent_input(&envelope, &grant, &reasons).unwrap();
+    assert_eq!(input["execution"], json!(envelope.execution));
+    assert_eq!(input["miss_reasons"], json!(reasons));
 }
 /// ´test:unit:workspace-learned-context-and-mode-do-not-import-legacy-labels´
 #[test]

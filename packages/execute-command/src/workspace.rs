@@ -324,11 +324,6 @@ pub fn admit(
     {
         return Err(context("request identity or grant digest differs"));
     }
-    if let Execution::Shell { shell, .. } = &envelope.execution
-        && !grant.shells.contains(shell)
-    {
-        return Err(protocol("shell is not named by the grant"));
-    }
     Ok(())
 }
 

@@ -280,17 +280,19 @@ fn workspace_executor_refuses_stale_or_foreign_context() {
             .kind,
         "door-workspace-protocol-refusal"
     );
-    let invalid = f.envelope(Execution::Shell {
-        shell: "/unregistered-shell".into(),
+}
+
+/// ´test:unit:workspace-executor-does-not-recheck-shell-declaration´
+#[test]
+fn workspace_executor_does_not_recheck_shell_declaration() {
+    let mut alternate = Fixture::new();
+    alternate.grant.shells.clear();
+    let undeclared = alternate.envelope(Execution::Shell {
+        shell: "/bin/sh".into(),
         text: "exit 0".into(),
     });
-    assert_eq!(
-        PreparedExecution::from_reservation(&f.record(), &f.grant.node, &invalid)
-            .err()
-            .unwrap()
-            .kind,
-        "door-workspace-protocol-refusal"
-    );
+    let (measured, _, _) = alternate.run(alternate.prepare(&undeclared));
+    assert_eq!(measured.result.outcome, Outcome::Exited { code: 0 });
 }
 
 /// ´test:unit:workspace-executor-sequence-stops-with-explicit-unknown´
