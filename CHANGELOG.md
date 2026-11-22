@@ -16,6 +16,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Let an absolute shell absent from the workspace grant's declared shell list reach judgement, marked as an undeclared shell in the agent input; the node executor no longer refuses it at admission (``proto:executecommand:compute-workspace``). Compatibility: operations rebuilds and reinstalls the node entry before enabling the later workspace caller; no deployed door selects this route yet, so existing requests and records do not change.
 
+- Bound the node entry's wait for start to ten seconds or its command deadline, without renewal by heartbeats; running heartbeat silence retains its separate 120-second bound (``proto:superlooplane:workspace-executor-call``). Compatibility: operations rebuilds and reinstalls the entry on each node with this release; old and new door halves use the same protocol-one frames and send start within five seconds, so either can meet either entry during the install window. No deployed serving caller selects the workspace route yet.
+
 ### Fixed
 
 - Refuse a first `launch --door-scope work` without the door's complete registered route, with the same `door-scope-route` remedy as `set-door-scope` (`dec:door:the-door-is-measured-against-the-unmediated-host-worker`). Compatibility: existing records and successful routes are unchanged; a work-scoped first launch that previously reached later preflight or reservation without a valid route now refuses before reservation. Review-scoped launches are unchanged.

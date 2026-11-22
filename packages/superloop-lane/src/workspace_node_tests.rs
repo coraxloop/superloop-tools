@@ -80,6 +80,7 @@ impl Fixture {
         self.start_with_bounds(
             call,
             silence,
+            silence,
             output_limit,
             OUTPUT_WRITE_BOUND,
             OUTPUT_DRAIN_BOUND,
@@ -89,6 +90,7 @@ impl Fixture {
     fn start_with_bounds(
         &self,
         call: &NodeCall,
+        start_wait: Duration,
         silence: Duration,
         output_limit: usize,
         write_bound: Duration,
@@ -111,6 +113,7 @@ impl Fixture {
                 &identity,
                 Self::owner(),
                 StreamBounds {
+                    start_wait,
                     silence,
                     output_limit,
                     write: write_bound,
@@ -149,6 +152,7 @@ fn workspace_node_process_entry_fixture() {
         &identity,
         Fixture::owner(),
         StreamBounds {
+            start_wait: Duration::from_millis(silence_ms),
             silence: Duration::from_millis(silence_ms),
             output_limit: MAX_OUTPUT_BYTES,
             write: Duration::from_secs(2),
@@ -156,6 +160,65 @@ fn workspace_node_process_entry_fixture() {
         },
     )
     .expect("real node serving function");
+}
+
+/// ´test:unit:workspace-node-prestart-bound-is-not-renewed-by-heartbeat´
+#[test]
+fn workspace_node_prestart_bound_is_not_renewed_by_heartbeat() {
+    let fixture = Fixture::new();
+    let marker = fixture.root.path().join("work/sub/started");
+    let call = fixture.call(Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "/usr/bin/touch started".into(),
+    });
+    let (mut input, node_input) = UnixStream::pair().unwrap();
+    let (node_output, mut output) = UnixStream::pair().unwrap();
+    output
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .unwrap();
+    write_frame(&mut input, &call).unwrap();
+    control(&mut input, "heartbeat");
+    control(&mut input, "start");
+    let identity = fixture.identity;
+    let thread = std::thread::spawn(move || {
+        serve_with_limits(
+            node_input,
+            node_output,
+            &identity,
+            Fixture::owner(),
+            StreamBounds {
+                start_wait: Duration::ZERO,
+                silence: Duration::from_secs(10),
+                output_limit: MAX_OUTPUT_BYTES,
+                write: OUTPUT_WRITE_BOUND,
+                drain: OUTPUT_DRAIN_BOUND,
+            },
+        )
+    });
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+    let terminal = read_frame(&mut output).unwrap();
+    assert_eq!(terminal["reason"], "node-heartbeat-silence");
+    assert_eq!(terminal["steps"], json!([]));
+    assert!(!marker.exists());
+    thread.join().unwrap().unwrap();
+}
+
+/// ´test:unit:workspace-node-prestart-timeout-names-first-bound´
+#[test]
+fn workspace_node_prestart_timeout_names_first_bound() {
+    let now = Instant::now();
+    assert_eq!(
+        prestart_timeout_cause(now + Duration::from_secs(1), now + Duration::from_secs(2)),
+        CAUSE_SILENCE
+    );
+    assert_eq!(
+        prestart_timeout_cause(now + Duration::from_secs(2), now + Duration::from_secs(1)),
+        CAUSE_NONE
+    );
+    assert_eq!(
+        end_reason(CAUSE_NONE, &Outcome::TimedOut, false),
+        "node-deadline"
+    );
 }
 
 fn argv(words: &[&str]) -> Execution {
@@ -463,6 +526,7 @@ fn workspace_node_entry_bounds_escaped_descendant_output_pipe() {
     let (mut input, mut output, thread) = fixture.start_with_bounds(
         &call,
         CONTROL_SILENCE,
+        CONTROL_SILENCE,
         MAX_OUTPUT_BYTES,
         OUTPUT_WRITE_BOUND,
         Duration::ZERO,
@@ -518,6 +582,7 @@ fn workspace_node_entry_stalled_output_bounds_memory_and_command() {
     });
     let (mut input, mut output, thread) = fixture.start_with_bounds(
         &call,
+        CONTROL_SILENCE,
         CONTROL_SILENCE,
         MAX_OUTPUT_BYTES,
         Duration::from_secs(2),

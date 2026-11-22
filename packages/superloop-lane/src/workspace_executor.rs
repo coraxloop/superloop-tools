@@ -42,6 +42,12 @@ fn protocol(error: execute_command::workspace::Refusal) -> LaneError {
 }
 
 impl PreparedExecution {
+    /// The one command deadline, including time spent before start.
+    #[must_use]
+    pub(crate) const fn deadline(&self) -> Instant {
+        self.deadline
+    }
+
     /// Open an existing workspace from an authenticated reservation, never settings.
     ///
     /// The caller owns reservation custody and the authenticated node identity. This

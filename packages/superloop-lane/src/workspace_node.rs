@@ -20,6 +20,7 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const OUTPUT_CHUNK: usize = 8192;
 const CONTROL_SILENCE: Duration = Duration::from_secs(120);
+const START_WAIT: Duration = Duration::from_secs(10);
 const OUTPUT_WRITE_BOUND: Duration = Duration::from_secs(120);
 const OUTPUT_DRAIN_BOUND: Duration = Duration::from_secs(2);
 const OUTPUT_DRAIN_TOTAL: Duration = Duration::from_secs(120);
@@ -47,6 +48,7 @@ const fn end_reason(cause: u8, outcome: &Outcome, incomplete: bool) -> &'static 
 
 #[derive(Clone, Copy)]
 struct StreamBounds {
+    start_wait: Duration,
     silence: Duration,
     output_limit: usize,
     write: Duration,
@@ -56,6 +58,7 @@ struct StreamBounds {
 impl Default for StreamBounds {
     fn default() -> Self {
         Self {
+            start_wait: START_WAIT,
             silence: CONTROL_SILENCE,
             output_limit: MAX_OUTPUT_BYTES,
             write: OUTPUT_WRITE_BOUND,
@@ -631,6 +634,14 @@ fn monitor_control<R: Read + AsRawFd>(input: &mut R, state: &StreamState, silenc
     }
 }
 
+fn prestart_timeout_cause(start_bound: Instant, command_deadline: Instant) -> u8 {
+    if command_deadline <= start_bound {
+        CAUSE_NONE
+    } else {
+        CAUSE_SILENCE
+    }
+}
+
 fn drain_expired(
     command_ended: Instant,
     last_byte_read: Option<Instant>,
@@ -808,8 +819,11 @@ fn serve_with_limits<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
         }),
     )?;
     let never_finished = AtomicBool::new(false);
+    let start_bound = Instant::now() + bounds.start_wait;
+    let command_deadline = prepared.deadline();
+    let start_deadline = start_bound.min(command_deadline);
     loop {
-        let control = read_control(&mut input, &never_finished, Instant::now() + bounds.silence);
+        let control = read_control(&mut input, &never_finished, start_deadline);
         match control {
             Ok(Some(Control { kind, .. })) if kind == "start" => break,
             Ok(Some(Control { kind, .. })) if kind == "stop" => {
@@ -821,7 +835,9 @@ fn serve_with_limits<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
                     Err(ref error) if error.kind() == io::ErrorKind::UnexpectedEof => {
                         CAUSE_INPUT_GONE
                     }
-                    Err(ref error) if error.kind() == io::ErrorKind::TimedOut => CAUSE_SILENCE,
+                    Err(ref error) if error.kind() == io::ErrorKind::TimedOut => {
+                        prestart_timeout_cause(start_bound, command_deadline)
+                    }
                     _ => CAUSE_MALFORMED,
                 };
                 return ended_before_spawn(&mut output, &call, cause);
