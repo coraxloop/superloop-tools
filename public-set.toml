@@ -1916,6 +1916,9 @@ pattern = "packages/superloop-lane/src/launch/census_reply_rewrite.rs"
 pattern = "packages/superloop-lane/src/launch/census_rewrite.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/launch/door_scope.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/launch/checkout.rs"
 
 [[include.rows]]

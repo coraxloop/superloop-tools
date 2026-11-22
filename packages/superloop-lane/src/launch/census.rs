@@ -374,6 +374,7 @@ fn row(
         "run":record["run"],
         "phase":record["phase"],
         "worker_uid":record["worker_uid"],
+        "door_scope":record["door_scope"],
         "door_pin_history":record["door_pin_history"],
         "round_door_pins":super::repin_door::round_pins(record)?,
         "record":path,

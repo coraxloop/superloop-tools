@@ -47,6 +47,7 @@ pub mod bound_roots;
 pub mod census;
 pub mod checkout;
 pub mod checkpoint;
+pub mod door_scope;
 pub mod driver_report;
 pub mod exercise;
 pub mod exercise_entry;
@@ -11213,5 +11214,34 @@ mod tests {
             .expect_err("two live runs");
         assert_eq!(refusal.kind, "door-registration");
         assert_eq!(refusal.detail, "peer has two live runs");
+    }
+
+    /// ´test:unit:door-registration-reads-current-scope-on-each-request´
+    #[test]
+    fn door_registration_reads_current_scope_on_each_request() {
+        use std::os::fd::OwnedFd;
+        let fixture = tempfile::tempdir_in("/tmp").expect("reservation fixture");
+        let root = fixture.path();
+        let runs: OwnedFd = fs::File::open(root).expect("held runs").into();
+        let row = json!({"name":"alpha","uid":41001});
+        let owner = nix::unistd::Uid::effective().as_raw();
+        for (scope, expected) in [
+            ("review", crate::door::Scope::Review),
+            ("work", crate::door::Scope::Work),
+            ("review", crate::door::Scope::Review),
+        ] {
+            super::publish_reservation(
+                &super::reservation_path(root, "R"),
+                &json!({"schema":1,"phase":"started","loop":"alpha","run":"R",
+                    "worker_uid":3000,"door_scope":scope,"plan":{}}),
+            )
+            .expect("changed reservation");
+            assert_eq!(
+                super::door_registration(&runs, &row, "alpha", 3000, (3000, 2), owner)
+                    .expect("current grant")
+                    .scope,
+                expected
+            );
+        }
     }
 }

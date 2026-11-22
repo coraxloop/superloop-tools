@@ -1775,6 +1775,211 @@ fn reply_row_rewrite_entry_pauses_previews_applies_and_recounts() {
     );
 }
 
+/// ´test:integration:door-scope-entry-previews-applies-and-census-reads-current-scope´
+#[test]
+fn door_scope_entry_previews_applies_and_census_reads_current_scope() {
+    let fixture = Fixture::new();
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    record["door_scope"] = json!("review");
+    record["plan"]["door"] = json!({"mirror_ref":"refs/heads/lane/R"});
+    write(&path, record.to_string());
+    let before = fs::read(&path).expect("before");
+    let preview =
+        success(&fixture.invoke(&["set-door-scope", "alpha", "R", "--to", "work", "--dry-run"]));
+    assert_eq!(preview["from"], "review");
+    assert_eq!(preview["to"], "work");
+    assert_eq!(fs::read(&path).expect("preview bytes"), before);
+    let digest = preview["preview_sha256"].as_str().expect("digest");
+    let applied = success(&fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "work",
+        "--expect-digest",
+        digest,
+    ]));
+    assert_eq!(applied["applied"], true);
+    let after: Value = serde_json::from_slice(&fs::read(&path).expect("after")).expect("JSON");
+    assert_eq!(after["door_scope"], "work");
+    assert_eq!(after["door_scope_history"][0]["member"], "door_scope");
+    let census = success(&fixture.command());
+    assert_eq!(census["reservations"][0]["door_scope"], "work");
+    let replay = success(&fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "work",
+        "--expect-digest",
+        digest,
+    ]));
+    assert_eq!(replay["replayed"], true);
+}
+
+/// ´test:integration:door-scope-entry-reverses-and-leaves-noop-unchanged´
+#[test]
+fn door_scope_entry_reverses_and_leaves_noop_unchanged() {
+    let fixture = Fixture::new();
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    record["door_scope"] = json!("work");
+    record["plan"]["door"] = json!({"mirror_ref":"refs/heads/lane/R"});
+    write(&path, record.to_string());
+    let digest = "a".repeat(64);
+
+    let stale = fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "review",
+        "--expect-digest",
+        &digest,
+    ]);
+    assert_eq!(stale.status.code(), Some(2));
+    assert!(String::from_utf8_lossy(&stale.stderr).contains("door-scope-digest"));
+    let reverse = success(&fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "review",
+        "--dry-run",
+    ]));
+    let changed = success(&fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "review",
+        "--expect-digest",
+        reverse["preview_sha256"].as_str().expect("reverse digest"),
+    ]));
+    assert_eq!(changed["changed"], true);
+    let current: Value = serde_json::from_slice(&fs::read(&path).expect("current")).expect("JSON");
+    assert_eq!(current["door_scope"], "review");
+    assert_eq!(
+        current["door_scope_history"]
+            .as_array()
+            .expect("history")
+            .len(),
+        1
+    );
+
+    let noop = success(&fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "review",
+        "--dry-run",
+    ]));
+    let noop_apply = success(&fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "review",
+        "--expect-digest",
+        noop["preview_sha256"].as_str().expect("noop digest"),
+    ]));
+    assert_eq!(noop_apply["changed"], false);
+    assert_eq!(
+        fs::read(&path).expect("noop bytes"),
+        serde_json::to_vec(&current).expect("JSON")
+    );
+}
+
+/// ´test:integration:door-scope-entry-caps-history-with-omitted-count´
+#[test]
+fn door_scope_entry_caps_history_with_omitted_count() {
+    let fixture = Fixture::new();
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut capped: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    capped["door_scope"] = json!("review");
+    capped["plan"]["door"] = json!({"mirror_ref":"refs/heads/lane/R"});
+    capped["door_scope_history"] = json!(
+        (0..64)
+            .map(|n| json!({
+                "member":"door_scope","from":"work","to":"review","at_unix_ns":n,
+                "command":"set-door-scope","preview_sha256":"a".repeat(64)
+            }))
+            .collect::<Vec<_>>()
+    );
+    write(&path, capped.to_string());
+    let cap_preview =
+        success(&fixture.invoke(&["set-door-scope", "alpha", "R", "--to", "work", "--dry-run"]));
+    success(&fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "work",
+        "--expect-digest",
+        cap_preview["preview_sha256"].as_str().expect("cap digest"),
+    ]));
+    let capped: Value = serde_json::from_slice(&fs::read(&path).expect("capped")).expect("JSON");
+    assert_eq!(
+        capped["door_scope_history"]
+            .as_array()
+            .expect("history")
+            .len(),
+        64
+    );
+    assert_eq!(capped["door_scope_history_omitted"], 1);
+}
+
+/// ´test:integration:door-scope-entry-refuses-unsafe-phases-and-rotation´
+#[test]
+fn door_scope_entry_refuses_unsafe_phases_and_rotation() {
+    let fixture = Fixture::new();
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    record["door_scope"] = json!("review");
+    record["plan"]["door"] = json!({"mirror_ref":"refs/heads/lane/R"});
+    for (phase, extra, refusal) in [
+        ("preparing", None, "door-scope-preparing"),
+        ("retiring", None, "door-scope-retiring"),
+        ("retired", None, "door-scope-retiring"),
+        ("started", Some("rotation_intent"), "door-scope-rotated"),
+        ("started", Some("rotation"), "door-scope-rotated"),
+        ("started", Some("current_retirement"), "door-scope-retiring"),
+    ] {
+        record["phase"] = json!(phase);
+        record
+            .as_object_mut()
+            .expect("object")
+            .remove("rotation_intent");
+        record.as_object_mut().expect("object").remove("rotation");
+        record
+            .as_object_mut()
+            .expect("object")
+            .remove("current_retirement");
+        if let Some(key) = extra {
+            record[key] = if key == "rotation" {
+                json!({"old_run":"R"})
+            } else {
+                json!({})
+            };
+        }
+        write(&path, record.to_string());
+        let before = fs::read(&path).expect("before");
+        let output = fixture.invoke(&["set-door-scope", "alpha", "R", "--to", "work", "--dry-run"]);
+        assert_eq!(output.status.code(), Some(2), "{phase}");
+        assert!(
+            String::from_utf8_lossy(&output.stderr).contains(refusal),
+            "{phase}"
+        );
+        assert_eq!(fs::read(&path).expect("after"), before);
+    }
+}
+
 /// ´test:integration:retirement-root-rewrite-entry-precedes-reconciliation´
 #[test]
 fn retirement_root_rewrite_entry_precedes_reconciliation() {
