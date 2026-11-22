@@ -976,7 +976,9 @@ mod workspace {
     use std::os::fd::OwnedFd;
 
     use execute_command::policy::DoorMode;
-    use execute_command::workspace::{Classification, Disposition, canonical_digest, learned_key};
+    use execute_command::workspace::{
+        Classification, Disposition, LearnedDecision, canonical_digest, learned_key,
+    };
     use serde_json::{Value, json};
 
     use crate::error::LaneError;
@@ -1254,9 +1256,9 @@ mod workspace {
             })
         }
 
-        /// Select a miss's wait after any allowance is checked against this exact request.
+        /// Select the workspace mode after any allowance is checked against this exact request.
         ///
-        /// A miss with no learned or recorded allowance waits in allow, audit and enforce.
+        /// An allow-mode miss runs beside judgement; enforce and audit wait.
         /// # Errors
         /// Refuses an allowance replayed against another request or malformed context.
         pub fn disposition(
@@ -1268,7 +1270,7 @@ mod workspace {
             if let Some(allowance) = allowance {
                 allowance.check(self)?;
             }
-            let learned = allowance.map(|allowance| &allowance.context_key);
+            let learned = allowance.map(|allowance| LearnedDecision::Allow(&allowance.context_key));
             execute_command::workspace::disposition(
                 mode,
                 classification,

@@ -275,12 +275,20 @@ pub fn learned_key(
     )?;
     Ok(json!([class, "compute-workspace", shape]))
 }
-/// W3's scheduling contract; a miss is synchronous even in allow mode.
+/// The timing and effect of a classified workspace request under its mode.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Disposition {
     Immediate,
+    ImmediateJudgeAlongside,
+    ImmediateRecordRefusal,
     WaitForJudgement,
     Block,
+}
+/// A decision read from authenticated learned custody, with its exact context key.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LearnedDecision<'a> {
+    Allow(&'a Value),
+    Refuse(&'a Value),
 }
 /// Decide timing from the admitted request context, never a caller-supplied expected key.
 ///
@@ -294,7 +302,7 @@ pub fn disposition(
     envelope: &Envelope,
     grant: &Grant,
     policy_revision: &str,
-    learned_allow_key: Option<&Value>,
+    learned_decision: Option<LearnedDecision<'_>>,
 ) -> Result<Disposition, Refusal> {
     let expected_key = learned_key("compute", envelope, grant, policy_revision)?;
     if matches!(classification, Classification::Deny(_)) {
@@ -310,12 +318,22 @@ pub fn disposition(
     } else {
         false
     };
-    let learned = learned_allow_key == Some(&expected_key);
-    Ok(
-        if mode == crate::policy::DoorMode::Allow && (quick || learned) {
-            Disposition::Immediate
-        } else {
-            Disposition::WaitForJudgement
+    let learned = match learned_decision {
+        Some(LearnedDecision::Allow(key)) if key == &expected_key => Some(true),
+        Some(LearnedDecision::Refuse(key)) if key == &expected_key => Some(false),
+        _ => None,
+    };
+    Ok(match mode {
+        crate::policy::DoorMode::Audit => Disposition::WaitForJudgement,
+        crate::policy::DoorMode::Allow => match learned {
+            Some(false) => Disposition::ImmediateRecordRefusal,
+            _ if quick || learned == Some(true) => Disposition::Immediate,
+            _ => Disposition::ImmediateJudgeAlongside,
         },
-    )
+        crate::policy::DoorMode::Enforce => match learned {
+            Some(false) => Disposition::Block,
+            _ if quick || learned == Some(true) => Disposition::Immediate,
+            _ => Disposition::WaitForJudgement,
+        },
+    })
 }

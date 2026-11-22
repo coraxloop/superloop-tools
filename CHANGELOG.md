@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Build the unselected door half of the workspace executor call: the protected route's node name binds the grant before SSH, the door composes and checks protocol-one frames over the constant node entry, maps node endings by reason into typed door results, and retains the entry release and incomplete output as evidence (``proto:superlooplane:workspace-executor-call``). Compatibility: no serving caller uses this adapter, so no request record, reply or operator step changes; the node entry and the node-named route registration installed with 0.10.0 are what a later caller uses, and operations rehearses the installed entry over the registered route before any declared workspace run is activated.
 
+### Changed
+
+- Make the workspace disposition follow the door mode: a published blacklist entry blocks in every mode; under allow a quick or learned allowance runs at once, a miss runs while it is judged and a learned refusal runs with what the door would have done recorded; under enforce a quick or learned allowance runs at once, a miss waits for judgement and a learned refusal blocks; under audit every request waits (``proto:executecommand:compute-workspace``). Compatibility: nothing calls the workspace disposition yet, so no deployed door, request or record changes.
+
 ### Fixed
 
 - Refuse a first `launch --door-scope work` without the door's complete registered route, with the same `door-scope-route` remedy as `set-door-scope` (`dec:door:the-door-is-measured-against-the-unmediated-host-worker`). Compatibility: existing records and successful routes are unchanged; a work-scoped first launch that previously reached later preflight or reservation without a valid route now refuses before reservation. Review-scoped launches are unchanged.

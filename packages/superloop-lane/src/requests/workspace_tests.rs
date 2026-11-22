@@ -334,9 +334,9 @@ fn workspace_judgement_input_refused_on_unjudged_intent() {
     );
 }
 
-/// ´test:unit:workspace-unanswered-miss-waits-in-every-door-mode´
+/// ´test:unit:workspace-unanswered-miss-follows-door-mode´
 #[test]
-fn workspace_unanswered_miss_waits_in_every_door_mode() {
+fn workspace_unanswered_miss_follows_door_mode() {
     use execute_command::policy::DoorMode;
     use execute_command::workspace::{Classification, Disposition};
     let fixture = prepared_fixture();
@@ -345,11 +345,12 @@ fn workspace_unanswered_miss_waits_in_every_door_mode() {
     let miss = Classification::Miss {
         reasons: vec!["unrecognised command".into()],
     };
-    for mode in [DoorMode::Allow, DoorMode::Audit, DoorMode::Enforce] {
-        assert_eq!(
-            request.disposition(mode, &miss, None).unwrap(),
-            Disposition::WaitForJudgement
-        );
+    for (mode, expected) in [
+        (DoorMode::Allow, Disposition::ImmediateJudgeAlongside),
+        (DoorMode::Audit, Disposition::WaitForJudgement),
+        (DoorMode::Enforce, Disposition::WaitForJudgement),
+    ] {
+        assert_eq!(request.disposition(mode, &miss, None).unwrap(), expected);
     }
 }
 
