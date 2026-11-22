@@ -79,14 +79,16 @@ def run(command, **kwargs):
     return real_run(command, **kwargs)
 
 
-def invoke(words, seconds="30", runner=run, available=True, node_root=None, environment=compute_environment):
+def invoke(words, seconds="30", runner=run, available=True, node_root=None, environment=compute_environment, lookup=None):
     root_word = str(root if node_root is None else node_root)
     sys.argv = ["node", str(mirror), "R", root_word, seconds, json.dumps(words), "/opt/fixture/bin/report", json.dumps(environment)]
     errors = io.StringIO()
+    def which(program, path):
+        return lookup(program, path) if lookup else ("/fixture/tool" if available else None)
     with contextlib.redirect_stderr(errors), patch("subprocess.run", runner), \
             patch.dict(namespace, run_wrapper=runner), \
             patch("os.access", return_value=available), \
-            patch("shutil.which", return_value="/fixture/tool" if available else None):
+            patch("shutil.which", side_effect=which):
         result = namespace["main"]()
     metadata = json.loads(errors.getvalue().split("DOOR-COMPUTE ")[-1])
     if metadata["reason"] == "door-compute-root-refusal":
@@ -366,3 +368,23 @@ for loop_name, account in [("alpha", "alpha"), ("project-a", "loop-b")]:
                               node_root=workspace)
     assert status == 0 and metadata["reason"] == "door-complete"
 print("node root cases=7: missing lanes, equal name, differing name, absent directory, non-directory, relative, empty")
+
+# The tool check resolves a checkout-relative program before the wrapper runs.
+script = checkout / "scripts/prepare.sh"
+script.parent.mkdir(exist_ok=True)
+script.write_text("#!/bin/sh\nexit 0\n")
+script.chmod(0o700)
+resolved = []
+def checkout_lookup(program, path):
+    resolved.append(program)
+    if program in ("/usr/bin/timeout", "/opt/fixture/bin/report"):
+        return program
+    return program if Path(program).is_file() and os.access(program, os.X_OK) else None
+status, metadata = invoke(["scripts/prepare.sh", "check"], lookup=checkout_lookup)
+assert status == 3 and metadata["reason"] == "door-complete"
+assert resolved[-1] == str(script), resolved
+assert wrappers[-1][1] == ["scripts/prepare.sh", "check"]
+status, metadata = invoke(["scripts/missing.sh"], lookup=checkout_lookup)
+assert status == 125 and metadata["reason"] == "door-compute-tool-refusal"
+assert resolved[-1] == str(checkout / "scripts/missing.sh"), resolved
+print("node checkout-relative program cases=2: executable and missing")

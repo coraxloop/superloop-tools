@@ -298,16 +298,13 @@ mod tests {
     fn configuration_bounds_exact_compute_deadline_forms() {
         let prefix = "rubric_root = '/fixture'\nexecutable = '/fixture/codex'\nmodel = 'fixture'\n";
         let text = format!(
-            "{prefix}[[compute_deadlines]]\nwords = ['cargo', 'test', '--locked', '-p', 'fixture']\ndeadline_ms = 3_600_000\n"
+            "{prefix}[[compute_deadlines]]\nwords = ['make', 'check']\ndeadline_ms = 3_600_000\n"
         );
         let mut value = parse(text.as_bytes()).expect("registered form");
         let forms = compute_deadlines(&value).expect("installed forms");
         assert_eq!(forms.len(), 1);
         assert_eq!(forms[0].deadline_ms, 3_600_000);
-        assert_eq!(
-            forms[0].words,
-            ["cargo", "test", "--locked", "-p", "fixture"]
-        );
+        assert_eq!(forms[0].words, ["make", "check"]);
         value["source"] = json!("/fixture/door.toml");
         value["entry"] = json!("/fixture/entry");
         value["loop_home"] = json!("/fixture/loop");
@@ -324,8 +321,7 @@ mod tests {
             json!(null),
             json!({}),
             json!([form.clone(), form.clone()]),
-            json!([{"words":["cargo","test"],"deadline_ms":3_600_000}]),
-            json!([{"words":["sh","-c","true"],"deadline_ms":3_600_000}]),
+            json!([{"words":["make","check;id"],"deadline_ms":3_600_000}]),
             json!([{"words":["cargo","test","--locked"],"deadline_ms":3_600_000,"extra":true}]),
             json!(vec![form; 33]),
         ] {

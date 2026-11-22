@@ -555,7 +555,7 @@ fn workspace_cut_pins_legacy_node_payloads_until_w5() {
     };
     assert_eq!(
         hash(include_bytes!("../door/compute_node.py")),
-        "3a3df220c0b5e005f9e83fcfee1b6792b84e922cb1ec40a273fa0a2c5076872b"
+        "a7227e314607e22c88e0c76e488955d6ab9fbda9413ac0ea46d4d13950c18680"
     );
     assert_eq!(
         hash(include_bytes!("../door/retire_node.py")),

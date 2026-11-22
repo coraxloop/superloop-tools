@@ -243,9 +243,9 @@ fn door_preflight_readers_refuse_upload_evidence() {
     let fixture = Fixture::new();
     let (socket, calls, server) =
         compute_stub_service(&fixture, "R", 3000, 3000, Scope::Work, None);
-    let (reply, _, _) = compute_call(&socket, "/opt/fixture/bin/report cargo run --bin generator");
+    let (reply, _, _) = compute_call(&socket, "/opt/fixture/bin/report cargo run;id");
     server.join().expect("server").expect("service");
-    assert_eq!(reply["reason"], "door-compute-locked-refusal");
+    assert_eq!(reply["reason"], "door-compute-words-refusal");
     assert_eq!(calls.load(Ordering::Relaxed), 0);
     let path = fixture.home.join("runs/.launch-R/door-requests.json");
     let original_bytes = std::fs::read(&path).expect("production preflight record");
@@ -311,27 +311,10 @@ fn door_preflight_readers_refuse_upload_evidence() {
 fn door_compute_preflight_refusals_survive_request_readers() {
     for (tail, check) in [
         (
-            "cargo run --locked -- a b c d e f g h i j k l m n o p q",
-            "door-compute-command-refusal",
-        ),
-        (
             "cargo run --locked -- write;id",
             "door-compute-words-refusal",
         ),
-        (
-            "cargo run --locked --bin bad/name",
-            "door-compute-command-refusal",
-        ),
-        ("cargo run --bin generator", "door-compute-locked-refusal"),
-        (
-            "cargo run --features --locked",
-            "door-compute-locked-refusal",
-        ),
-        (
-            "cargo run --locked --features",
-            "door-compute-command-refusal",
-        ),
-        ("cargo run --locked --bin", "door-compute-command-refusal"),
+        ("cargo  test", "door-compute-words-refusal"),
     ] {
         let fixture = Fixture::new();
         for (run, worker) in [("R", 3000), ("S", 3001)] {
@@ -351,6 +334,17 @@ fn door_compute_preflight_refusals_survive_request_readers() {
                 .iter()
                 .find(|row| row["id"] == source_id)
                 .expect("own refusal");
+            for historical in [
+                "door-compute-command-refusal",
+                "door-compute-locked-refusal",
+            ] {
+                let mut old = record.clone();
+                old["effect"]["preflight"]["check"] = json!(historical);
+                old["shape_key"] = json!(format!("preflight:{historical}"));
+                old["effect"]["reason"] = json!(historical);
+                old["would_do"]["reason"] = json!(historical);
+                RequestRecord::decode(old).expect("historical preflight reason remains readable");
+            }
             assert_eq!(record["worker_uid"], worker);
             assert_eq!(record["run"], run);
             assert_eq!(record["state"], "preflight-refused");
@@ -427,8 +421,8 @@ fn preflight_request(site: &str, run: &str) -> (Value, &'static str) {
         }
         "owner" => "door-requests-unregistered",
         _ => {
-            request["argv"][1] = json!(b"/opt/fixture/bin/report cargo run".to_vec());
-            "door-compute-locked-refusal"
+            request["argv"][1] = json!(b"/opt/fixture/bin/report cargo;run".to_vec());
+            "door-compute-words-refusal"
         }
     };
     (request, expected)
@@ -735,18 +729,6 @@ fn door_compute_service_refusals_have_no_effect() {
             "door-compute-wrapper-refusal",
         ),
         (
-            "/opt/fixture/bin/report cargo test",
-            3000,
-            Scope::Work,
-            "door-compute-locked-refusal",
-        ),
-        (
-            "/opt/fixture/bin/report cargo update --locked",
-            3000,
-            Scope::Work,
-            "door-compute-command-refusal",
-        ),
-        (
             "/opt/fixture/bin/report git diff",
             3001,
             Scope::Work,
@@ -777,10 +759,15 @@ fn door_compute_service_refusals_have_no_effect() {
     }
 }
 
-/// ´test:unit:door-compute-grammar-covers-corpus-and-shell-refusals´
+/// ´test:unit:door-compute-frame-admits-unfamiliar-words-and-refuses-operators´
 #[test]
-fn door_compute_grammar_covers_corpus_and_shell_refusals() {
+fn door_compute_frame_admits_unfamiliar_words_and_refuses_operators() {
     for tail in [
+        "make check",
+        "cargo update",
+        "cargo test",
+        "env CARGO_NET_OFFLINE=false cargo fetch --locked",
+        "scripts/prepare.sh check",
         "cargo fmt --all -- --check",
         "cargo fmt --all --check",
         "cargo fmt --all",
@@ -805,6 +792,14 @@ fn door_compute_grammar_covers_corpus_and_shell_refusals() {
         server.join().expect("server").expect("service");
         assert_eq!(reply["status"], 3, "{tail}: {reply}");
         assert_eq!(calls.load(Ordering::Relaxed), 1);
+        if tail == "make check" {
+            let records = fixture.store().list_run("R").expect("compute record");
+            assert_eq!(records[0].value()["shape_key"], "compute:make check");
+            assert_eq!(
+                records[0].value()["effect"]["compute"]["words"],
+                json!(["make", "check"])
+            );
+        }
         assert!(
             compute::parse(
                 &[
@@ -819,17 +814,6 @@ fn door_compute_grammar_covers_corpus_and_shell_refusals() {
         );
     }
     for tail in [
-        "cargo doc --locked --lib",
-        "cargo run --locked --lib",
-        "cargo run --locked --tests",
-        "cargo run --locked --test fixture",
-        "cargo check --locked --bin -x",
-        "cargo check --locked --bin --all-features",
-        "cargo test --locked --test",
-        "cargo clippy --locked --bin pkg/x -- -D warnings",
-        "cargo check --no-default-features",
-        "cargo test --no-default-features",
-        "cargo check --locked --config=x",
         "cargo test --locked;id",
         "cargo test --locked|id",
         "cargo test --locked&id",
@@ -841,10 +825,7 @@ fn door_compute_grammar_covers_corpus_and_shell_refusals() {
         "cargo\ttest --locked",
         "cargo  test --locked",
         "",
-        "RUSTDOCFLAGS=-D warnings cargo doc --locked",
-        "cargo add pkg --locked",
-        "cargo test --locked --config=x",
-        "bash -c id",
+        "cargo test --locked foo~bar",
     ] {
         let fixture = Fixture::new();
         fixture.set_floor("allow");
@@ -960,24 +941,6 @@ fn door_compute_test_no_run_retains_exact_argv() {
     }
 }
 
-/// ´test:unit:door-compute-test-no-run-refuses-other-verbs-and-forwarding´
-#[test]
-fn door_compute_test_no_run_refuses_other_verbs_and_forwarding() {
-    for tail in [
-        "cargo check --locked --no-run",
-        "cargo clippy --locked --no-run -- -D warnings",
-        "cargo doc --locked --no-run",
-        "cargo run --locked --no-run",
-        "cargo test --locked --test integration -- --no-run",
-        "cargo test --locked --test integration -- filter --no-run",
-    ] {
-        assert_compute_preflight(
-            &format!("/opt/fixture/bin/report {tail}"),
-            "door-compute-command-refusal",
-        );
-    }
-}
-
 /// ´test:unit:door-compute-test-filters-retain-exact-argv´
 #[test]
 fn door_compute_test_filters_retain_exact_argv() {
@@ -1001,76 +964,6 @@ fn door_compute_test_filters_retain_exact_argv() {
             records[0].value()["effect"]["compute"]["words"],
             json!(tail.split(' ').collect::<Vec<_>>())
         );
-    }
-}
-
-/// ´test:unit:door-compute-test-filters-refuse-extra-or-unbound-words´
-#[test]
-fn door_compute_test_filters_refuse_extra_or_unbound_words() {
-    for tail in [
-        "cargo test --locked --test integration first second",
-        "cargo test --locked --test integration filter --all-features",
-        "cargo test --locked --test integration first -- second --exact",
-        "cargo test --locked --test integration -- first second --exact",
-        "cargo test --locked --test integration -- filter --nocapture",
-        "cargo test --locked --test integration -- --exact",
-        "cargo test --locked --test integration filter.name",
-        "cargo test --locked --test integration filter-name",
-        "cargo test --locked --test integration path/name",
-        "cargo test --locked filter",
-        "cargo test --locked --bin integration filter",
-        "cargo check --locked --test integration filter",
-        "cargo clippy --locked --test integration filter -- -D warnings",
-    ] {
-        assert_compute_preflight(
-            &format!("/opt/fixture/bin/report {tail}"),
-            "door-compute-command-refusal",
-        );
-    }
-}
-
-/// ´test:unit:door-compute-test-filters-refuse-empty-misplaced-and-late-lock-words´
-#[test]
-fn door_compute_test_filters_refuse_empty_misplaced_and_late_lock_words() {
-    for (tail, check) in [
-        ("cargo test --locked --test integration --", "command"),
-        (
-            "cargo test --locked --test integration --  --exact",
-            "words",
-        ),
-        ("cargo test --locked filter --test integration", "command"),
-        (
-            "cargo test --locked --test integration filter --exact",
-            "command",
-        ),
-        ("cargo test --test integration filter --locked", "locked"),
-    ] {
-        assert_compute_preflight(
-            &format!("/opt/fixture/bin/report {tail}"),
-            &format!("door-compute-{check}-refusal"),
-        );
-    }
-}
-
-/// ´test:unit:door-compute-target-selectors-refuse-dash-led-names´
-#[test]
-fn door_compute_target_selectors_refuse_dash_led_names() {
-    for verb in ["check", "clippy", "test"] {
-        for selector in ["--bin", "--test"] {
-            for name in ["-x", "--all-features"] {
-                let suffix = if verb == "clippy" {
-                    " -- -D warnings"
-                } else {
-                    ""
-                };
-                assert_compute_preflight(
-                    &format!(
-                        "/opt/fixture/bin/report cargo {verb} --locked {selector} {name}{suffix}"
-                    ),
-                    "door-compute-command-refusal",
-                );
-            }
-        }
     }
 }
 
@@ -1109,11 +1002,16 @@ fn door_compute_preserves_dash_led_package_records() {
     }
 }
 
-/// ´test:unit:door-compute-run-bin-shares-the-dash-p-value-bound´
+/// ´test:unit:door-compute-frame-keeps-word-length-for-any-selector´
 #[test]
-fn door_compute_run_bin_shares_the_dash_p_value_bound() {
+fn door_compute_frame_keeps_word_length_for_any_selector() {
     for selector in ["-p", "--bin"] {
-        for name in ["a".repeat(256), "-x".to_owned()] {
+        for name in [
+            "a".repeat(256),
+            "-x".to_owned(),
+            "pkg.name".to_owned(),
+            "--".to_owned(),
+        ] {
             let fixture = Fixture::new();
             fixture.set_floor("allow");
             let (socket, calls, server) =
@@ -1129,16 +1027,11 @@ fn door_compute_run_bin_shares_the_dash_p_value_bound() {
             );
             assert_eq!(calls.load(Ordering::Relaxed), 1);
         }
-        for (name, check) in [
-            ("a".repeat(257), "words"),
-            ("pkg.name".to_owned(), "command"),
-            ("--".to_owned(), "command"),
-        ] {
-            assert_compute_preflight(
-                &format!("/opt/fixture/bin/report cargo run --locked {selector} {name}"),
-                &format!("door-compute-{check}-refusal"),
-            );
-        }
+        let name = "a".repeat(257);
+        assert_compute_preflight(
+            &format!("/opt/fixture/bin/report cargo run --locked {selector} {name}"),
+            "door-compute-words-refusal",
+        );
     }
 }
 
@@ -1165,80 +1058,6 @@ fn assert_compute_preflight(command: &str, check: &str) {
         records[0].value()["effect"]["mediation_wall_seconds"],
         reply["mediation_wall_seconds"]
     );
-}
-
-/// ´test:unit:door-compute-gates-keep-package-and-refusal-bounds´
-#[test]
-fn door_compute_gates_keep_package_and_refusal_bounds() {
-    for selector in ["-p", "--package"] {
-        for verb in ["test", "clippy"] {
-            let suffix = if verb == "clippy" {
-                " -- -D warnings"
-            } else {
-                ""
-            };
-            for (package, check) in [
-                (String::new(), "words"),
-                ("a".repeat(257), "words"),
-                ("pkg/name".to_owned(), "command"),
-                ("pkg.name".to_owned(), "command"),
-                ("pkg*".to_owned(), "words"),
-                ("pkg;id".to_owned(), "words"),
-                ("é".to_owned(), "words"),
-            ] {
-                assert_compute_preflight(
-                    &format!(
-                        "/opt/fixture/bin/report cargo {verb} --locked {selector} {package} --all-features{suffix}"
-                    ),
-                    &format!("door-compute-{check}-refusal"),
-                );
-            }
-        }
-    }
-    for verb in ["test", "clippy"] {
-        let suffix = if verb == "clippy" {
-            " -- -D warnings"
-        } else {
-            ""
-        };
-        for package in ["-pkg", "--locked"] {
-            assert_compute_preflight(
-                &format!(
-                    "/opt/fixture/bin/report cargo {verb} --locked --package {package}{suffix}"
-                ),
-                "door-compute-command-refusal",
-            );
-        }
-    }
-    for (tail, check) in [
-        ("cargo test -p pkg --all-features", "locked"),
-        (
-            "cargo clippy --package pkg --all-features -- -D warnings",
-            "locked",
-        ),
-        ("cargo test --package --locked", "locked"),
-        ("cargo test -p --locked", "locked"),
-        ("cargo test -p pkg -- --locked", "locked"),
-        ("cargo clippy -p pkg -- -D warnings --locked", "locked"),
-        ("cargo --locked test --package --locked", "command"),
-        ("cargo test --locked -p pkg -- --locked", "command"),
-        ("cargo clippy --locked -p pkg --all-features", "command"),
-        (
-            "cargo clippy --locked -p pkg -- -D warnings extra",
-            "command",
-        ),
-        ("cargo test --locked --config=x", "command"),
-        ("cargo update --locked", "command"),
-        ("cargo --locked update", "command"),
-        ("cargo --locked fmt --all -- --check", "command"),
-        ("cargo fmt --all -- --check extra", "command"),
-        ("cargo test --locked;id", "words"),
-    ] {
-        assert_compute_preflight(
-            &format!("/opt/fixture/bin/report {tail}"),
-            &format!("door-compute-{check}-refusal"),
-        );
-    }
 }
 
 /// ´test:unit:door-compute-floor-preserves-existing-mode-history´
@@ -1912,11 +1731,6 @@ fn door_rejected_compute_announces_before_admission() {
             "/opt/fixture/bin/report cargo test --locked;id",
             Scope::Work,
             "door-compute-words-refusal",
-        ),
-        (
-            "/opt/fixture/bin/report cargo test",
-            Scope::Work,
-            "door-compute-locked-refusal",
         ),
         (
             "/opt/fixture/bin/report git diff",

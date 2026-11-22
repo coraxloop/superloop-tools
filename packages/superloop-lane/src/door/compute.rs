@@ -1,4 +1,4 @@
-//! Closed compute grammar and operation-specific evidence.
+//! Compute frame and operation-specific evidence.
 
 use serde_json::{Value, json};
 
