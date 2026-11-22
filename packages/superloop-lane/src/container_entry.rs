@@ -106,10 +106,9 @@ fn purposes(operation: &str, backend: BoxBackend) -> &'static [&'static str] {
     ) {
         &READER_PURPOSES
     } else if operation == OPERATION {
-        if backend == BoxBackend::Claude {
-            &CLAUDE_PURPOSES
-        } else {
-            &PURPOSES
+        match backend {
+            BoxBackend::Codex => &PURPOSES,
+            BoxBackend::Claude => &CLAUDE_PURPOSES,
         }
     } else {
         &EXERCISE_PURPOSES
@@ -1156,6 +1155,13 @@ pub(crate) fn check_image(operation: &str, entry: &Anchor) -> Result<(), LaneErr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ´test:unit:helper-purposes-follow-the-selected-backend´
+    #[test]
+    fn helper_purposes_follow_the_selected_backend() {
+        assert_eq!(helper_purposes(BoxBackend::Codex), PURPOSES);
+        assert_eq!(helper_purposes(BoxBackend::Claude), CLAUDE_PURPOSES);
+    }
     use std::fs;
     use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
     use std::process::Stdio;

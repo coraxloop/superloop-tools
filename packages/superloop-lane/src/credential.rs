@@ -1765,6 +1765,44 @@ fn write_claude_run(home: &Path, worker_uid: u32, source: &ClaudeSource) -> Resu
     .map(|_published| ())
 }
 
+/// Remove only the selected backend's worker projection after its service ends.
+/// The entry is inspected beneath the held directory without opening its contents.
+pub(crate) fn withdraw_worker_projection(
+    home: &Path,
+    worker_uid: u32,
+    backend: BoxBackend,
+) -> Result<(), LaneError> {
+    let directory = home.join(backend.state_leaf());
+    let name = backend.worker_projection_name();
+    let fd = open_dir(&directory, owner_identity().0, worker_uid, 0o700)?;
+    let stat = match fstatat(&fd, name, AtFlags::AT_SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(Errno::ENOENT) => return Ok(()),
+        Err(error) => return Err(failure("credential-withdraw", error.to_string())),
+    };
+    if SFlag::from_bits_truncate(stat.st_mode) & SFlag::S_IFMT != SFlag::S_IFREG
+        || stat.st_uid != worker_uid
+        || stat.st_mode & 0o7777 != 0o600
+    {
+        return Err(failure(
+            "credential-withdraw",
+            "worker projection changed type, owner or mode",
+        ));
+    }
+    unlinkat(&fd, name, UnlinkatFlags::NoRemoveDir)
+        .or_else(|error| {
+            if error == Errno::ENOENT {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        })
+        .map_err(|error| failure("credential-withdraw", error.to_string()))?;
+    File::from(fd)
+        .sync_all()
+        .map_err(|error| failure("credential-withdraw", error.to_string()))
+}
+
 /// Callers hold the loop refresh lock through this operation and worker publication.
 /// This preserves the identity check followed by rename; it is not an atomic CAS.
 fn refresh_provider<P: OwnerProvider>(
@@ -2488,6 +2526,100 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("private fixture root");
         root
+    }
+
+    /// # Panics
+    /// Panics if withdrawal touches another entry, reads a projection, or a later
+    /// publication cannot restore the selected worker file.
+    /// ´test:unit:codex-worker-projection-withdraws-and-republishes´
+    #[test]
+    fn codex_worker_projection_withdraws_and_republishes() {
+        let root = claude_fixture_root();
+        let uid = owner_identity().0;
+        let directory = root.path().join(".codex");
+        fs::create_dir(&directory).expect("worker state");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("worker state mode");
+        let other = directory.join("config.toml");
+        fs::write(&other, b"other worker state").expect("other entry");
+        atomic_file(
+            &directory,
+            "auth.json",
+            b"fictional access",
+            uid,
+            uid,
+            0o700,
+            None,
+        )
+        .expect("first publication");
+        withdraw_worker_projection(root.path(), uid, BoxBackend::Codex)
+            .expect("service withdrawal");
+        assert!(!directory.join("auth.json").exists());
+        assert_eq!(
+            fs::read(&other).expect("other entry remains"),
+            b"other worker state"
+        );
+        withdraw_worker_projection(root.path(), uid, BoxBackend::Codex)
+            .expect("absent projection is harmless");
+        atomic_file(
+            &directory,
+            "auth.json",
+            b"next fictional access",
+            uid,
+            uid,
+            0o700,
+            None,
+        )
+        .expect("next round publication");
+        assert_eq!(
+            fs::read(directory.join("auth.json")).expect("next round file"),
+            b"next fictional access"
+        );
+    }
+
+    /// ´test:unit:worker-projection-withdrawal-refuses-changed-entry´
+    #[test]
+    fn worker_projection_withdrawal_refuses_changed_entry() {
+        use std::os::unix::fs::symlink;
+        let root = claude_fixture_root();
+        let uid = owner_identity().0;
+        let directory = root.path().join(".codex");
+        fs::create_dir(&directory).expect("worker state");
+        fs::set_permissions(&directory, fs::Permissions::from_mode(0o700))
+            .expect("worker state mode");
+        let projection = directory.join("auth.json");
+        let expect_refusal = || {
+            let error = withdraw_worker_projection(root.path(), uid, BoxBackend::Codex)
+                .expect_err("changed entry refuses withdrawal");
+            assert_eq!(error.kind, "credential-withdraw", "{error:?}");
+            assert!(
+                error.detail.contains("changed type, owner or mode"),
+                "{error:?}"
+            );
+            assert!(projection.exists() || projection.symlink_metadata().is_ok());
+        };
+        fs::write(&projection, b"fictional access").expect("projection");
+        fs::set_permissions(&projection, fs::Permissions::from_mode(0o640)).expect("wrong mode");
+        expect_refusal();
+        fs::remove_file(&projection).expect("remove wrong mode");
+        symlink("config.toml", &projection).expect("link projection");
+        expect_refusal();
+        fs::remove_file(&projection).expect("remove link");
+        fs::create_dir(&projection).expect("directory projection");
+        fs::set_permissions(&projection, fs::Permissions::from_mode(0o600))
+            .expect("directory has the expected file mode");
+        expect_refusal();
+        fs::remove_dir(&projection).expect("remove directory");
+        fs::write(&projection, b"fictional access").expect("projection");
+        fs::set_permissions(&projection, fs::Permissions::from_mode(0o600)).expect("correct mode");
+        let error =
+            withdraw_worker_projection(root.path(), uid.saturating_add(1), BoxBackend::Codex)
+                .expect_err("wrong worker owner refuses withdrawal");
+        assert!(error.line().contains("credential"), "{error:?}");
+        assert_eq!(
+            fs::read(&projection).expect("unchanged projection"),
+            b"fictional access"
+        );
     }
 
     /// # Panics
@@ -5002,6 +5134,45 @@ mod tests {
             let error = read_evidence(&held, "pilot", owner).expect_err("mixed provider reader");
             assert_eq!(error.kind, "credential-evidence");
             assert_eq!(error.detail, "credential evidence envelope is invalid");
+        }
+    }
+
+    /// # Panics
+    /// Panics if either backend's pinned evidence bytes cease to pass the writer
+    /// validator or the saved-evidence envelope reader.
+    /// ´test:unit:credential-evidence-schemas-are-byte-pinned´
+    #[test]
+    fn credential_evidence_schemas_are_byte_pinned() {
+        let report = Ok(fixture_report(1_900_000_000));
+        for (backend, path, expected) in [
+            (
+                BoxBackend::Codex,
+                "tests/fixtures/credential-evidence-codex.json",
+                include_str!("../tests/fixtures/credential-evidence-codex.json"),
+            ),
+            (
+                BoxBackend::Claude,
+                "tests/fixtures/credential-evidence-claude.json",
+                include_str!("../tests/fixtures/credential-evidence-claude.json"),
+            ),
+        ] {
+            let actual = serde_json::to_string(
+                &evidence_for_check(&report, true, backend).expect("fictional credential evidence"),
+            )
+            .expect("evidence JSON");
+            if std::env::var_os("UPDATE_LANE_PLAN").is_some() {
+                fs::write(
+                    Path::new(env!("CARGO_MANIFEST_DIR")).join(path),
+                    format!("{actual}\n"),
+                )
+                .expect("write evidence fixture");
+            } else {
+                assert_eq!(actual, expected.trim_end());
+            }
+            let saved: Value = serde_json::from_str(expected).expect("saved evidence fixture");
+            let binding = &crate::runtime_admission::ReviewedProgramBinding::Schema;
+            validate_evidence(&saved, binding).expect("writer accepts saved evidence");
+            validate_evidence_envelope(&saved).expect("reader accepts saved evidence");
         }
     }
 

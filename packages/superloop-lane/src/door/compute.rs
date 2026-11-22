@@ -1,4 +1,4 @@
-//! Closed compute grammar and operation-specific evidence.
+//! Compute frame and operation-specific evidence.
 
 use serde_json::{Value, json};
 
@@ -31,7 +31,7 @@ pub(super) fn parse(
                 || word.len() > 256
                 || !word
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_./:=+,-".contains(&b))
+                    .all(|b| b.is_ascii_alphanumeric() || b"_./:=+,-~^@%#".contains(&b))
         })
     {
         return Err("door-compute-words-refusal");

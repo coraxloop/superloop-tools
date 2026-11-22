@@ -159,7 +159,10 @@ def main():
                        TMPDIR=str(workspace / "lanes" / (run + "-tmp")),
                        RUSTDOCFLAGS="-D warnings", CARGO_NET_OFFLINE="true")
             Path(env["TMPDIR"]).mkdir(mode=0o700, exist_ok=True)
-            for tool in ["/usr/bin/timeout", wrapper, words[0]]:
+            program = words[0]
+            if "/" in program and not Path(program).is_absolute():
+                program = str(checkout / program)
+            for tool in ["/usr/bin/timeout", wrapper, program]:
                 if shutil.which(tool, path=env["PATH"]) is None:
                     reason = "door-compute-tool-refusal"
                     raise ValueError("required node tool absent: " + tool)

@@ -116,8 +116,13 @@ fn valid_key(algorithm: &str, encoded: &str) -> bool {
 
 fn validate(value: &Value, loop_name: &str) -> Result<(), LaneError> {
     let keys = [
-        "schema", "loop", "alias", "address", "port", "user", "host_key",
+        "schema", "loop", "alias", "node", "address", "port", "user", "host_key",
     ];
+    if value.get("node").is_none() {
+        return Err(invalid(format!(
+            "{RECORD}: node is absent; run register-door-node with --node"
+        )));
+    }
     if value.as_object().is_none_or(|object| {
         object.len() != keys.len() || keys.iter().any(|key| !object.contains_key(*key))
     }) || value["schema"] != 1
@@ -132,6 +137,15 @@ fn validate(value: &Value, loop_name: &str) -> Result<(), LaneError> {
         if !token(word(value, key)?, extra, limit) {
             return Err(invalid(format!("{RECORD}: {key} is invalid")));
         }
+    }
+    let node = word(value, "node")?;
+    if node.is_empty()
+        || node.len() > 80
+        || !node
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._-".contains(&byte))
+    {
+        return Err(invalid(format!("{RECORD}: node is invalid")));
     }
     let address = word(value, "address")?;
     if address.parse::<std::net::IpAddr>().is_err() && !token(address, b"-.", 253) {
@@ -359,6 +373,7 @@ fn arguments(args: &[String]) -> Result<(Value, bool, Option<String>), LaneError
         }
         let field = match flag.as_str() {
             "--alias" => "alias",
+            "--node" => "node",
             "--address" => "address",
             "--port" => "port",
             "--user" => "user",
@@ -453,7 +468,7 @@ pub(crate) fn fixture(config: &Path) -> Vec<u8> {
 #[cfg(test)]
 pub(crate) fn fixture_for(config: &Path, alias: &str) -> Vec<u8> {
     use std::os::unix::fs::PermissionsExt as _;
-    let value = json!({"schema":1,"loop":"alpha","alias":alias,"address":"192.0.2.1","port":2222,"user":"fixture","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
+    let value = json!({"schema":1,"loop":"alpha","alias":alias,"node":"fixture-node","address":"192.0.2.1","port":2222,"user":"fixture","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
     let bytes = derive(&value, config).expect("node derivatives");
     for (name, contents) in [
         (RECORD, serde_json::to_vec(&value).expect("node record")),
@@ -475,7 +490,7 @@ mod tests {
     /// ´test:unit:door-node-derived-config-pins-compute-keepalive´
     #[test]
     fn door_node_derived_config_pins_compute_keepalive() {
-        let value = json!({"schema":1,"loop":"alpha","alias":"fixture","address":"192.0.2.1","port":22,"user":"account","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
+        let value = json!({"schema":1,"loop":"alpha","alias":"fixture","node":"fixture-node","address":"192.0.2.1","port":22,"user":"account","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
         let [config, _] = derive(&value, Path::new("/owner/config")).expect("derived config");
         assert_eq!(config.matches("  ServerAliveInterval 30\n").count(), 1);
         assert_eq!(config.matches("  ServerAliveCountMax 4\n").count(), 1);
@@ -486,10 +501,11 @@ mod tests {
     /// ´test:unit:door-node-facts-refuse-injection-and-malformed-keys´
     #[test]
     fn door_node_facts_refuse_injection_and_malformed_keys() {
-        let value = json!({"schema":1,"loop":"alpha","alias":"fixture","address":"192.0.2.1","port":22,"user":"account","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
+        let value = json!({"schema":1,"loop":"alpha","alias":"fixture","node":"fixture-node","address":"192.0.2.1","port":22,"user":"account","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"});
         validate(&value, "alpha").expect("valid public key");
         for (field, invalid) in [
             ("alias", json!("*")),
+            ("node", json!("node\nother")),
             ("address", json!("node\nProxyCommand false")),
             ("user", json!("-option")),
             ("port", json!(0)),
@@ -516,5 +532,10 @@ mod tests {
                 "door-node-registration"
             );
         }
+        let mut missing = value;
+        missing.as_object_mut().unwrap().remove("node");
+        let error = validate(&missing, "alpha").expect_err("node is required");
+        assert_eq!(error.kind, "door-node-registration");
+        assert!(error.detail.contains("register-door-node"));
     }
 }

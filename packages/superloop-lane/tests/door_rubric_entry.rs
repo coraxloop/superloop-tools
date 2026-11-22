@@ -753,7 +753,7 @@ fn record_readers(fixture: &Fixture, result: &RunnerOutcome) {
         record.mark("fixture review").expect("mark for review");
         store.file(record).expect("file request");
         store
-            .record_agent(&format!("R:{nonce}"), result, None, Some("fixture"))
+            .record_agent(&format!("R:{nonce}"), result, None, Some("fixture"), None)
             .expect("production agent writer");
     }
     for row in store.list_run("R").expect("exercise run reader") {

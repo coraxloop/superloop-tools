@@ -395,7 +395,7 @@ pub fn private_measure(
         return Ok(report);
     }
     let name = crate::launch::probe::name(&argv, &super::mounts::probe_name_prefix("network"))?;
-    let output = build::run_checked(
+    let output = super::run_probe_box(
         program,
         argv[1..].to_vec(),
         &environment,

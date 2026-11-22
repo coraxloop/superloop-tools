@@ -11,7 +11,7 @@ members = [
 resolver = "3"
 
 [workspace.package]
-version = "0.9.0"
+version = "0.10.0"
 edition = "2024"
 rust-version = "1.88"
 license = "GPL-3.0-or-later"
@@ -34,7 +34,7 @@ loop-home = { path = "packages/loop-home" }
 # receive values the program has already counted, cut and summarised; debug
 # stays off because the templates are compiled into the binary and tested.
 minijinja = { version = "3", default-features = false, features = ["macros", "multi_template", "serde"] }
-nix = { version = "0.32", features = ["process", "signal", "fs", "term", "dir", "user", "mount", "time"] }
+nix = { version = "0.32", features = ["process", "signal", "fs", "term", "dir", "user", "mount", "time", "resource"] }
 # Graph features include serde-1 for state serialization; dot_parser and
 # rayon stay off. Consumers use DiGraph, NodeIndex, Direction and visit.
 petgraph = { version = "0.8", features = ["serde-1"] }

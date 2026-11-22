@@ -19,7 +19,82 @@ pub enum BoxBackend {
     Claude,
 }
 
+/// Vendor-owned choices used while constructing a protected plan and home.
+#[derive(Clone, Copy)]
+pub(crate) struct BackendMetadata {
+    pub name: &'static str,
+    pub vendor: crate::build::payload::Vendor,
+    pub template_sibling: bool,
+    pub state_leaf: &'static str,
+    pub state_home: &'static str,
+    pub home_variable: &'static str,
+    pub template_files: [&'static str; 2],
+    pub projection: Option<ProjectionFile>,
+    pub exercise_refresh_trigger: &'static str,
+    pub inner_sandbox: &'static str,
+    pub runtime_form: RuntimeForm,
+    pub runtime_measurement: &'static str,
+    pub owner_refresh_hosts: &'static [&'static str],
+    pub creation_credential_purpose: &'static str,
+}
+
+/// None in the row means that a backend has no projected authority file.
+#[derive(Clone, Copy)]
+pub(crate) struct ProjectionFile {
+    pub name: &'static str,
+    pub precreate: bool,
+}
+
+#[derive(Clone, Copy)]
+pub(crate) enum RuntimeForm {
+    CodexExec,
+    ClaudePrint,
+}
+
 impl BoxBackend {
+    /// The exhaustive vendor metadata row. Settings still supply configured paths and hosts.
+    pub(crate) const fn metadata(self) -> BackendMetadata {
+        match self {
+            Self::Codex => BackendMetadata {
+                name: "codex",
+                vendor: crate::build::payload::CODEX,
+                template_sibling: false,
+                state_leaf: ".codex",
+                state_home: "/home/worker/.codex",
+                home_variable: "CODEX_HOME",
+                template_files: ["config.toml", "AGENTS.md"],
+                projection: Some(ProjectionFile {
+                    name: "auth.json",
+                    precreate: true,
+                }),
+                exercise_refresh_trigger: "access JWT within ten minutes of expiry",
+                inner_sandbox: "danger-full-access; outer box enforces mounts",
+                runtime_form: RuntimeForm::CodexExec,
+                runtime_measurement: "provisional; launch must probe",
+                owner_refresh_hosts: &[crate::credential::REFRESH_HOST],
+                creation_credential_purpose: "credential-client",
+            },
+            Self::Claude => BackendMetadata {
+                name: "claude",
+                vendor: crate::build::payload::CLAUDE,
+                template_sibling: true,
+                state_leaf: ".claude",
+                state_home: "/home/worker/.claude",
+                home_variable: "CLAUDE_CONFIG_DIR",
+                template_files: ["settings.json", "CLAUDE.md"],
+                projection: Some(ProjectionFile {
+                    name: ".credentials.json",
+                    precreate: false,
+                }),
+                exercise_refresh_trigger: "recorded expiresAt within ten minutes of expiry",
+                inner_sandbox: "permission bypass; outer box enforces mounts; Claude trial remains required",
+                runtime_form: RuntimeForm::ClaudePrint,
+                runtime_measurement: "provisional vector; Claude credential and trial acceptance remain unavailable",
+                owner_refresh_hosts: &[],
+                creation_credential_purpose: "credential-claude",
+            },
+        }
+    }
     /// Parse the two supported vendor selectors.
     ///
     /// # Errors
@@ -38,18 +113,12 @@ impl BoxBackend {
     /// Return the workers settings map key.
     #[must_use]
     pub const fn name(self) -> &'static str {
-        match self {
-            Self::Codex => "codex",
-            Self::Claude => "claude",
-        }
+        self.metadata().name
     }
 
     /// Installed payload metadata for the protected selection.
     pub(crate) const fn vendor(self) -> crate::build::payload::Vendor {
-        match self {
-            Self::Codex => crate::build::payload::CODEX,
-            Self::Claude => crate::build::payload::CLAUDE,
-        }
+        self.metadata().vendor
     }
 
     /// Select Claude's sibling template in a mixed installation.
@@ -58,7 +127,7 @@ impl BoxBackend {
         let template = settings.template_dir.as_ref().ok_or_else(|| {
             LaneError::input("missing-setting", "template_dir is absent in workers.toml")
         })?;
-        if self == Self::Claude
+        if self.metadata().template_sibling
             && let Some(hash) = settings
                 .image_digest
                 .as_deref()
@@ -66,41 +135,46 @@ impl BoxBackend {
             && template.ends_with(Path::new("runner-templates/codex").join(hash))
             && let Some(root) = template.parent().and_then(Path::parent)
         {
-            return Ok(root.join("claude").join(hash));
+            return Ok(root.join(self.name()).join(hash));
         }
         Ok(template.clone())
     }
 
     /// Worker-owned state leaf beneath the read-only home.
     pub(crate) const fn state_leaf(self) -> &'static str {
-        match self {
-            Self::Codex => ".codex",
-            Self::Claude => ".claude",
+        self.metadata().state_leaf
+    }
+
+    /// The worker credential entry within the selected state leaf.
+    ///
+    /// # Panics
+    /// Panics only if a future backend has no projected file but a file-only caller
+    /// is left in place; current backends both carry a projected file.
+    pub(crate) const fn worker_projection_name(self) -> &'static str {
+        match self.metadata().projection {
+            Some(projection) => projection.name,
+            None => panic!("file-only caller used for a backend without projected authority"),
         }
+    }
+
+    /// Operator-facing expiry condition measured by the credential exercise.
+    pub(crate) const fn exercise_refresh_trigger(self) -> &'static str {
+        self.metadata().exercise_refresh_trigger
     }
 
     /// Configuration root used by the selected program inside the box.
     pub(crate) const fn state_home(self) -> &'static str {
-        match self {
-            Self::Codex => "/home/worker/.codex",
-            Self::Claude => "/home/worker/.claude",
-        }
+        self.metadata().state_home
     }
 
     /// Environment key selecting the vendor's state root.
     pub(crate) const fn home_variable(self) -> &'static str {
-        match self {
-            Self::Codex => "CODEX_HOME",
-            Self::Claude => "CLAUDE_CONFIG_DIR",
-        }
+        self.metadata().home_variable
     }
 
     /// Immutable configuration and charter files supplied by the template.
     pub(crate) const fn template_files(self) -> [&'static str; 2] {
-        match self {
-            Self::Codex => ["config.toml", "AGENTS.md"],
-            Self::Claude => ["settings.json", "CLAUDE.md"],
-        }
+        self.metadata().template_files
     }
 
     /// Read an explicit backend from a protected plan, never from current defaults.
@@ -112,6 +186,19 @@ impl BoxBackend {
             LaneError::input("backend-selection", "protected plan backend is absent or invalid; retire the old run before launching again")
         })?;
         Self::parse(name)
+    }
+
+    /// Saved reservations before backend selection was recorded name Codex.
+    /// Explicit but invalid bindings still refuse through the regular reader.
+    pub(crate) fn from_saved_plan(plan: &serde_json::Value) -> Result<Self, LaneError> {
+        if plan
+            .as_object()
+            .is_some_and(|object| !object.contains_key("backend"))
+        {
+            Ok(Self::Codex)
+        } else {
+            Self::from_plan(plan)
+        }
     }
 
     /// Refuse a vendor whose boxed runtime and credential adapter are not ready.
@@ -683,6 +770,63 @@ fn configured_driver(table: &toml::Table) -> Result<Vec<String>, LaneError> {
 #[cfg(test)]
 mod tests {
     use super::{Resources, bounded_cpu_shares, page_aligned_memory, split_local_policies};
+
+    /// ´test:unit:backend-worker-projection-metadata-is-exhaustive´
+    #[test]
+    fn backend_worker_projection_metadata_is_exhaustive() {
+        use super::BoxBackend;
+        assert_eq!(
+            (
+                BoxBackend::Codex.state_leaf(),
+                BoxBackend::Codex.worker_projection_name(),
+                BoxBackend::Codex.exercise_refresh_trigger(),
+            ),
+            (
+                ".codex",
+                "auth.json",
+                "access JWT within ten minutes of expiry",
+            )
+        );
+        assert_eq!(
+            (
+                BoxBackend::Claude.state_leaf(),
+                BoxBackend::Claude.worker_projection_name(),
+                BoxBackend::Claude.exercise_refresh_trigger(),
+            ),
+            (
+                ".claude",
+                ".credentials.json",
+                "recorded expiresAt within ten minutes of expiry",
+            )
+        );
+    }
+
+    /// ´test:unit:saved-backend-reader-keeps-legacy-codex-default´
+    #[test]
+    fn saved_backend_reader_keeps_legacy_codex_default() {
+        use super::BoxBackend;
+        assert_eq!(
+            BoxBackend::from_saved_plan(&serde_json::json!({})).expect("legacy record"),
+            BoxBackend::Codex
+        );
+        assert_eq!(
+            BoxBackend::from_saved_plan(&serde_json::json!({"backend":"claude"}))
+                .expect("explicit Claude"),
+            BoxBackend::Claude
+        );
+        assert_eq!(
+            BoxBackend::from_saved_plan(&serde_json::json!({"backend":7}))
+                .expect_err("malformed explicit backend")
+                .kind,
+            "backend-selection"
+        );
+        assert_eq!(
+            BoxBackend::from_saved_plan(&serde_json::json!({"backend":null}))
+                .expect_err("explicit null backend")
+                .kind,
+            "backend-selection"
+        );
+    }
 
     /// ´test:unit:settings-reader-validates-directory-and-file-acl-masks´
     #[test]

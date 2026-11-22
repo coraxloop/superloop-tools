@@ -8,7 +8,7 @@ fn refusal(detail: impl Into<String>) -> LaneError {
     LaneError::input("retire-absence", detail)
 }
 
-pub(super) fn hash(bytes: &[u8]) -> String {
+pub(in crate::launch) fn hash(bytes: &[u8]) -> String {
     let mut text = String::with_capacity(64);
     for byte in Sha256::digest(bytes) {
         let _written = write!(text, "{byte:02x}");
@@ -16,7 +16,7 @@ pub(super) fn hash(bytes: &[u8]) -> String {
     text
 }
 
-pub(super) fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, LaneError> {
+pub(in crate::launch) fn read_bytes(path: &Path) -> Result<Option<Vec<u8>>, LaneError> {
     let file = match OpenOptions::new()
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK)

@@ -33,6 +33,8 @@ pub const RECORD_MAX_BYTES: u64 = 65_536;
 /// every live steering and reply binding of every active worker; retirement
 /// releases a worker's family.
 pub const RESERVATION_PINS_MAX_BYTES: u64 = 1_048_576;
+/// Maximum number of matching retained deliveries returned by one designation query.
+pub const REPLY_DESIGNATION_QUERY_MAX: usize = 256;
 const ZERO_DIGEST: &str = "0000000000000000000000000000000000000000000000000000000000000000";
 
 /// Transport error without letter contents.
@@ -1244,6 +1246,69 @@ pub fn verify_reservation_beneath<T>(
 fn reservation_root_beneath(anchor: &crate::anchor::Anchor) -> Result<File> {
     let (_, descriptor) = anchor.relay()?;
     store::open(&File::from(descriptor), ".", true)
+}
+
+/// List retained deliveries for one exact outgoing submission under received journal custody.
+///
+/// The caller retains the worker lifetime lease and verifies its selected identity.
+/// This is transport metadata only; binding rechecks the selected delivery separately.
+///
+/// # Errors
+/// Refuses invalid names, changed custody, corrupt records or an excessive result.
+pub fn reply_designation_deliveries_beneath(
+    anchor: &crate::anchor::Anchor,
+    sender: &str,
+    recipient: &str,
+    outgoing: &str,
+) -> Result<Vec<(Instant, Phase)>> {
+    let sender_name =
+        Address::parse(sender).map_err(|_| MailError::Invalid("invalid-name: sender"))?;
+    let recipient_name =
+        Address::parse(recipient).map_err(|_| MailError::Invalid("invalid-name: recipient"))?;
+    let outgoing_name =
+        Outgoing::parse(outgoing).map_err(|_| MailError::Invalid("invalid-name: outgoing"))?;
+    if sender_name.worker().is_none()
+        || recipient_name.worker().is_some()
+        || outgoing_name.recipient != recipient_name
+    {
+        return Err(MailError::Invalid("invalid-name: outgoing recipient"));
+    }
+    let root = reservation_root_beneath(anchor)?;
+    store::private(&root, true)?;
+    let _admission = reservation_admission(&root)?;
+    anchor.revalidate()?;
+    store::private(&root, true)?;
+    let records = store::open(&root, "deliveries", true)?;
+    let mut matches = Vec::new();
+    for name in store::names(&records)? {
+        if let Some(instant) = name
+            .strip_prefix('.')
+            .and_then(|name| name.strip_suffix(".toml.replace"))
+        {
+            Instant::parse(instant)?;
+            continue;
+        }
+        let instant = Instant::parse(
+            name.strip_suffix(".toml")
+                .ok_or(MailError::Invalid("record filename"))?,
+        )?;
+        let record: Record = store::read(&records, &name, RECORD_MAX_BYTES)?;
+        record.validate()?;
+        if record.delivery != instant {
+            return Err(MailError::Invalid("journal key mismatch"));
+        }
+        if record.sender == sender
+            && record.recipient == recipient
+            && record.outgoing == outgoing
+            && record.phase != Phase::Discarded
+        {
+            matches.push((record.delivery, record.phase));
+            if matches.len() > REPLY_DESIGNATION_QUERY_MAX {
+                return Err(MailError::Invalid("reply designation query bound exceeded"));
+            }
+        }
+    }
+    Ok(matches)
 }
 
 /// Verify a terminal delivery and durably pin it before exposing its binding.

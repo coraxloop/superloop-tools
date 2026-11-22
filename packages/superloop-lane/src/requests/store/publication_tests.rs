@@ -178,7 +178,7 @@ fn exercise(fail_before: u32, fail_sync: u32, fail_learned: bool) -> (Probe, Opt
     let _reset = Reset;
     let result = crate::door::agent::RunnerOutcome::referral("failure", "fixture", Instant::now());
     store
-        .record_agent("R:aa", &result, None, None)
+        .record_agent("R:aa", &result, None, None, None)
         .expect("record remains durable");
     let probe = PROBE.with(|slot| slot.borrow().clone().expect("probe"));
     let retained = store.read_run("R").expect("durable record").2;

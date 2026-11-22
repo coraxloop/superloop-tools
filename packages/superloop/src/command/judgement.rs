@@ -2,19 +2,10 @@
 
 use super::*;
 use execute_command::policy::DoorMode;
-use execute_command::request::{Command, LearnedGroup, MatchEvaluation, MatchKey, Verdict};
+use execute_command::request::{LearnedGroup, MatchEvaluation, MatchKey, Verdict};
 use execute_command::snapshot::PolicySnapshot;
 
 pub(super) fn key(request: &Request) -> Result<MatchKey, Error> {
-    if let Command::Argv { argv } = request.command()
-        && execute_command::checks::compute::validate_words(argv).is_ok()
-    {
-        return Ok(MatchKey {
-            class: text("compute")?,
-            operation: text("compute")?,
-            shape_key: text(&execute_command::checks::compute::shape(argv))?,
-        });
-    }
     Ok(MatchKey {
         class: text("command")?,
         operation: text("execute")?,
@@ -146,6 +137,25 @@ mod tests {
 
     fn source(value: Value) -> Source {
         Source::new("fixture-revision".into(), value).expect("source evidence")
+    }
+
+    /// ´claim:command:direct-argv-uses-general-command-key´
+    /// ´test:unit:direct-judge-argv-uses-general-command-key´
+    #[test]
+    fn direct_judge_argv_uses_general_command_key() {
+        for argv in [vec!["cargo", "test", "--locked"], vec!["make", "check"]] {
+            let mut value = serde_json::to_value(request("fixture")).expect("request value");
+            value["command"] = json!({"representation":"argv","argv":argv});
+            let request = Request::from_json(&serde_json::to_vec(&value).expect("request JSON"))
+                .expect("argv request");
+            let key = key(&request).expect("direct key");
+            assert_eq!(key.class.as_str(), "command");
+            assert_eq!(key.operation.as_str(), "execute");
+            assert_eq!(
+                key.shape_key.as_str(),
+                digest(request.command()).expect("command digest")
+            );
+        }
     }
 
     fn policy(floor: &str, request: &Request, learned: bool) -> PolicySnapshot {

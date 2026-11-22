@@ -23,6 +23,7 @@ mod agent_probes;
 pub mod config;
 mod lifetime;
 pub mod metadata;
+pub use workspace::{WorkspaceAllowance, WorkspaceRequest, workspace_request};
 
 /// Format the final door reply for the SSH command boundary.
 #[must_use]
@@ -968,57 +969,298 @@ pub enum Scope {
     Review,
 }
 
-/// A schema-three request bound to the owner-held reservation, before judgement.
-pub struct WorkspaceRequest {
-    pub envelope: execute_command::workspace::Envelope,
-    pub grant: execute_command::workspace::Grant,
-}
+mod workspace {
+    use std::io::{self, Write as _};
+    use std::os::fd::OwnedFd;
 
-/// Decode the original wire once and read its grant under the door's held runs descriptor.
-///
-/// The caller supplies the node identity authenticated by the route; this reader
-/// never accepts the request's digest as a substitute for the protected grant.
-/// # Errors
-/// Refuses malformed wire, a missing grant or a changed run, worker or node.
-pub fn workspace_request(
-    runs: &OwnedFd,
-    registration: &Registration,
-    owner: u32,
-    node: &str,
-    wire: &[u8],
-) -> Result<WorkspaceRequest, LaneError> {
-    let envelope = execute_command::workspace::Envelope::from_bytes(wire)
-        .map_err(|error| LaneError::input(error.kind, error.detail))?;
-    let reservation = crate::launch::door_reservation(runs, &registration.run, owner)?;
-    if reservation["phase"] != "started"
-        || reservation["loop"] != registration.loop_name
-        || reservation["run"] != registration.run
-        || reservation["worker_uid"] != registration.worker_uid
-        || reservation["door_scope"] != registration.scope.name()
-    {
-        return Err(LaneError::input(
-            "door-workspace-context-differs",
-            "workspace reservation and registered worker differ",
-        ));
+    use execute_command::policy::DoorMode;
+    use execute_command::workspace::{Classification, Disposition, canonical_digest, learned_key};
+    use serde_json::{Value, json};
+
+    use crate::error::LaneError;
+    use crate::requests::store::Store;
+
+    use super::{Registration, Scope};
+
+    /// A schema-three request bound to the owner-held reservation, before judgement.
+    pub struct WorkspaceRequest {
+        envelope: execute_command::workspace::Envelope,
+        grant: execute_command::workspace::Grant,
     }
-    let snapshot = crate::plan::workspace_snapshot(&reservation["plan"])?;
-    let grant = snapshot
-        .ok_or_else(|| {
+
+    impl WorkspaceRequest {
+        /// The exact request decoded from the original wire.
+        #[must_use]
+        pub const fn envelope(&self) -> &execute_command::workspace::Envelope {
+            &self.envelope
+        }
+
+        /// The grant read from the protected reservation.
+        #[must_use]
+        pub const fn grant(&self) -> &execute_command::workspace::Grant {
+            &self.grant
+        }
+    }
+
+    /// Decode the original wire once and read its grant under the door's held runs descriptor.
+    ///
+    /// The caller supplies the node identity authenticated by the route; this reader
+    /// never accepts the request's digest as a substitute for the protected grant.
+    /// # Errors
+    /// Refuses malformed wire, a missing grant or a changed run, worker or node.
+    pub fn workspace_request(
+        runs: &OwnedFd,
+        registration: &Registration,
+        owner: u32,
+        node: &str,
+        wire: &[u8],
+    ) -> Result<WorkspaceRequest, LaneError> {
+        let envelope = execute_command::workspace::Envelope::from_bytes(wire)
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+        if registration.scope != Scope::Work {
+            return Err(LaneError::input(
+                "door-workspace-context-differs",
+                "workspace route requires work scope",
+            ));
+        }
+        let reservation =
+            crate::launch::door_reservation(runs, &registration.run, owner).map_err(|error| {
+                LaneError::input(
+                    "door-workspace-context-differs",
+                    format!(
+                        "protected workspace reservation is unavailable: {}",
+                        error.line()
+                    ),
+                )
+            })?;
+        if reservation["phase"] != "started"
+            || reservation["loop"] != registration.loop_name
+            || reservation["run"] != registration.run
+            || reservation["worker_uid"] != registration.worker_uid
+        {
+            return Err(LaneError::input(
+                "door-workspace-context-differs",
+                "workspace reservation and registered worker differ",
+            ));
+        }
+        let snapshot = crate::plan::workspace_snapshot(&reservation["plan"]).map_err(|error| {
             LaneError::input(
-                "door-workspace-unregistered",
-                "no protected workspace grant",
+                "door-workspace-context-differs",
+                format!("protected workspace plan differs: {}", error.line()),
             )
-        })?
-        .grant;
-    execute_command::workspace::admit(
-        &envelope,
-        Some(&grant),
-        &registration.loop_name,
-        &registration.run,
-        node,
-    )
-    .map_err(|error| LaneError::input(error.kind, error.detail))?;
-    Ok(WorkspaceRequest { envelope, grant })
+        })?;
+        let grant = snapshot
+            .ok_or_else(|| {
+                LaneError::input(
+                    "door-workspace-unregistered",
+                    "no protected workspace grant",
+                )
+            })?
+            .grant;
+        execute_command::workspace::admit(
+            &envelope,
+            Some(&grant),
+            &registration.loop_name,
+            &registration.run,
+            node,
+        )
+        .map_err(|error| LaneError::input(error.kind, error.detail))?;
+        Ok(WorkspaceRequest { envelope, grant })
+    }
+
+    /// An allow bound to one exact request and to the custody that answered it.
+    pub struct WorkspaceAllowance {
+        envelope_digest: String,
+        context_key: Value,
+        policy_revision: String,
+        origin: AllowanceOrigin,
+    }
+
+    enum AllowanceOrigin {
+        Store(Value),
+        Judgement(String),
+    }
+
+    impl WorkspaceAllowance {
+        fn bind(request: &WorkspaceRequest, origin: AllowanceOrigin) -> Result<Self, LaneError> {
+            let policy_revision = request.grant.quick_policy_digest.clone();
+            let context_key = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &policy_revision,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let envelope_digest = canonical_digest(&request.envelope)
+                .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            Ok(Self {
+                envelope_digest,
+                context_key,
+                policy_revision,
+                origin,
+            })
+        }
+
+        /// Read a learned allow from the protected store using this request's derived key.
+        ///
+        /// # Errors
+        /// Refuses inconsistent learned evidence; a learned-index fault accompanies a miss.
+        pub fn from_store_lookup(
+            store: &Store,
+            request: &WorkspaceRequest,
+        ) -> Result<(Option<Self>, Option<LaneError>), LaneError> {
+            let key = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &request.grant.quick_policy_digest,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let shape = key[2].as_str().ok_or_else(|| {
+                LaneError::input("door-workspace-context-differs", "learned key differs")
+            })?;
+            let (decision, evidence, _) =
+                match store.learned_judgement("compute", "compute-workspace", shape) {
+                    Ok(lookup) => lookup,
+                    Err(error) => {
+                        let _logged = writeln!(
+                            io::stderr().lock(),
+                            "door workspace learned lookup: {}",
+                            error.line()
+                        );
+                        return Ok((None, Some(error)));
+                    }
+                };
+            if decision["decision"] != "allow" {
+                return Ok((None, None));
+            }
+            if evidence["class"] != "compute"
+                || evidence["operation"] != "compute-workspace"
+                || evidence["shape_key"] != shape
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "learned allowance evidence differs",
+                ));
+            }
+            Self::bind(request, AllowanceOrigin::Store(evidence))
+                .map(|allowance| (Some(allowance), None))
+        }
+
+        /// Bind an agent allowance only after a protected store read by request id.
+        ///
+        /// # Errors
+        /// Refuses a non-agent decision or any changed execution or owner context.
+        pub fn from_judgement_record(
+            store: &Store,
+            id: &str,
+            request: &WorkspaceRequest,
+        ) -> Result<Self, LaneError> {
+            let record = store.request(id)?;
+            let value = record.value();
+            let detail = &value["effect"]["workspace"];
+            if value["schema"] != 7
+                || value["class"] != "compute"
+                || value["operation"] != "compute-workspace"
+                || value["would_do_source"] != "agent"
+                || value["would_do"]["decision"] != "allow"
+                || (!value["label"].is_null() && value["label"]["treatment"] != "allow")
+                || detail["envelope"] != json!(request.envelope)
+                || detail["grant"] != json!(request.grant)
+                || detail["policy_revision"] != request.grant.quick_policy_digest
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "judgement allowance and exact workspace request differ",
+                ));
+            }
+            Self::bind(request, AllowanceOrigin::Judgement(record.id().to_owned()))
+        }
+
+        /// Whether this evidence still belongs to the exact wire and owner grant.
+        ///
+        /// # Errors
+        /// Refuses a changed envelope, grant or policy identity.
+        pub fn check(&self, request: &WorkspaceRequest) -> Result<(), LaneError> {
+            let same_envelope = canonical_digest(&request.envelope)
+                .map_err(|error| LaneError::input(error.kind, error.detail))?
+                == self.envelope_digest;
+            let same_context = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &self.policy_revision,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?
+                == self.context_key;
+            if !same_envelope
+                || !same_context
+                || self.policy_revision != request.grant.quick_policy_digest
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "allowance belongs to another exact workspace request",
+                ));
+            }
+            Ok(())
+        }
+
+        /// Protected evidence the later record adapter cites.
+        #[must_use]
+        pub fn evidence(&self) -> Value {
+            match &self.origin {
+                AllowanceOrigin::Store(rule) => json!({"source":"learned","rule":rule}),
+                AllowanceOrigin::Judgement(id) => json!({"source":"judgement","request_id":id}),
+            }
+        }
+    }
+
+    impl WorkspaceRequest {
+        /// Compose the existing door agent call with lossless workspace evidence.
+        ///
+        /// # Errors
+        /// Refuses an envelope that no longer matches its protected grant.
+        pub fn agent_input(
+            &self,
+            reasons: &[String],
+            rubric: &str,
+        ) -> Result<execute_command::rubric::DoorInput, LaneError> {
+            let request =
+                execute_command::workspace::agent_input(&self.envelope, &self.grant, reasons)
+                    .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            Ok(execute_command::rubric::DoorInput {
+                request,
+                class: "compute".into(),
+                rubric: rubric.into(),
+            })
+        }
+
+        /// Select a miss's wait after any allowance is checked against this exact request.
+        ///
+        /// A miss with no learned or recorded allowance waits in allow, audit and enforce.
+        /// # Errors
+        /// Refuses an allowance replayed against another request or malformed context.
+        pub fn disposition(
+            &self,
+            mode: DoorMode,
+            classification: &Classification,
+            allowance: Option<&WorkspaceAllowance>,
+        ) -> Result<Disposition, LaneError> {
+            if let Some(allowance) = allowance {
+                allowance.check(self)?;
+            }
+            let learned = allowance.map(|allowance| &allowance.context_key);
+            execute_command::workspace::disposition(
+                mode,
+                classification,
+                &self.envelope,
+                &self.grant,
+                &self.grant.quick_policy_digest,
+                learned,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))
+        }
+    }
 }
 
 impl Registration {
@@ -2451,31 +2693,42 @@ fn serve_request_with_agent_at(
     } else {
         format!("{class}:{}", operation.name())
     };
-    let (mut would_do, matched_rule, _history) = match rubric.map_or_else(
-        || {
-            store
-                .learned_judgement(class, operation.name(), &shape_key)
-                .or_else(|error| {
-                    if wait.stop(deadline).is_some()
-                        || crate::requests::store::is_lock_contention(&error)
-                    {
-                        return Err(error);
-                    }
-                    Ok((
-                        json!({"decision":"undecided","reason":error.line()}),
-                        Value::Null,
-                        json!([]),
-                    ))
-                })
-        },
-        |rubric| {
-            Ok((
-                rubric.would_do(class, operation.name(), &shape_key),
-                Value::Null,
-                json!([]),
-            ))
-        },
-    ) {
+    // The registered receive envelope names only this run's mirror. The first
+    // Git command packet is checked against mirror_ref before forwarding bytes.
+    let registered_receive = operation == transport::Operation::GitReceive;
+    let (mut would_do, matched_rule, _history) = match if registered_receive {
+        Ok((
+            json!({"decision":"allow","reason":crate::requests::judgement::REGISTERED_RECEIVE_RULE}),
+            Value::Null,
+            json!([]),
+        ))
+    } else {
+        rubric.map_or_else(
+            || {
+                store
+                    .learned_judgement(class, operation.name(), &shape_key)
+                    .or_else(|error| {
+                        if wait.stop(deadline).is_some()
+                            || crate::requests::store::is_lock_contention(&error)
+                        {
+                            return Err(error);
+                        }
+                        Ok((
+                            json!({"decision":"undecided","reason":error.line()}),
+                            Value::Null,
+                            json!([]),
+                        ))
+                    })
+            },
+            |rubric| {
+                Ok((
+                    rubric.would_do(class, operation.name(), &shape_key),
+                    Value::Null,
+                    json!([]),
+                ))
+            },
+        )
+    } {
         Ok(judgement) => judgement,
         Err(error)
             if wait.stop(deadline).is_some()
@@ -2564,7 +2817,11 @@ fn serve_request_with_agent_at(
         &words,
     )?;
     let mut value = record.into_value();
-    value["matched_rule"] = matched_rule;
+    if registered_receive {
+        crate::requests::judgement::registered_receive(&mut value);
+    } else {
+        value["matched_rule"] = matched_rule;
+    }
     let record = RequestRecord::decode(value).map_err(io::Error::other)?;
     let id = record.id().to_owned();
     let store = store.with_request_id(&id);
@@ -2642,6 +2899,7 @@ fn serve_request_with_agent_at(
             &result,
             result.rubric_digest.as_deref(),
             configured_model,
+            None,
         ) {
             let _recorded = store.record_incomplete(&registration.run, &id, error.kind);
             let mut reply =
@@ -2697,6 +2955,7 @@ fn serve_request_with_agent_at(
                         &result,
                         result.rubric_digest.as_deref(),
                         configured_model,
+                        None,
                     )
                 });
                 let complete = |reply: &Value| {
@@ -6976,6 +7235,130 @@ mod tests {
             assert_eq!(record.value()["effect"]["state"], "completed");
             assert_eq!(agent.0.load(Ordering::SeqCst), 0);
             assert_eq!(effects.load(Ordering::SeqCst), iteration + 1);
+        }
+    }
+
+    /// ´test:unit:door-registered-receive-rule-skips-agent-and-keeps-packet-refusal´
+    #[test]
+    fn door_registered_receive_rule_skips_agent_and_keeps_packet_refusal() {
+        struct NoAgent;
+        impl super::agent::AgentRunner for NoAgent {
+            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+                panic!("registered receive invoked agent")
+            }
+        }
+        let old = "0".repeat(40);
+        let new = "1".repeat(40);
+        for (mode, reference, expected) in [
+            (Mode::Allow, "refs/heads/lane/R", "door-complete"),
+            (Mode::Enforce, "refs/heads/lane/R", "door-complete"),
+            (Mode::Allow, "refs/heads/lane/S", "door-changed-ref-refusal"),
+            (
+                Mode::Enforce,
+                "refs/heads/lane/S",
+                "door-changed-ref-refusal",
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, mode);
+            let registration = concurrent_registration(3000);
+            let route = route_for(&fixture.home);
+            let (runner, calls, _) = counting_runner(&fixture);
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
+            let command = format!("{old} {new} {reference}\0 report-status\n");
+            let mut packet = format!("{:04x}", command.len() + 4).into_bytes();
+            packet.extend(command.as_bytes());
+            packet.extend(b"0000");
+            peer.wire().write_all(&packet).expect("Git command packet");
+            peer.shutdown(Shutdown::Write).expect("end Git input");
+            let (reply, _) = super::serve_request_with_agent(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"fixture".to_vec(),b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                Some(&NoAgent),
+                None,
+                Instant::now(),
+            )
+            .expect("receive reply");
+            assert_eq!(reply["reason"], expected, "{mode:?} {reference}");
+            assert_eq!(peer.answer()["reason"], expected);
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+            let rows = store.list_run("R").expect("receive record");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(rows[0].value()["would_do_source"], "transport-rule");
+            assert_eq!(
+                rows[0].value()["matched_rule"]["rule"],
+                "registered-receive-transport"
+            );
+            assert!(rows[0].value()["agent_status"].is_null());
+            assert_eq!(rows[0].value()["effect"]["reason"], expected);
+        }
+    }
+
+    /// ´test:unit:door-registered-receive-audit-waits-and-other-targets-refuse´
+    #[test]
+    fn door_registered_receive_audit_waits_and_other_targets_refuse() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        set_fixture_mode(&store, Mode::Audit);
+        let registration = concurrent_registration(3000);
+        let route = route_for(&fixture.home);
+        let (runner, calls, _) = counting_runner(&fixture);
+        let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
+        peer.shutdown(Shutdown::Write).expect("end input");
+        super::REQUEST_READY.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(|_| Ok(Instant::now())));
+        });
+        let (reply, _) = super::serve_request_with_agent(
+            &mut stream,
+            &registration,
+            3000,
+            &json!({"schema":2,"argv":[b"fixture".to_vec(),b"git-receive-pack '~/mirrors/R.git'".to_vec()],"deadline_ms":120_000}),
+            Some(&route), Some(&runner), Some(&fixture.home), None, Some(&store), None, None,
+            Instant::now(),
+        ).expect("audit reply");
+        assert_ne!(reply["reason"], "door-complete");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            store.list_run("R").expect("record")[0].value()["would_do_source"],
+            "transport-rule"
+        );
+        let _answer = peer.answer();
+        for scope in [Scope::Work, Scope::Review] {
+            let registration = Registration::from_row(
+                &json!({"name":"alpha","uid":41001}),
+                "alpha",
+                "R",
+                3000,
+                scope,
+            )
+            .expect("registration");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
+            let target = if scope == Scope::Work { "S" } else { "R" };
+            let (reply, _) = super::serve_request_with_agent(
+                &mut stream, &registration, 3000,
+                &json!({"schema":2,"argv":[b"fixture".to_vec(),format!("git-receive-pack '~/mirrors/{target}.git'").into_bytes()],"deadline_ms":120_000}),
+                Some(&route), Some(&runner), Some(&fixture.home), None, Some(&store), None, None,
+                Instant::now(),
+            ).expect("preflight reply");
+            assert_eq!(
+                reply["reason"],
+                if scope == Scope::Work {
+                    "door-caller-authority-refusal"
+                } else {
+                    "door-review-compute-refusal"
+                }
+            );
+            assert_eq!(peer.answer()["reason"], reply["reason"]);
         }
     }
 

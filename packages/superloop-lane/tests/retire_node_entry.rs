@@ -108,7 +108,7 @@ os.execv('/bin/sh', ['sh', '-c', args[-1]])
                 self.config.join("door-known_hosts").display()
             ),
         );
-        write(&self.config.join("door-node-registration.json"), json!({"schema":1,"loop":"alpha","alias":"fixture","address":"fixture.invalid","port":22,"user":"fixture","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}).to_string());
+        write(&self.config.join("door-node-registration.json"), json!({"schema":1,"loop":"alpha","alias":"fixture","node":"fixture-node","address":"fixture.invalid","port":22,"user":"fixture","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}).to_string());
         write(
             &self.config.join("door-known_hosts"),
             "fixture.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n",

@@ -17,11 +17,9 @@ const EXTRA: [&str; 4] = [
     "letter-directory",
     "rotation-source",
 ];
-fn extras(backend: BoxBackend) -> [&'static str; 4] {
+const fn extras(backend: BoxBackend) -> [&'static str; 4] {
     let mut purposes = EXTRA;
-    if backend == BoxBackend::Claude {
-        purposes[0] = "credential-claude";
-    }
+    purposes[0] = backend.metadata().creation_credential_purpose;
     purposes
 }
 pub(crate) fn selected_backend(body: &[String]) -> Result<BoxBackend, LaneError> {

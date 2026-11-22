@@ -3,7 +3,7 @@ use super::tests::Fixture;
 use crate::requests::{Mode, RequestRecord, tests::waiting};
 use execute_command::workspace::{Envelope, Grant, WorkspaceEffect, canonical_digest, learned_key};
 use serde_json::{Value, json};
-use std::fs;
+use std::fs::{self, File};
 use std::os::unix::fs::PermissionsExt as _;
 
 fn detail() -> Value {
@@ -101,6 +101,415 @@ fn prepared_fixture() -> Fixture {
     fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).unwrap();
     fixture
 }
+
+fn custodied_request(fixture: &Fixture, envelope: &Envelope) -> crate::door::WorkspaceRequest {
+    use crate::door::{Registration, Scope};
+    let runs = fixture.home.join("runs");
+    let held = File::open(&runs).expect("held runs").into();
+    let registration = Registration {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        worker_uid: 3000,
+        loop_uid: 41001,
+        scope: Scope::Work,
+        mirror_ref: "refs/heads/lane/R".into(),
+    };
+    let reservation = crate::launch::reservation_path(&runs, "R");
+    let saved = json!({"schema":1,"phase":"started","loop":"alpha","run":"R",
+        "worker_uid":3000,"door_scope":"work","plan":{"loop":"alpha","run":"R",
+        "compute_workspace":crate::plan::fixture_workspace_snapshot()}});
+    crate::launch::publish_reservation(&reservation, &saved).expect("protected grant");
+    let wire = serde_json::to_vec(envelope).expect("workspace wire");
+    crate::door::workspace_request(
+        &held,
+        &registration,
+        nix::unistd::Uid::effective().as_raw(),
+        "fixture-node",
+        &wire,
+    )
+    .expect("custodied request")
+}
+
+fn approved_record(
+    store: &crate::requests::store::Store,
+    id: &str,
+    envelope: &Envelope,
+) -> RequestRecord {
+    let mut row = record();
+    row["id"] = json!(id);
+    let grant: Grant =
+        serde_json::from_value(row["effect"]["workspace"]["grant"].clone()).expect("grant");
+    let revision = grant.quick_policy_digest.clone();
+    let key = learned_key("compute", envelope, &grant, &revision).expect("learned key");
+    row["shape_key"] = key[2].clone();
+    row["effect"]["workspace"]["envelope"] = json!(envelope);
+    row["effect"]["workspace"]["policy_revision"] = json!(revision);
+    row["effect"]["workspace"]["execution_digest"] =
+        json!(canonical_digest(&envelope.execution).expect("execution digest"));
+    row["effect"]["workspace"]["context_digest"] = key[2].clone();
+    store
+        .file(RequestRecord::decode(row).expect("workspace intent"))
+        .expect("file intent");
+    let result = crate::door::agent::RunnerOutcome {
+        verdict: "allow".into(),
+        scope: "loop".into(),
+        reason: "fictional reviewed allow".into(),
+        status: "verdict".into(),
+        model: None,
+        wall_ms: 1,
+        rubric_digest: None,
+        observations: json!({}),
+        runner_exit: None,
+        runner_stderr_tail: None,
+        runner_first_line: String::new(),
+    };
+    let input = execute_command::workspace::agent_input(
+        envelope,
+        &grant,
+        &["fictional unknown command".into()],
+    )
+    .expect("judge input");
+    store
+        .record_agent(id, &result, None, None, Some(&input))
+        .expect("agent judgement")
+}
+
+/// ´test:unit:workspace-judgement-input-reader-binds-exact-execution´
+#[test]
+fn workspace_judgement_input_reader_binds_exact_execution() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let recorded = approved_record(&store, "R:1a", &envelope);
+    let row = recorded.into_value();
+    let grant: Grant = serde_json::from_value(row["effect"]["workspace"]["grant"].clone()).unwrap();
+    assert_eq!(row["workspace_agent_input"]["grant_summary"], json!(grant));
+    assert_eq!(
+        RequestRecord::decode(row.clone()).unwrap().into_value(),
+        row
+    );
+    for pointer in [
+        "/workspace_agent_input/execution/words/0/0",
+        "/workspace_agent_input/cwd/0",
+        "/workspace_agent_input/env_additions",
+    ] {
+        let mut changed = row.clone();
+        *changed.pointer_mut(pointer).unwrap() = json!("changed");
+        assert_eq!(
+            RequestRecord::decode(changed).unwrap_err().kind,
+            "requests-record-refusal",
+            "{pointer}"
+        );
+    }
+    let mut different_display = row.clone();
+    different_display["workspace_agent_input"]["execution_readable_display_only"]["words"][0] =
+        json!("different table rendering");
+    RequestRecord::decode(different_display).expect("stored display is not regenerated");
+    let mut malformed_display = row.clone();
+    malformed_display["workspace_agent_input"]["execution_readable_display_only"]["words"] =
+        json!([]);
+    assert_eq!(
+        RequestRecord::decode(malformed_display).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+    let mut false_flag = row.clone();
+    false_flag["workspace_agent_input"]["flagged_code_points"]["rows"] = json!([{"field":"execution.words[0]","first_byte_offset":0,"code_point":"U+00E9","count":1}]);
+    assert_eq!(
+        RequestRecord::decode(false_flag).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+    let mut old = row;
+    old.as_object_mut().unwrap().remove("workspace_agent_input");
+    assert_eq!(
+        RequestRecord::decode(old).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+}
+
+/// ´test:unit:workspace-judgement-reader-requires-flag-coverage-floor´
+#[test]
+fn workspace_judgement_reader_requires_flag_coverage_floor() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let mut envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    envelope.execution = execute_command::workspace::Execution::Argv {
+        words: vec!["сargo".as_bytes().to_vec()],
+    };
+    let mut missing = approved_record(&store, "R:2b", &envelope).into_value();
+    missing["workspace_agent_input"]["flagged_code_points"]["rows"] = json!([]);
+    missing["workspace_agent_input"]["flagged_code_points"]["omitted_count"] = json!(0);
+    assert_eq!(
+        RequestRecord::decode(missing.clone()).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+    missing["workspace_agent_input"]["flagged_code_points"]["omitted_count"] = json!(1);
+    RequestRecord::decode(missing).expect("the omitted count covers the Cyrillic point");
+}
+
+/// ´test:unit:workspace-judgement-reader-accepts-true-ascii-extra-flag´
+#[test]
+fn workspace_judgement_reader_accepts_true_ascii_extra_flag() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let mut envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    envelope.execution = execute_command::workspace::Execution::Argv {
+        words: vec!["сargo".as_bytes().to_vec()],
+    };
+    let mut row = approved_record(&store, "R:2c", &envelope).into_value();
+    row["workspace_agent_input"]["flagged_code_points"]["rows"]
+        .as_array_mut().unwrap().push(json!({"field":"execution.words[0]","first_byte_offset":2,"code_point":"U+0061","count":1}));
+    RequestRecord::decode(row).expect("a true ASCII row is allowed beyond the floor");
+}
+
+/// ´test:unit:workspace-judgement-reader-refuses-false-grant-flag-and-display-shape´
+#[test]
+fn workspace_judgement_reader_refuses_false_grant_flag_and_display_shape() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let mut envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    envelope.execution = execute_command::workspace::Execution::Argv {
+        words: vec!["сargo".as_bytes().to_vec()],
+    };
+    let row = approved_record(&store, "R:2d", &envelope).into_value();
+    let flag = row["workspace_agent_input"]["flagged_code_points"]["rows"][0].clone();
+    let mutations = [
+        (
+            "grant",
+            "/workspace_agent_input/grant_summary/workspace",
+            json!("/work/other"),
+        ),
+        (
+            "first offset",
+            "/workspace_agent_input/flagged_code_points/rows/0/first_byte_offset",
+            json!(1),
+        ),
+        (
+            "count",
+            "/workspace_agent_input/flagged_code_points/rows/0/count",
+            json!(2),
+        ),
+        (
+            "unknown field",
+            "/workspace_agent_input/flagged_code_points/rows/0/field",
+            json!("execution.words[9]"),
+        ),
+        (
+            "display kind",
+            "/workspace_agent_input/execution_readable_display_only/kind",
+            json!("shell"),
+        ),
+    ];
+    for (name, pointer, value) in mutations {
+        let mut changed = row.clone();
+        *changed.pointer_mut(pointer).expect("fixture member") = value;
+        assert_eq!(
+            RequestRecord::decode(changed).unwrap_err().kind,
+            "requests-record-refusal",
+            "{name}"
+        );
+    }
+    let mut repeated = row;
+    repeated["workspace_agent_input"]["flagged_code_points"]["rows"]
+        .as_array_mut()
+        .expect("flag rows")
+        .push(flag);
+    assert_eq!(
+        RequestRecord::decode(repeated).unwrap_err().kind,
+        "requests-record-refusal",
+        "repeated row"
+    );
+}
+
+/// ´test:unit:workspace-judgement-input-refused-on-unjudged-intent´
+#[test]
+fn workspace_judgement_input_refused_on_unjudged_intent() {
+    let mut row = record();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let grant: Grant = serde_json::from_value(detail()["grant"].clone()).unwrap();
+    row["workspace_agent_input"] =
+        execute_command::workspace::agent_input(&envelope, &grant, &[]).unwrap();
+    assert_eq!(
+        RequestRecord::decode(row).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+}
+
+/// ´test:unit:workspace-unanswered-miss-waits-in-every-door-mode´
+#[test]
+fn workspace_unanswered_miss_waits_in_every_door_mode() {
+    use execute_command::policy::DoorMode;
+    use execute_command::workspace::{Classification, Disposition};
+    let fixture = prepared_fixture();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let miss = Classification::Miss {
+        reasons: vec!["unrecognised command".into()],
+    };
+    for mode in [DoorMode::Allow, DoorMode::Audit, DoorMode::Enforce] {
+        assert_eq!(
+            request.disposition(mode, &miss, None).unwrap(),
+            Disposition::WaitForJudgement
+        );
+    }
+}
+
+/// ´test:unit:workspace-agent-input-uses-the-existing-door-call-envelope´
+#[test]
+fn workspace_agent_input_uses_the_existing_door_call_envelope() {
+    let fixture = prepared_fixture();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let input = request
+        .agent_input(&["fictional miss".into()], "fictional rubric")
+        .unwrap();
+    let encoded: Value = serde_json::from_slice(&input.encode().unwrap()).unwrap();
+    assert_eq!(encoded["capability_class"], "compute");
+    assert_eq!(encoded["reviewed_rubric"], "fictional rubric");
+    assert_eq!(encoded["request"]["execution"], json!(envelope.execution));
+    assert_eq!(
+        encoded["request"]["miss_reasons"],
+        json!(["fictional miss"])
+    );
+}
+
+/// ´test:unit:workspace-judgement-allowance-refuses-envelope-replays´
+#[test]
+fn workspace_judgement_allowance_refuses_envelope_replays() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1a", &envelope);
+    let allowance =
+        crate::door::WorkspaceAllowance::from_judgement_record(&store, "R:1a", &request)
+            .expect("recorded allowance");
+    assert_eq!(allowance.evidence()["source"], "judgement");
+    allowance.check(&request).expect("exact envelope");
+    for changed in [
+        {
+            let mut value = envelope.clone();
+            value.cwd.push("other".into());
+            value
+        },
+        {
+            let mut value = envelope.clone();
+            value.env_additions.push(("X".into(), "1".into()));
+            value
+        },
+        {
+            let mut value = envelope;
+            value.execution = execute_command::workspace::Execution::Argv {
+                words: vec![b"different".to_vec()],
+            };
+            value
+        },
+    ] {
+        let changed_request = custodied_request(&fixture, &changed);
+        assert_eq!(
+            allowance.check(&changed_request).unwrap_err().kind,
+            "door-workspace-context-differs"
+        );
+        assert_eq!(
+            crate::door::WorkspaceAllowance::from_judgement_record(
+                &store,
+                "R:1a",
+                &changed_request
+            )
+            .err()
+            .expect("replay refused")
+            .kind,
+            "door-workspace-context-differs"
+        );
+    }
+}
+
+/// ´test:unit:workspace-judgement-allowance-refuses-changed-shell-text´
+#[test]
+fn workspace_judgement_allowance_refuses_changed_shell_text() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let mut envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    envelope.execution = execute_command::workspace::Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "printf original".into(),
+    };
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1b", &envelope);
+    let allowance =
+        crate::door::WorkspaceAllowance::from_judgement_record(&store, "R:1b", &request)
+            .expect("shell allowance");
+    let mut changed = envelope;
+    changed.execution = execute_command::workspace::Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "printf changed".into(),
+    };
+    let changed_request = custodied_request(&fixture, &changed);
+    assert_eq!(
+        allowance.check(&changed_request).unwrap_err().kind,
+        "door-workspace-context-differs"
+    );
+}
+
+/// ´test:unit:workspace-judgement-allowance-needs-stored-agent-allow-without-loop-refusal´
+#[test]
+fn workspace_judgement_allowance_needs_stored_agent_allow_without_loop_refusal() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1a", &envelope);
+    assert!(
+        crate::door::WorkspaceAllowance::from_judgement_record(&store, "R:9f", &request).is_err()
+    );
+    store
+        .triage(
+            "R",
+            &[json!({"id":"R:1a","action":"adjudicate",
+        "treatment":"refuse","reason":"fictional loop refusal"})],
+            "superloop",
+            "2",
+        )
+        .expect("loop refusal");
+    assert_eq!(
+        crate::door::WorkspaceAllowance::from_judgement_record(&store, "R:1a", &request)
+            .err()
+            .expect("loop refusal wins")
+            .kind,
+        "door-workspace-context-differs"
+    );
+}
+
+/// ´test:unit:workspace-learned-allowance-comes-from-the-store-lookup´
+#[test]
+fn workspace_learned_allowance_comes_from_the_store_lookup() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let (allowance, fault) = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
+        .expect("unavailable learned store is a miss");
+    assert!(allowance.is_none());
+    assert!(fault.is_some());
+    approved_record(&store, "R:1a", &envelope);
+    let (allowance, fault) = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
+        .expect("unanswered lookup");
+    assert!(allowance.is_none() && fault.is_none());
+    store
+        .triage(
+            "R",
+            &[json!({"id":"R:1a","action":"adjudicate",
+        "treatment":"allow","reason":"fictional reviewed decision"})],
+            "superloop",
+            "2",
+        )
+        .expect("protected label");
+    let allowance = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
+        .expect("label lookup")
+        .0
+        .expect("learned allow");
+    assert_eq!(allowance.evidence()["source"], "learned");
+    allowance.check(&request).expect("exact context");
+}
 /// ´test:unit:workspace-schema-seven-survives-rewrite-and-index-rebuild´
 #[test]
 fn workspace_schema_seven_survives_rewrite_and_index_rebuild() {
@@ -146,7 +555,7 @@ fn workspace_cut_pins_legacy_node_payloads_until_w5() {
     };
     assert_eq!(
         hash(include_bytes!("../door/compute_node.py")),
-        "3a3df220c0b5e005f9e83fcfee1b6792b84e922cb1ec40a273fa0a2c5076872b"
+        "a7227e314607e22c88e0c76e488955d6ab9fbda9413ac0ea46d4d13950c18680"
     );
     assert_eq!(
         hash(include_bytes!("../door/retire_node.py")),
@@ -170,6 +579,28 @@ fn preflight(check: &str, words: Value) -> Value {
     row["effect"]["preflight"]["words"] = words;
     row
 }
+
+/// ´test:unit:workspace-shared-preflight-refusals-use-empty-untagged-words´
+#[test]
+fn workspace_shared_preflight_refusals_use_empty_untagged_words() {
+    for check in [
+        "door-caller-authority-refusal",
+        "door-review-compute-refusal",
+    ] {
+        let row = preflight(check, json!([]));
+        assert_eq!(
+            RequestRecord::decode(row.clone()).unwrap().into_value(),
+            row,
+            "{check}"
+        );
+        let tagged = preflight(check, json!({"schema":3,"wire_bytes":[],"truncated":false}));
+        assert_eq!(
+            RequestRecord::decode(tagged).unwrap_err().kind,
+            "requests-record-refusal",
+            "{check}"
+        );
+    }
+}
 /// ´test:unit:workspace-preflight-reader-preserves-bounded-wire-evidence´
 #[test]
 fn workspace_preflight_reader_preserves_bounded_wire_evidence() {
@@ -187,8 +618,6 @@ fn workspace_preflight_reader_preserves_bounded_wire_evidence() {
         "door-workspace-unregistered",
         "door-workspace-context-differs",
         "door-workspace-protocol-refusal",
-        "door-caller-authority-refusal",
-        "door-review-compute-refusal",
     ] {
         let row = preflight(check, words.clone());
         assert_eq!(
@@ -254,8 +683,6 @@ fn workspace_preflight_reader_bounds_truncated_evidence() {
         "door-workspace-unregistered",
         "door-workspace-context-differs",
         "door-workspace-protocol-refusal",
-        "door-caller-authority-refusal",
-        "door-review-compute-refusal",
     ] {
         assert!(
             RequestRecord::decode(preflight(check, words.clone())).is_ok(),
@@ -286,6 +713,8 @@ fn workspace_preflight_reader_bounds_truncated_evidence() {
         "door-compute-root-refusal",
         "door-transport-pending",
         "door-requests-unregistered",
+        "door-caller-authority-refusal",
+        "door-review-compute-refusal",
     ] {
         assert!(
             RequestRecord::decode(preflight(check, words.clone())).is_err(),

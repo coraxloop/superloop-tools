@@ -34,7 +34,7 @@ write(entry, '#!/bin/sh\n[ "$1" = show ] || exit 2\nprintf \'%s\\n\' \'{"name":"
 write(config / 'workers.toml', f'runs_root = "{runs}"\nentry_bin = "{entry}"\ndriver_argv = ["/usr/bin/true"]\nimage_digest = "sha256:{"a"*64}"\ntemplate_dir = "{home / "template"}"\nsocket_dir = "{home / "sockets"}"\nresources = {{ memory_bytes = 2147483648, pids_max = 128, cpu_shares = 512 }}\n')
 record(config / 'door-compute-registration.json', dict(schema=1, loop='alpha', alias='fixture', mirror_root='~/mirrors', node_root='/srv/loops/loop-a', key_path=str(config / 'door-key')))
 key = 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'
-record(config / 'door-node-registration.json', dict(schema=1, loop='alpha', alias='fixture', address='192.0.2.1', port=2222, user='fixture', host_key=key))
+record(config / 'door-node-registration.json', dict(schema=1, loop='alpha', alias='fixture', node='fixture-node', address='192.0.2.1', port=2222, user='fixture', host_key=key))
 write(config / 'door-known_hosts', f'[192.0.2.1]:2222 {key}\n')
 write(config / 'door-ssh_config', f'# Registered host key: {key}\nHost fixture\n  HostName 192.0.2.1\n  Port 2222\n  User fixture\n  UserKnownHostsFile {config / "door-known_hosts"}\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  BatchMode yes\n')
 plan = json.loads((tree / 'packages/superloop-lane/tests/fixtures/plan.json').read_text())

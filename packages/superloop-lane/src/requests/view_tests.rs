@@ -305,7 +305,9 @@ fn collection_view_provisioned_paths_read_once() {
         "fixture",
         std::time::Instant::now(),
     );
-    store.record_agent("R:cc", &outcome, None, None).unwrap();
+    store
+        .record_agent("R:cc", &outcome, None, None, None)
+        .unwrap();
     let mut effect = request.value()["effect"].clone();
     effect["state"] = json!("completed");
     effect["reason"] = json!("door-complete");

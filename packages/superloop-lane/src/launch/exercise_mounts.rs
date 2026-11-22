@@ -189,7 +189,7 @@ pub fn private_measure(
         return Ok(probe_refusal(loop_name, run, &error.line()));
     }
     let probe_name = crate::launch::probe::name(&argv, &probe_name_prefix("mounts"))?;
-    let output = build::run_checked(
+    let output = super::run_probe_box(
         program,
         argv[1..].to_vec(),
         &environment,

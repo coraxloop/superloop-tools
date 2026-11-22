@@ -47,6 +47,7 @@ pub mod bound_roots;
 pub mod census;
 pub mod checkout;
 pub mod checkpoint;
+pub mod door_scope;
 pub mod driver_report;
 pub mod exercise;
 pub mod exercise_entry;
@@ -828,11 +829,15 @@ fn preview_backend_gate(
     loop_name: &str,
     backend: crate::settings::BoxBackend,
 ) -> Result<(), LaneError> {
-    if backend == crate::settings::BoxBackend::Codex {
-        return Ok(());
+    match backend {
+        crate::settings::BoxBackend::Codex => Ok(()),
+        crate::settings::BoxBackend::Claude => preview_claude_backend_gate(owner_home, loop_name),
     }
+}
+
+fn preview_claude_backend_gate(owner_home: &Path, loop_name: &str) -> Result<(), LaneError> {
     let custody = crate::credential::claude_source_custody_preview(owner_home, loop_name)?;
-    backend.require_runtime().map_err(|mut error| {
+    crate::settings::BoxBackend::Claude.require_runtime().map_err(|mut error| {
         std::fmt::Write::write_fmt(
             &mut error.detail,
             format_args!("; all read-only launch preview checks passed; runtime admission remains closed; source custody {custody}; Claude driver contract is checked on launch"),
@@ -840,6 +845,13 @@ fn preview_backend_gate(
         .expect("writing to a String cannot fail");
         error
     })
+}
+
+const fn backend_program_check(backend: crate::settings::BoxBackend) -> &'static str {
+    match backend {
+        crate::settings::BoxBackend::Codex => "backend_argv.codex program",
+        crate::settings::BoxBackend::Claude => "backend_argv.claude program",
+    }
 }
 
 pub(crate) fn private_podman_environment_from(
@@ -2325,11 +2337,14 @@ fn image_report(
         LaneError::input("build-report", format!("{}: {error}", path.display()))
     })?)
     .map_err(|error| LaneError::input("build-report", format!("{}: {error}", path.display())))?;
-    if backend == crate::settings::BoxBackend::Codex {
-        build::image_program_from_report(&report)?;
-    } else {
-        build::payload::check_claude_report(&report, true)?;
-        build::payload::image_program(&report, backend.vendor())?;
+    match backend {
+        crate::settings::BoxBackend::Codex => {
+            build::image_program_from_report(&report)?;
+        }
+        crate::settings::BoxBackend::Claude => {
+            build::payload::check_claude_report(&report, true)?;
+            build::payload::image_program(&report, backend.vendor())?;
+        }
     }
     Ok(report)
 }
@@ -4121,11 +4136,7 @@ fn run_with_program(
     let fresh_dir = planned_step_dir(&plan, "dispatch")?;
     let launch_argv = entry_argv(driver, &plan, request, &fresh_dir)?;
     let setup_argv = runtime_prepare_argv(&exe_word, &podman_word, owner_home, request)?;
-    let backend_check = if selected_backend == crate::settings::BoxBackend::Codex {
-        "backend_argv.codex program"
-    } else {
-        "backend_argv.claude program"
-    };
+    let backend_check = backend_program_check(selected_backend);
     let mut checks = vec![
         "box gate: container options, read-only root and template, worker-owned writable leaves, proxy route",
         "worker UID allocation",
@@ -6878,7 +6889,7 @@ fn record_dispatch_letter(
     directory: &Path,
 ) -> Result<(), LaneError> {
     record["active_round"] = json!("dispatch");
-    record["rounds"] = json!([{"step":"dispatch","budget_seconds":budget,"letter":"dispatch.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":placed_at,"in_round_letters":[]}]);
+    record["rounds"] = json!([{"step":"dispatch","budget_seconds":budget,"letter":"dispatch.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":placed_at,"in_round_letters":[],"reply_designation":{"state":"unmeasured"}}]);
     record["initial_brief"] = json!({"step":"dispatch","name":"brief.txt","in_round":false,"stop":stop,"bytes":letter.len(),"sha256":build::sha256_bytes(letter, owner_home)?,"placed_at_unix_ns":placed_at,"state":"placed"});
     record["mail"] = json!([]);
     record["mail_replies"] = json!([]);
@@ -7993,6 +8004,32 @@ mod tests {
                 .expect_err("no implicit backend")
                 .kind,
             "backend-selection"
+        );
+    }
+
+    /// # Panics
+    /// Panics if the saved Claude plan no longer passes the box gate, attestation,
+    /// or pinned-plan comparison used by a resumed run.
+    /// ´test:unit:claude-plan-fixture-passes-its-saved-plan-readers´
+    #[test]
+    fn claude_plan_fixture_passes_its_saved_plan_readers() {
+        let saved: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/plan-claude.json"))
+                .expect("saved Claude plan fixture");
+        assert_eq!(
+            crate::settings::BoxBackend::from_plan(&saved).expect("saved backend"),
+            crate::settings::BoxBackend::Claude
+        );
+        crate::plan::box_gate(&saved).expect("saved box vector");
+        crate::plan::verify_box_attestation_structure(&saved).expect("saved attestation");
+        super::compare_pinned_plan(&saved, &saved).expect("unchanged saved plan");
+        let mut changed = saved.clone();
+        changed["resources"]["cpu_shares"] = serde_json::json!(1024);
+        assert_eq!(
+            super::compare_pinned_plan(&saved, &changed)
+                .expect_err("changed pinned resource")
+                .kind,
+            "plan-read"
         );
     }
 
@@ -9227,6 +9264,10 @@ mod tests {
             .find(|pair| pair[0] == "-d")
             .expect("explicit directory argument");
         assert_eq!(record["rounds"][0]["driver_dir"], json!(supplied[1]));
+        assert_eq!(
+            record["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
         assert!(!directory.exists());
     }
 
@@ -9262,6 +9303,10 @@ mod tests {
             .expect("record");
         assert_eq!(saved["rounds"][0]["phase"], "running");
         assert_eq!(saved["rounds"][0]["driver_dir"], json!(directory));
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
     }
 
     /// ´test:unit:launch-settlement-document-carries-each-recorded-round-end´
@@ -9850,6 +9895,40 @@ mod tests {
             super::preview_dead_preparation(fixture.path(), &plan, "R", &letter, &[], || Ok(true))
                 .expect("pending preview");
         assert_eq!(pending["retirement_to_journal"], next["current_retirement"]);
+    }
+
+    /// # Panics
+    /// Panics if a read-only launch choice takes the other backend's branch.
+    /// ´test:unit:read-only-launch-choices-follow-the-selected-backend´
+    #[test]
+    fn read_only_launch_choices_follow_the_selected_backend() {
+        use crate::settings::BoxBackend;
+        let fixture = tempfile::TempDir::new().expect("fictional owner");
+        assert!(super::preview_backend_gate(fixture.path(), "alpha", BoxBackend::Codex).is_ok());
+        assert!(super::preview_backend_gate(fixture.path(), "alpha", BoxBackend::Claude).is_err());
+        assert_eq!(
+            super::backend_program_check(BoxBackend::Codex),
+            "backend_argv.codex program"
+        );
+        assert_eq!(
+            super::backend_program_check(BoxBackend::Claude),
+            "backend_argv.claude program"
+        );
+        let directory = fixture.path().join(".config/loops/alpha");
+        fs::create_dir_all(&directory).expect("fictional loop settings directory");
+        fs::write(directory.join("image-build.json"), b"{}").expect("fictional image report");
+        assert!(
+            super::image_report(fixture.path(), "alpha", BoxBackend::Codex)
+                .expect_err("Codex image pin")
+                .detail
+                .contains("codex_image_program")
+        );
+        assert!(
+            super::image_report(fixture.path(), "alpha", BoxBackend::Claude)
+                .expect_err("Claude image pin")
+                .detail
+                .contains("build_environment.claude_bin")
+        );
     }
 
     /// ´test:unit:helper-service-driver-contract-keeps-runtime-gate´
@@ -11135,5 +11214,34 @@ mod tests {
             .expect_err("two live runs");
         assert_eq!(refusal.kind, "door-registration");
         assert_eq!(refusal.detail, "peer has two live runs");
+    }
+
+    /// ´test:unit:door-registration-reads-current-scope-on-each-request´
+    #[test]
+    fn door_registration_reads_current_scope_on_each_request() {
+        use std::os::fd::OwnedFd;
+        let fixture = tempfile::tempdir_in("/tmp").expect("reservation fixture");
+        let root = fixture.path();
+        let runs: OwnedFd = fs::File::open(root).expect("held runs").into();
+        let row = json!({"name":"alpha","uid":41001});
+        let owner = nix::unistd::Uid::effective().as_raw();
+        for (scope, expected) in [
+            ("review", crate::door::Scope::Review),
+            ("work", crate::door::Scope::Work),
+            ("review", crate::door::Scope::Review),
+        ] {
+            super::publish_reservation(
+                &super::reservation_path(root, "R"),
+                &json!({"schema":1,"phase":"started","loop":"alpha","run":"R",
+                    "worker_uid":3000,"door_scope":scope,"plan":{}}),
+            )
+            .expect("changed reservation");
+            assert_eq!(
+                super::door_registration(&runs, &row, "alpha", 3000, (3000, 2), owner)
+                    .expect("current grant")
+                    .scope,
+                expected
+            );
+        }
     }
 }

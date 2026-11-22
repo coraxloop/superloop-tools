@@ -832,21 +832,24 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
             "runtime weakens container confinement",
         ));
     }
-    if backend == crate::settings::BoxBackend::Codex {
-        if !words
-            .windows(2)
-            .any(|pair| pair == ["--sandbox", "danger-full-access"])
-            || words
+    match backend.metadata().runtime_form {
+        crate::settings::RuntimeForm::CodexExec => {
+            if !words
                 .windows(2)
-                .any(|pair| pair[0] == "--sandbox" && pair[1] != "danger-full-access")
-        {
-            return Err(LaneError::input(
-                "box-gate",
-                "Codex must use danger-full-access inside the box",
-            ));
+                .any(|pair| pair == ["--sandbox", "danger-full-access"])
+                || words
+                    .windows(2)
+                    .any(|pair| pair[0] == "--sandbox" && pair[1] != "danger-full-access")
+            {
+                return Err(LaneError::input(
+                    "box-gate",
+                    "Codex must use danger-full-access inside the box",
+                ));
+            }
         }
-    } else {
-        check_claude_command(document, &words[image_position + 1..])?;
+        crate::settings::RuntimeForm::ClaudePrint => {
+            check_claude_command(document, &words[image_position + 1..])?;
+        }
     }
     let mounts = document["mounts"]
         .as_array()
@@ -1170,11 +1173,7 @@ pub(crate) fn box_gate(document: &Value) -> Result<Value, LaneError> {
     let bytes = serde_json::to_vec(&document["runtime_argv"])
         .map_err(|error| LaneError::operation("box-gate", error.to_string()))?;
     let runtime_argv_sha256 = crate::build::sha256_bytes(&bytes, Path::new("/"))?;
-    let inner_sandbox = if backend == crate::settings::BoxBackend::Codex {
-        "danger-full-access; outer box enforces mounts"
-    } else {
-        "permission bypass; outer box enforces mounts; Claude trial remains required"
-    };
+    let inner_sandbox = backend.metadata().inner_sandbox;
     Ok(
         json!({"verdict":"passed","container_options":required,"root":"read-only","template":"read-only","writable_leaves":leaves,"worker_uid":worker_uid,"network":"none; vendor socket through read-only proxy mount","inner_sandbox":inner_sandbox,"runtime_argv_sha256":runtime_argv_sha256}),
     )
@@ -1718,12 +1717,11 @@ impl Plan {
                 "mountpoint",
             )?;
         }
-        // Claude's token-only credential form is measured by its adapter trial;
-        // no guessed credential file or owner sign-in is part of this layout.
-        if backend == crate::settings::BoxBackend::Codex {
+        // Only a backend whose row requests a pre-created projection gets one.
+        if let Some(projection) = backend.metadata().projection.filter(|file| file.precreate) {
             row(
                 &mut rows,
-                home.join(".codex/auth.json"),
+                home.join(backend.state_leaf()).join(projection.name),
                 worker_uid,
                 worker_uid,
                 0o600,
@@ -2151,26 +2149,29 @@ impl Plan {
             .map(String::from),
         );
         args.push(image_digest.clone());
-        if backend == crate::settings::BoxBackend::Codex {
-            args.push("/home/worker/.local/bin/codex".into());
-            args.extend(backend_argv.iter().skip(1).cloned());
-            args.extend(["exec", "--json", "--sandbox"].map(String::from));
-            args.push(settings.sandbox_mode.clone());
-            args.extend(
-                [
-                    "--skip-git-repo-check",
-                    "-C",
-                    "/home/worker/.cache/work",
-                    "-o",
-                    "/home/worker/.cache/work/last-message.md",
-                ]
-                .map(String::from),
-            );
-            args.push("-".into());
-        } else {
-            args.push("/home/worker/.local/bin/claude".into());
-            args.extend(backend_argv.iter().skip(1).cloned());
-            args.extend(CLAUDE_PRINT_ARGUMENTS.map(String::from));
+        match backend.metadata().runtime_form {
+            crate::settings::RuntimeForm::CodexExec => {
+                args.push("/home/worker/.local/bin/codex".into());
+                args.extend(backend_argv.iter().skip(1).cloned());
+                args.extend(["exec", "--json", "--sandbox"].map(String::from));
+                args.push(settings.sandbox_mode.clone());
+                args.extend(
+                    [
+                        "--skip-git-repo-check",
+                        "-C",
+                        "/home/worker/.cache/work",
+                        "-o",
+                        "/home/worker/.cache/work/last-message.md",
+                    ]
+                    .map(String::from),
+                );
+                args.push("-".into());
+            }
+            crate::settings::RuntimeForm::ClaudePrint => {
+                args.push("/home/worker/.local/bin/claude".into());
+                args.extend(backend_argv.iter().skip(1).cloned());
+                args.extend(CLAUDE_PRINT_ARGUMENTS.map(String::from));
+            }
         }
         let inventory = mount_inventory(&mounts, &rows, &mount_source_rows)?;
         let vendor_hosts = settings
@@ -2194,7 +2195,7 @@ impl Plan {
                         .join("sockets")
                         .as_path()
         });
-        let mut document = json!({"backend":backend.name(),"door_floor":door_floor,"driver_bin": path(driver_bin)?, "driver_argv": settings.driver_argv, "driver_dir": path(&driver_dir)?, "entry_bin": path(entry_bin)?, "environment": env, "home": path(&home)?, "image_digest": image_digest, "letter": path(&letter)?, "loop": loop_name, "mounts": mounts, "mount_sources":mount_source_rows, "mount_inventory": inventory, "owner_refresh_hosts": [crate::credential::REFRESH_HOST], "path_measurement": "provisional; make-home reports actual", "paths": rows, "resources":{"memory_bytes":resources.memory_bytes,"pids_max":resources.pids_max,"cpu_shares":resources.cpu_shares,"cpu_weight_requested":resources.cpu_weight_requested()}, "run": run, "runtime_argv": args, "runtime_measurement": "provisional; launch must probe", "sandbox_mode":settings.sandbox_mode,"source_measurement": "provisional; owner install and launch must verify image, driver, template and sockets", "template_measurement": "provisional; owner install must verify", "vendor_hosts":vendor_hosts,"worker_uid": worker_uid, "worker_uid_allocation": "provisional-first-slot; launch must reserve"});
+        let mut document = json!({"backend":backend.name(),"door_floor":door_floor,"driver_bin": path(driver_bin)?, "driver_argv": settings.driver_argv, "driver_dir": path(&driver_dir)?, "entry_bin": path(entry_bin)?, "environment": env, "home": path(&home)?, "image_digest": image_digest, "letter": path(&letter)?, "loop": loop_name, "mounts": mounts, "mount_sources":mount_source_rows, "mount_inventory": inventory, "owner_refresh_hosts": backend.metadata().owner_refresh_hosts, "path_measurement": "provisional; make-home reports actual", "paths": rows, "resources":{"memory_bytes":resources.memory_bytes,"pids_max":resources.pids_max,"cpu_shares":resources.cpu_shares,"cpu_weight_requested":resources.cpu_weight_requested()}, "run": run, "runtime_argv": args, "runtime_measurement": backend.metadata().runtime_measurement, "sandbox_mode":settings.sandbox_mode,"source_measurement": "provisional; owner install and launch must verify image, driver, template and sockets", "template_measurement": "provisional; owner install must verify", "vendor_hosts":vendor_hosts,"worker_uid": worker_uid, "worker_uid_allocation": "provisional-first-slot; launch must reserve"});
         if let Some(seconds) = settings.attempt_wall_seconds()? {
             document["attempt_wall_seconds"] = json!(seconds);
         }
@@ -2204,12 +2205,6 @@ impl Plan {
             document["door"]["mirror_ref"] = json!(format!("refs/heads/lane/{run}"));
         }
         document["box_gate"] = box_gate(&document)?;
-        if backend == crate::settings::BoxBackend::Claude {
-            document["owner_refresh_hosts"] = json!([]);
-            document["runtime_measurement"] = json!(
-                "provisional vector; Claude credential and trial acceptance remain unavailable"
-            );
-        }
         verify_home_layout(&document)?;
         if include_door && installed_roots && !document["door"].is_object() {
             let service = home_root
@@ -2304,27 +2299,30 @@ impl Plan {
         let argv = self.document["runtime_argv"]
             .as_array_mut()
             .ok_or_else(|| LaneError::input("plan-json", "runtime argv is absent"))?;
-        if backend == crate::settings::BoxBackend::Codex {
-            let exec = argv
-                .iter()
-                .position(|word| word == "exec")
-                .ok_or_else(|| LaneError::input("plan-json", "Codex exec is absent"))?;
-            argv.splice(
-                (exec + 1)..=exec,
-                [
-                    json!("-m"),
+        match backend.metadata().runtime_form {
+            crate::settings::RuntimeForm::CodexExec => {
+                let exec = argv
+                    .iter()
+                    .position(|word| word == "exec")
+                    .ok_or_else(|| LaneError::input("plan-json", "Codex exec is absent"))?;
+                argv.splice(
+                    (exec + 1)..=exec,
+                    [
+                        json!("-m"),
+                        json!(model),
+                        json!("-c"),
+                        json!(format!("model_reasoning_effort={effort}")),
+                    ],
+                );
+            }
+            crate::settings::RuntimeForm::ClaudePrint => {
+                argv.extend([
+                    json!("--model"),
                     json!(model),
-                    json!("-c"),
-                    json!(format!("model_reasoning_effort={effort}")),
-                ],
-            );
-        } else {
-            argv.extend([
-                json!("--model"),
-                json!(model),
-                json!("--effort"),
-                json!(effort),
-            ]);
+                    json!("--effort"),
+                    json!(effort),
+                ]);
+            }
         }
         self.document["model_selection"] = selection.clone();
         self.document["box_gate"] = box_gate(&self.document)?;

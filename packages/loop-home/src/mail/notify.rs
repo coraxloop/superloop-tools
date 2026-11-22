@@ -459,6 +459,22 @@ mod tests {
     use super::super::directory::bounded;
     use super::*;
     use std::process::Command;
+
+    fn event(id: i32, mask: u32, name: &[u8]) -> Vec<u8> {
+        let length = (name.len() + 3) & !3;
+        let mut bytes = id.to_ne_bytes().to_vec();
+        bytes.extend(mask.to_ne_bytes());
+        bytes.extend([0_u8; 4]);
+        bytes.extend(
+            u32::try_from(length)
+                .expect("fixture event length fits")
+                .to_ne_bytes(),
+        );
+        bytes.extend(name);
+        bytes.resize(16 + length, 0);
+        bytes
+    }
+
     /// ´claim:loophome:mail-notifications-wake-for-rename-without-a-scan´
     /// ´test:unit:mail-notifications-wake-for-rename-without-a-scan´
     #[test]
@@ -756,14 +772,28 @@ mod tests {
                 Some(Address::parse("alpha").expect("sender")),
             )
             .expect("outbox watch");
+        assert!(
+            !notifications.degraded(),
+            "generation fixture requires a working notification instance and both watches"
+        );
+        let source = *notifications
+            .paths
+            .get(&root)
+            .expect("source watch required");
+        let configuration = *notifications
+            .paths
+            .get(&path)
+            .expect("configuration watch required");
         let generation = notifications.configuration();
-        std::fs::write(root.join("beta.01.letter"), b"source").expect("source");
-        notifications.wait(Duration::ZERO).expect("source changes");
+        let changes = notifications
+            .decode(&event(source, libc::IN_CLOSE_WRITE, b"beta.01.letter\0"))
+            .expect("source event");
+        assert!(matches!(changes.as_slice(), [Change::Outbox(_, _, _)]));
         assert_eq!(notifications.configuration(), generation);
-        std::fs::write(&path, b"after").expect("configuration change");
-        notifications
-            .wait(Duration::ZERO)
-            .expect("configuration changes");
+        let changes = notifications
+            .decode(&event(configuration, libc::IN_CLOSE_WRITE, b""))
+            .expect("configuration event");
+        assert!(matches!(changes.as_slice(), [Change::Reconcile]));
         assert!(notifications.configuration() > generation);
         let generation = notifications.configuration();
         let mut overflow = (-1_i32).to_ne_bytes().to_vec();

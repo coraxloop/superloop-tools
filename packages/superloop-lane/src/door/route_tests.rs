@@ -40,8 +40,8 @@ fn door_workspace_request_binds_protected_grant_and_raw_wire() {
     let wire = serde_json::to_vec(&envelope).expect("wire");
     let admitted = workspace_request(&runs, &registration, owner, "fixture-node", &wire)
         .expect("bound request");
-    assert_eq!(admitted.envelope, envelope);
-    assert_eq!(admitted.grant, grant);
+    assert_eq!(admitted.envelope(), &envelope);
+    assert_eq!(admitted.grant(), &grant);
 
     let mut changed = envelope;
     changed.grant_digest = "0".repeat(64);
@@ -85,6 +85,122 @@ fn door_workspace_request_binds_protected_grant_and_raw_wire() {
             .kind,
         "door-workspace-unregistered"
     );
+}
+
+/// ´test:unit:door-workspace-request-refuses-changed-context-and-reservation´
+#[test]
+fn door_workspace_request_refuses_changed_context_and_reservation() {
+    use execute_command::workspace::Envelope;
+    let fixture = tempfile::tempdir().expect("workspace reservation fixture");
+    let runs: OwnedFd = File::open(fixture.path()).expect("runs root").into();
+    let registration = Registration {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        worker_uid: 3000,
+        loop_uid: 41000,
+        scope: Scope::Work,
+        mirror_ref: "refs/heads/lane/R".into(),
+    };
+    let owner = nix::unistd::Uid::effective().as_raw();
+    let path = crate::launch::reservation_path(fixture.path(), "R");
+    let mut saved = json!({"schema":1,"phase":"started","loop":"alpha","run":"R",
+        "worker_uid":3000,"door_scope":"work","plan":{"loop":"alpha","run":"R",
+        "compute_workspace":crate::plan::fixture_workspace_snapshot()}});
+    crate::launch::publish_reservation(&path, &saved).expect("protected reservation");
+    let grant = crate::plan::workspace_snapshot(&saved["plan"])
+        .expect("snapshot")
+        .expect("grant")
+        .grant;
+    let envelope = Envelope::decode(json!({"schema":3,"grant_digest":grant.digest().unwrap(),
+        "cwd":[],"execution":{"kind":"Argv","words":[b"/usr/bin/true".to_vec()]},
+        "env_additions":[],"deadline_ms":1000}))
+    .expect("fictional envelope");
+    let wire = serde_json::to_vec(&envelope).expect("wire");
+
+    for (field, value) in [("phase", json!("settled")), ("worker_uid", json!(3001))] {
+        let previous = saved[field].clone();
+        saved[field] = value;
+        crate::launch::publish_reservation(&path, &saved).expect("changed reservation");
+        assert_eq!(
+            workspace_request(&runs, &registration, owner, "fixture-node", &wire)
+                .err()
+                .expect("context mismatch")
+                .kind,
+            "door-workspace-context-differs"
+        );
+        saved[field] = previous;
+    }
+    crate::launch::publish_reservation(&path, &saved).expect("restored reservation");
+
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o644))
+        .expect("unprotected reservation mode");
+    let unreadable = workspace_request(&runs, &registration, owner, "fixture-node", &wire)
+        .err()
+        .expect("unreadable reservation");
+    assert_eq!(unreadable.kind, "door-workspace-context-differs");
+    assert!(unreadable.detail.contains("checkout-record"));
+    assert!(unreadable.detail.contains("mode"));
+    std::fs::remove_file(&path).expect("remove reservation");
+    std::os::unix::fs::symlink(fixture.path(), &path).expect("replace reservation with symlink");
+    let replaced = workspace_request(&runs, &registration, owner, "fixture-node", &wire)
+        .err()
+        .expect("replaced reservation");
+    assert_eq!(replaced.kind, "door-workspace-context-differs");
+    assert!(replaced.detail.contains("checkout-record"));
+}
+
+/// ´test:unit:door-workspace-request-refuses-review-and-malformed-protected-plan´
+#[test]
+fn door_workspace_request_refuses_review_and_malformed_protected_plan() {
+    use execute_command::workspace::Envelope;
+    let fixture = tempfile::tempdir().expect("workspace reservation fixture");
+    let runs: OwnedFd = File::open(fixture.path()).expect("runs root").into();
+    let registration = Registration {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        worker_uid: 3000,
+        loop_uid: 41000,
+        scope: Scope::Work,
+        mirror_ref: "refs/heads/lane/R".into(),
+    };
+    let owner = nix::unistd::Uid::effective().as_raw();
+    let path = crate::launch::reservation_path(fixture.path(), "R");
+    let mut saved = json!({"schema":1,"phase":"started","loop":"alpha","run":"R",
+        "worker_uid":3000,"door_scope":"review","plan":{"loop":"alpha","run":"R",
+        "compute_workspace":crate::plan::fixture_workspace_snapshot()}});
+    crate::launch::publish_reservation(&path, &saved).expect("review reservation");
+    let grant = crate::plan::workspace_snapshot(&saved["plan"])
+        .expect("snapshot")
+        .expect("grant")
+        .grant;
+    let envelope = Envelope::decode(json!({"schema":3,"grant_digest":grant.digest().unwrap(),
+        "cwd":[],"execution":{"kind":"Argv","words":[b"/usr/bin/true".to_vec()]},
+        "env_additions":[],"deadline_ms":1000}))
+    .expect("fictional envelope");
+    let wire = serde_json::to_vec(&envelope).expect("wire");
+    let mut review = registration.clone();
+    review.scope = Scope::Review;
+    let refusal = workspace_request(&runs, &review, owner, "fixture-node", &wire)
+        .err()
+        .expect("review scope");
+    assert_eq!(refusal.kind, "door-workspace-context-differs");
+    assert!(refusal.detail.contains("work scope"));
+    workspace_request(&runs, &registration, owner, "fixture-node", &wire)
+        .expect("connection keeps its admitted work scope");
+
+    saved["door_scope"] = json!("work");
+    saved["plan"]["compute_workspace"]["digest"] = json!("0".repeat(64));
+    crate::launch::publish_reservation(&path, &saved).expect("malformed protected plan");
+    let malformed = workspace_request(&runs, &registration, owner, "fixture-node", &wire)
+        .err()
+        .expect("malformed plan");
+    assert_eq!(malformed.kind, "door-workspace-context-differs");
+    assert!(
+        malformed
+            .detail
+            .contains("protected workspace plan differs")
+    );
+    assert!(malformed.detail.contains("door-workspace-context-differs"));
 }
 
 fn route_wait<T>(

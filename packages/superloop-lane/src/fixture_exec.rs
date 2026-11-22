@@ -11,6 +11,13 @@ use std::process::{Child, Command};
 use std::process::{Output, Stdio};
 
 #[cfg(test)]
+pub fn test_image_command(selector: &str) -> Command {
+    let mut command = Command::new(std::env::current_exe().expect("test binary"));
+    command.args(["--exact", selector]);
+    command
+}
+
+#[cfg(test)]
 pub struct SharedLauncher(Child);
 
 #[cfg(test)]
@@ -175,14 +182,12 @@ mod tests {
         let Some(marker) = std::env::var_os("SUPERLOOP_HELD_WRITER_CASE") else {
             let fixture = tempfile::tempdir().expect("isolated case under TMPDIR");
             let marker = fixture.path().join("completed");
-            let output = Command::new(std::env::current_exe().expect("test binary"))
-                .args([
-                    "--exact",
-                    "fixture_exec::tests::fixture_spawn_retries_only_text_file_busy",
-                ])
-                .env("SUPERLOOP_HELD_WRITER_CASE", &marker)
-                .output()
-                .expect("isolated test process");
+            let output = super::test_image_command(
+                "fixture_exec::tests::fixture_spawn_retries_only_text_file_busy",
+            )
+            .env("SUPERLOOP_HELD_WRITER_CASE", &marker)
+            .output()
+            .expect("isolated test process");
             assert!(
                 output.status.success(),
                 "stdout: {}\nstderr: {}",

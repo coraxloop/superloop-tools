@@ -1101,6 +1101,130 @@ fn journal_reservation_binding_retains_custody() {
     fs::set_permissions(&retained, fs::Permissions::from_mode(0o700)).expect("restore mode");
 }
 
+/// ´claim:loophome:reply-designation-query-retains-custody´
+/// ´test:unit:journal-reply-designation-query-retains-custody´
+#[test]
+#[allow(clippy::too_many_lines)] // One fixture exercises all query custody boundaries.
+fn journal_reply_designation_query_retains_custody() {
+    let fixture = Fixture::new();
+    let path = fixture.0.join("journal");
+    fs::create_dir(&path).expect("journal directory");
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).expect("mode");
+    let mut journal = Journal::create(File::open(&path).expect("root")).expect("journal");
+    let outgoing = "beta.final-0123456789abcdef0123456789abcdef.letter";
+    for (time, sender, name, completed) in [
+        ("2026-01-01T00:00:00.000Z", "alpha+w", outgoing, true),
+        ("2026-01-01T00:00:00.001Z", "alpha+w", outgoing, false),
+        ("2026-01-01T00:00:00.002Z", "alpha+other", outgoing, true),
+        (
+            "2026-01-01T00:00:00.003Z",
+            "alpha+w",
+            "beta.progress.letter",
+            true,
+        ),
+        ("2026-01-01T00:00:00.004Z", "alpha+w", outgoing, false),
+    ] {
+        let instant = instant(time);
+        let mut item = record(&instant);
+        item.sender = sender.into();
+        item.recipient = "beta".into();
+        item.outgoing = name.into();
+        item.sent_name = format!("beta.{instant}.letter");
+        item.inbox_name = format!("{sender}.{instant}.letter");
+        journal.reserve(instant).expect("reserve");
+        journal.accept(&item).expect("accept");
+        if time == "2026-01-01T00:00:00.004Z" {
+            journal
+                .discard(&item.delivery, &present(&item), "restore original outbox")
+                .expect("discard same-name record");
+        }
+        if completed {
+            journal
+                .advance(
+                    &item.delivery,
+                    Phase::Sent,
+                    &present(&item),
+                    item.delivery.clone(),
+                )
+                .expect("sent");
+            journal
+                .advance(
+                    &item.delivery,
+                    Phase::Inbox,
+                    &Witness::Absent,
+                    item.delivery.clone(),
+                )
+                .expect("inbox");
+            journal
+                .advance(
+                    &item.delivery,
+                    Phase::Complete,
+                    &Witness::Absent,
+                    item.delivery.clone(),
+                )
+                .expect("complete");
+        }
+    }
+    let anchor = reservation_anchor(&path);
+    let before = reservation_state(&path);
+    let found = reply_designation_deliveries_beneath(&anchor, "alpha+w", "beta", outgoing)
+        .expect("query exact name");
+    assert_eq!(
+        found,
+        vec![
+            (first(), Phase::Complete),
+            (instant("2026-01-01T00:00:00.001Z"), Phase::Accepted)
+        ]
+    );
+    assert_eq!(
+        reservation_state(&path),
+        before,
+        "query writes no journal state"
+    );
+    assert_eq!(
+        reply_designation_deliveries_beneath(&anchor, "alpha+w", "beta", "beta.other.letter")
+            .expect("other name"),
+        Vec::new()
+    );
+    let invalid =
+        reply_designation_deliveries_beneath(&anchor, "alpha+w", "beta", "alpha.other.letter")
+            .expect_err("recipient mismatch");
+    assert!(invalid.to_string().contains("outgoing recipient"));
+    let retained = fixture.0.join("retained");
+    fs::rename(&path, &retained).expect("retain journal");
+    fs::create_dir(&path).expect("replacement");
+    fs::write(path.join("checkpoint.toml"), b"not a journal").expect("replacement sentinel");
+    assert_eq!(
+        reply_designation_deliveries_beneath(&anchor, "alpha+w", "beta", outgoing)
+            .expect("held anchor follows retained journal"),
+        found
+    );
+    for ordinal in 5..260 {
+        let time = instant(&format!("2026-01-01T00:00:01.{ordinal:03}Z"));
+        let mut item = record(&time);
+        item.sender = "alpha+w".into();
+        item.recipient = "beta".into();
+        item.outgoing = outgoing.into();
+        item.sent_name = format!("beta.{time}.letter");
+        item.inbox_name = format!("alpha+w.{time}.letter");
+        journal.reserve(time).expect("reserve matching record");
+        journal.accept(&item).expect("accept matching record");
+    }
+    let overflow = reply_designation_deliveries_beneath(&anchor, "alpha+w", "beta", outgoing)
+        .expect_err("257 matches refuse without a partial result");
+    assert!(
+        overflow.to_string().contains("query bound exceeded"),
+        "{overflow}"
+    );
+    fs::write(
+        retained.join("deliveries/2026-01-01T00:00:00.000Z.toml"),
+        b"corrupt record",
+    )
+    .expect("corrupt retained record");
+    reply_designation_deliveries_beneath(&anchor, "alpha+w", "beta", "beta.other.letter")
+        .expect_err("corrupt record refuses");
+}
+
 /// ´claim:loophome:journal-running-bytes-follow-writes-and-compaction´
 /// ´test:unit:journal-running-bytes-follow-writes-and-compaction´
 #[test]
