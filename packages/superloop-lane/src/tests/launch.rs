@@ -15,6 +15,28 @@ use crate::launch::{
 };
 use crate::settings::BoxBackend;
 
+pub(super) fn fixture_work_route(home: &Path) {
+    let config = home.join(".config/loops/alpha");
+    let node = home.join("node");
+    fs::create_dir_all(&node).expect("fixture node root");
+    fs::set_permissions(&node, fs::Permissions::from_mode(0o700)).expect("node root mode");
+    let files = [
+        ("door-compute-registration.json", json!({"schema":1,"loop":"alpha",
+            "alias":"fixture","mirror_root":"~/mirrors","node_root":node,
+            "key_path":config.join("door-key")}).to_string()),
+        ("door-node-registration.json", json!({"schema":1,"loop":"alpha",
+            "alias":"fixture","node":"fixture-node","address":"fixture.invalid","port":22,
+            "user":"fixture","host_key":"ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}).to_string()),
+        ("door-known_hosts", "fixture.invalid ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\n".to_owned()),
+        ("door-ssh_config", format!("# Registered host key: ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA\nHost fixture\n  HostName fixture.invalid\n  Port 22\n  User fixture\n  UserKnownHostsFile {}\n  GlobalKnownHostsFile /dev/null\n  StrictHostKeyChecking yes\n  UpdateHostKeys no\n  BatchMode yes\n  ServerAliveInterval 30\n  ServerAliveCountMax 4\n", config.join("door-known_hosts").display())),
+    ];
+    for (name, bytes) in files {
+        let path = config.join(name);
+        fs::write(&path, bytes).expect("fixture route");
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600)).expect("route mode");
+    }
+}
+
 // These fixtures install mode-0550 template directories; close must restore write access.
 struct ProtectedRoot(Option<TempDir>);
 
@@ -1768,6 +1790,7 @@ fn full_launch_preview_fixture(claude_preview: bool) {
     .expect("door generation file");
     fs::set_permissions(&door_generation, fs::Permissions::from_mode(0o600))
         .expect("door generation mode");
+    fixture_work_route(home);
     let mut request = LaunchRequest {
         backend: None,
         loop_name: "alpha".into(),
@@ -2809,6 +2832,7 @@ fn proxy_refresh_preserves_live_helper_pins() {
             private_report
         ),
     );
+    fixture_work_route(home);
     let launch = LaunchRequest {
         backend: None,
         loop_name: "alpha".into(),

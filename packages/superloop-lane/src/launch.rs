@@ -4000,6 +4000,9 @@ fn run_with_program(
     let (_admission, mut generation_guard) =
         crate::install::lock_launch_generation(&config, request.dry_run)?;
     admission::ensure_open(&config, caller.0)?;
+    if request.door_scope == crate::door::Scope::Work {
+        door_scope::work_route(&config, &request.loop_name, caller.0)?;
+    }
     let (mut plan, settings) = if request.dry_run {
         crate::load_launch_preview_plan(
             owner_home,

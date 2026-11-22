@@ -10,6 +10,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Build the unselected door half of the workspace executor call: the protected route's node name binds the grant before SSH, the door composes and checks protocol-one frames over the constant node entry, maps node endings by reason into typed door results, and retains the entry release and incomplete output as evidence (``proto:superlooplane:workspace-executor-call``). Compatibility: no serving caller uses this adapter, so no request record, reply or operator step changes; the node entry and the node-named route registration installed with 0.10.0 are what a later caller uses, and operations rehearses the installed entry over the registered route before any declared workspace run is activated.
 
+### Fixed
+
+- Refuse a first `launch --door-scope work` without the door's complete registered route, with the same `door-scope-route` remedy as `set-door-scope` (`dec:door:the-door-is-measured-against-the-unmediated-host-worker`). Compatibility: existing records and successful routes are unchanged; a work-scoped first launch that previously reached later preflight or reservation without a valid route now refuses before reservation. Review-scoped launches are unchanged.
+
+- Make `set-door-scope` say what to do next: a preparing run's refusal reads the run's preparation lease, waiting while a launch holds it, naming the retirement preview when it is unheld and its missing-lease confirmation when it is absent, and inferring nothing when it cannot be measured; a pending whole-record rewrite refuses with its resume; and a `work` target is read through the door's own route loader and given the registered node alias, mirror path, run ref and clone remote address (`dec:door:the-door-is-measured-against-the-unmediated-host-worker`). Compatibility: reservations and history keep their form, and no door restart or record rewrite is needed; a pending rewrite, or a missing or malformed registered route for a change to `work`, now refuses before the change, naming its resume or the registration it needs, where the command previously could proceed.
+
 ## [0.10.0] - 2026-11-22
 
 ### Added
