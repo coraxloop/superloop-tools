@@ -428,6 +428,7 @@ type Completion<'a> = dyn Fn(&Value) -> Result<(), LaneError> + 'a;
 #[derive(Clone)]
 pub(super) struct HostRunner {
     alias: String,
+    node: AuthenticatedNode,
     ssh_options: Vec<String>,
     ssh_config_sha256: String,
     mirror_root: String,
@@ -437,6 +438,21 @@ pub(super) struct HostRunner {
     compute_wrapper: Option<String>,
     compute_environment: Option<Value>,
     compute_deadlines: Vec<super::config::ComputeDeadline>,
+}
+
+/// The node name obtained only while verifying the protected route registration.
+#[derive(Clone)]
+pub(super) struct AuthenticatedNode(String);
+
+impl AuthenticatedNode {
+    pub(super) fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fixture_node(name: &str) -> AuthenticatedNode {
+    AuthenticatedNode(name.to_owned())
 }
 
 fn parse_compute_wrapper(value: &Value) -> Result<Option<String>, LaneError> {
@@ -517,6 +533,41 @@ fn parse_compute_environment(value: &Value) -> Result<Option<Value>, LaneError> 
 }
 
 impl HostRunner {
+    /// Execute only a request already bound to its allowance and this route.
+    /// The serving caller is added in the following W3 cut.
+    #[allow(dead_code)]
+    pub(super) fn run_workspace(
+        &self,
+        request: &super::WorkspaceRequest,
+        allowance: &super::WorkspaceAllowance,
+        request_id: &str,
+        stop: &std::sync::atomic::AtomicBool,
+        lifetime: Instant,
+    ) -> Result<super::workspace_adapter::WorkspaceResult, LaneError> {
+        let call = super::workspace_adapter::WorkspaceCall::compose(
+            request,
+            allowance,
+            self.authenticated_node(),
+            request_id,
+        )?;
+        super::workspace_adapter::run_command(&call, self.workspace_command(), stop, lifetime)
+    }
+
+    /// Run the installed node entry over this verified host route. Request bytes
+    /// travel only in the framed standard input, never in the SSH command.
+    pub(super) fn workspace_command(&self) -> Command {
+        self.ssh_command(
+            Path::new("/usr/bin/ssh"),
+            "/usr/local/libexec/superloop/superloop-lane-node-exec",
+            false,
+            Some(20),
+        )
+    }
+
+    pub(super) const fn authenticated_node(&self) -> &AuthenticatedNode {
+        &self.node
+    }
+
     pub(super) fn with_compute_deadlines(
         mut self,
         forms: &[super::config::ComputeDeadline],
@@ -630,7 +681,14 @@ impl HostRunner {
             })?;
         let pin = read_owner_leaf_optional(directory, "door-ssh_config", owner)?;
         after_pin();
-        crate::door_node::verify(directory, config, loop_name, alias, pin.as_deref(), owner)?;
+        let node = AuthenticatedNode(crate::door_node::verify(
+            directory,
+            config,
+            loop_name,
+            alias,
+            pin.as_deref(),
+            owner,
+        )?);
         let pin = pin.ok_or_else(|| {
             LaneError::input("door-node-derived-drift", "door-ssh_config is absent")
         })?;
@@ -647,6 +705,7 @@ impl HostRunner {
             .ok_or_else(|| LaneError::input("door-compute-registration", "key path is invalid"))?;
         Ok(Self {
             alias: alias.to_owned(),
+            node,
             ssh_options,
             ssh_config_sha256,
             mirror_root: mirror_root.to_owned(),
@@ -2572,6 +2631,7 @@ mod tests {
         let host = HostRunner {
             compute_deadlines: Vec::new(),
             alias: "fixture".to_owned(),
+            node: super::AuthenticatedNode("fixture-node".to_owned()),
             ssh_options: Vec::new(),
             ssh_config_sha256: String::new(),
             mirror_root: "/mirrors".to_owned(),
@@ -3156,6 +3216,13 @@ mod tests {
             nix::unistd::Uid::effective().as_raw(),
         )
         .expect("registered route");
+        assert_eq!(runner.node.name(), "fixture-node");
+        assert_eq!(
+            runner.workspace_command().get_args().last(),
+            Some(std::ffi::OsStr::new(
+                "/usr/local/libexec/superloop/superloop-lane-node-exec"
+            ))
+        );
         assert_eq!(runner.probe_route()["key_path"], route["key_path"]);
         let owner = nix::unistd::Uid::effective().as_raw();
         fs::write(
@@ -3666,6 +3733,7 @@ mod tests {
             let route = HostRunner {
                 compute_deadlines: Vec::new(),
                 alias: "fixture".to_owned(),
+                node: super::AuthenticatedNode("fixture-node".to_owned()),
                 ssh_options: Vec::new(),
                 ssh_config_sha256: String::new(),
                 mirror_root: "~/mirrors".to_owned(),

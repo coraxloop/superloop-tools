@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Build the unselected door half of the workspace executor call: the protected route's node name binds the grant before SSH, the door composes and checks protocol-one frames over the constant node entry, maps node endings by reason into typed door results, and retains the entry release and incomplete output as evidence (``proto:superlooplane:workspace-executor-call``). Compatibility: no serving caller uses this adapter, so no request record, reply or operator step changes; the node entry and the node-named route registration installed with 0.10.0 are what a later caller uses, and operations rehearses the installed entry over the registered route before any declared workspace run is activated.
+
 ## [0.10.0] - 2026-11-22
 
 ### Added

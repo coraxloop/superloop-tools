@@ -23,6 +23,8 @@ mod agent_probes;
 pub mod config;
 mod lifetime;
 pub mod metadata;
+#[allow(dead_code)] // The serving caller is the next W3 cut.
+mod workspace_adapter;
 pub use workspace::{WorkspaceAllowance, WorkspaceRequest, workspace_request};
 
 /// Format the final door reply for the SSH command boundary.
@@ -986,6 +988,7 @@ mod workspace {
     pub struct WorkspaceRequest {
         envelope: execute_command::workspace::Envelope,
         grant: execute_command::workspace::Grant,
+        placement: Option<crate::placement::Placement>,
     }
 
     impl WorkspaceRequest {
@@ -999,6 +1002,12 @@ mod workspace {
         #[must_use]
         pub const fn grant(&self) -> &execute_command::workspace::Grant {
             &self.grant
+        }
+
+        /// Owner-held placement captured with this reservation, if declared.
+        #[must_use]
+        pub const fn placement(&self) -> Option<&crate::placement::Placement> {
+            self.placement.as_ref()
         }
     }
 
@@ -1049,14 +1058,14 @@ mod workspace {
                 format!("protected workspace plan differs: {}", error.line()),
             )
         })?;
-        let grant = snapshot
-            .ok_or_else(|| {
-                LaneError::input(
-                    "door-workspace-unregistered",
-                    "no protected workspace grant",
-                )
-            })?
-            .grant;
+        let snapshot = snapshot.ok_or_else(|| {
+            LaneError::input(
+                "door-workspace-unregistered",
+                "no protected workspace grant",
+            )
+        })?;
+        let placement = crate::placement::snapshot(&reservation["plan"], Some(&snapshot))?;
+        let grant = snapshot.grant;
         execute_command::workspace::admit(
             &envelope,
             Some(&grant),
@@ -1065,7 +1074,11 @@ mod workspace {
             node,
         )
         .map_err(|error| LaneError::input(error.kind, error.detail))?;
-        Ok(WorkspaceRequest { envelope, grant })
+        Ok(WorkspaceRequest {
+            envelope,
+            grant,
+            placement,
+        })
     }
 
     /// An allow bound to one exact request and to the custody that answered it.
@@ -1213,6 +1226,12 @@ mod workspace {
                 AllowanceOrigin::Judgement(id) => json!({"source":"judgement","request_id":id}),
             }
         }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_allowance(request: &WorkspaceRequest) -> WorkspaceAllowance {
+        WorkspaceAllowance::bind(request, AllowanceOrigin::Store(json!({"fixture":true})))
+            .expect("fictional allowance")
     }
 
     impl WorkspaceRequest {

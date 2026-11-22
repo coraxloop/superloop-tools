@@ -124,7 +124,7 @@ pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, frame: &T) -> io::Res
 }
 
 #[allow(unsafe_code)]
-fn write_frame_before<W: AsRawFd, T: Serialize>(
+pub(crate) fn write_frame_before<W: AsRawFd, T: Serialize>(
     writer: &W,
     frame: &T,
     deadline: Instant,
@@ -215,6 +215,83 @@ pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Value> {
     }
     let mut bytes = vec![0_u8; size];
     reader.read_exact(&mut bytes)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| refusal("door-workspace-protocol-refusal", error))
+}
+
+/// Read a route frame before one outer deadline, including a trickling body.
+/// # Errors
+/// Refuses a closed, stalled, oversized or malformed frame.
+#[allow(unsafe_code)]
+pub(crate) fn read_frame_before<R: Read + AsRawFd>(
+    reader: &mut R,
+    deadline: Instant,
+    stop: &AtomicBool,
+) -> io::Result<Value> {
+    let fd = reader.as_raw_fd();
+    // SAFETY: the caller holds this descriptor through the read.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut exact = |bytes: &mut [u8]| -> io::Result<()> {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if stop.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "door request stopped",
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "node frame deadline",
+                ));
+            }
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = i32::try_from(remaining.as_millis().min(200)).unwrap_or(200);
+            // SAFETY: poll observes the caller-held descriptor.
+            let ready = unsafe { libc::poll(&raw mut poll, 1, timeout) };
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if ready == 0 {
+                continue;
+            }
+            match reader.read(&mut bytes[offset..]) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+                Ok(count) => offset += count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    };
+    let mut length = [0_u8; 4];
+    exact(&mut length)?;
+    let size = usize::try_from(u32::from_be_bytes(length)).map_err(io::Error::other)?;
+    if size == 0 || size > MAX_FRAME_BYTES {
+        return Err(refusal(
+            "door-workspace-protocol-refusal",
+            "frame length differs",
+        ));
+    }
+    let mut bytes = vec![0_u8; size];
+    exact(&mut bytes)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| refusal("door-workspace-protocol-refusal", error))
 }
@@ -756,4 +833,4 @@ fn serve_with_limits<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
 
 #[cfg(test)]
 #[path = "workspace_node_tests.rs"]
-mod tests;
+pub(crate) mod tests;

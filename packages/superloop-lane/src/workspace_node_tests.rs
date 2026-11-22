@@ -2,19 +2,20 @@ use super::*;
 use execute_command::workspace::{Execution, Grant};
 use std::fs;
 use std::net::Shutdown;
+use std::os::fd::FromRawFd as _;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
 
-struct Fixture {
-    root: tempfile::TempDir,
-    identity: PathBuf,
-    grant: Grant,
-    placement: Value,
+pub struct Fixture {
+    pub(crate) root: tempfile::TempDir,
+    pub(crate) identity: PathBuf,
+    pub(crate) grant: Grant,
+    pub(crate) placement: Value,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let root = tempfile::tempdir().unwrap();
         let workspace = root.path().join("work");
         fs::create_dir(&workspace).unwrap();
@@ -42,7 +43,7 @@ impl Fixture {
         }
     }
 
-    fn call(&self, execution: Execution) -> NodeCall {
+    pub(crate) fn call(&self, execution: Execution) -> NodeCall {
         let envelope = Envelope {
             schema: 3,
             grant_digest: self.grant.digest().unwrap(),
@@ -62,7 +63,7 @@ impl Fixture {
         }
     }
 
-    fn owner() -> u32 {
+    pub(crate) fn owner() -> u32 {
         nix::unistd::Uid::effective().as_raw()
     }
 
@@ -120,6 +121,37 @@ impl Fixture {
         write_frame(&mut door_input, call).unwrap();
         (door_input, door_output, thread)
     }
+}
+
+/// Test-only process front: the installed binary keeps its fixed identity path.
+/// The parent passes protocol descriptors 3 and 4, clear of libtest's stdout.
+/// ´test:unit:workspace-node-process-entry-fixture´
+#[test]
+#[allow(unsafe_code)]
+fn workspace_node_process_entry_fixture() {
+    if std::env::var_os("SUPERLOOP_NODE_PROCESS_FIXTURE").is_none() {
+        return;
+    }
+    // SAFETY: the exact parent fixture passes two owned descriptors at these numbers.
+    let input = unsafe { File::from_raw_fd(3) };
+    // SAFETY: descriptor 4 is distinct and owned by this child.
+    let output = unsafe { File::from_raw_fd(4) };
+    let identity = PathBuf::from(
+        std::env::var_os("SUPERLOOP_NODE_PROCESS_IDENTITY").expect("fixture identity path"),
+    );
+    serve_with_limits(
+        input,
+        output,
+        &identity,
+        Fixture::owner(),
+        StreamBounds {
+            silence: Duration::from_secs(2),
+            output_limit: MAX_OUTPUT_BYTES,
+            write: Duration::from_secs(2),
+            drain: Duration::from_secs(2),
+        },
+    )
+    .expect("real node serving function");
 }
 
 fn argv(words: &[&str]) -> Execution {
