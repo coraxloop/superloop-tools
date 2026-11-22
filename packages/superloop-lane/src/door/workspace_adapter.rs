@@ -4,9 +4,9 @@ use std::fs::File;
 use std::io::{self, Read as _};
 use std::os::fd::AsRawFd;
 use std::os::unix::process::CommandExt as _;
-use std::process::{Child, Command};
-use std::sync::atomic::AtomicBool;
-use std::sync::mpsc;
+use std::process::{Child, ChildStderr, Command};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, mpsc};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -19,6 +19,7 @@ use crate::workspace_node::NodeCall;
 use crate::workspace_node::{read_frame_before, write_frame_before};
 
 use super::transport::AuthenticatedNode;
+use super::workspace::WorkspaceIntent;
 use super::{WorkspaceAllowance, WorkspaceRequest};
 
 fn refusal(kind: &'static str, detail: impl Into<String>) -> LaneError {
@@ -31,17 +32,33 @@ pub(super) struct WorkspaceCall {
     handle: String,
 }
 
+/// One already custodied authority to execute this exact request.
+#[derive(Clone, Copy)]
+pub(super) enum WorkspaceAdmission<'a> {
+    Allowance(&'a WorkspaceAllowance),
+    AllowModeIntent(&'a WorkspaceIntent),
+}
+
+impl WorkspaceAdmission<'_> {
+    fn check(&self, request: &WorkspaceRequest, id: &str) -> Result<(), LaneError> {
+        match self {
+            Self::Allowance(allowance) => allowance.check(request),
+            Self::AllowModeIntent(intent) => intent.check(request, id),
+        }
+    }
+}
+
 impl WorkspaceCall {
-    /// Compose one call only after checking the allowance against its owner-held request.
+    /// Compose one call only after checking its owner-held admission.
     /// # Errors
     /// Refuses a changed grant, missing placement, invalid id or unavailable randomness.
     pub(crate) fn compose(
         request: &WorkspaceRequest,
-        allowance: &WorkspaceAllowance,
+        admission: WorkspaceAdmission<'_>,
         node: &AuthenticatedNode,
         request_id: &str,
     ) -> Result<Self, LaneError> {
-        allowance.check(request)?;
+        admission.check(request, request_id)?;
         if request.grant().node != node.name() {
             return Err(refusal(
                 "door-workspace-context-differs",
@@ -156,6 +173,7 @@ pub(super) enum Ending {
     Complete,
     NodeDeadline,
     Interrupted(&'static str),
+    NothingRan(&'static str),
     OutputLimit,
     OutputIncomplete,
     Incomplete,
@@ -170,8 +188,27 @@ pub(super) struct WorkspaceResult {
     pub(crate) output_bytes: usize,
     pub(crate) output_incomplete: bool,
     pub(crate) build: BuildEvidence,
-    pub(crate) stdout: Vec<u8>,
-    pub(crate) stderr: Vec<u8>,
+    pub(crate) door_cause: Option<&'static str>,
+}
+
+/// Distinct child streams, never combined with route diagnostics.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum OutputChannel {
+    Stdout,
+    Stderr,
+}
+
+/// The serving caller owns bounded forwarding to its worker.
+pub(super) trait WorkspaceOutputSink {
+    /// Forward one already counted chunk before the request lifetime.
+    /// # Errors
+    /// Names a failed or timed-out worker write.
+    fn forward(
+        &mut self,
+        channel: OutputChannel,
+        bytes: &[u8],
+        deadline: Instant,
+    ) -> Result<(), LaneError>;
 }
 
 #[derive(Deserialize)]
@@ -226,6 +263,15 @@ impl WorkspaceResult {
                 ));
             }
         };
+        let ending = if terminal.steps.is_empty() && terminal.output_bytes == 0 {
+            match ending {
+                Ending::Interrupted(cause) => Ending::NothingRan(cause),
+                Ending::NodeDeadline => Ending::NothingRan("node-command-deadline"),
+                other => other,
+            }
+        } else {
+            ending
+        };
         if matches!(ending, Ending::Complete) && terminal.result.outcome == Outcome::Unknown {
             return Err(refusal(
                 "door-workspace-protocol-refusal",
@@ -240,8 +286,7 @@ impl WorkspaceResult {
             output_bytes: terminal.output_bytes,
             output_incomplete: terminal.output_incomplete,
             build,
-            stdout: Vec::new(),
-            stderr: Vec::new(),
+            door_cause: None,
         })
     }
 
@@ -250,6 +295,7 @@ impl WorkspaceResult {
             Ending::Complete => ("completed", None),
             Ending::NodeDeadline => ("interrupted", Some("node-command-deadline")),
             Ending::Interrupted(cause) => ("interrupted", Some(*cause)),
+            Ending::NothingRan(cause) => ("not-started", Some(*cause)),
             Ending::OutputLimit => ("refused", Some("output-limit")),
             Ending::OutputIncomplete => ("incomplete", Some("held-output")),
             Ending::Incomplete => ("unknown", Some("route-incomplete")),
@@ -257,7 +303,7 @@ impl WorkspaceResult {
         json!({"node_reason":self.node_reason,"entry_version":self.build.entry_version,
             "entry_version_differs":self.build.differs,"output_incomplete":self.output_incomplete,
             "output_bytes":self.output_bytes,"result":self.result,"steps":self.steps,
-            "ending":state,"cause":cause})
+            "ending":state,"cause":cause,"door_cause":self.door_cause})
     }
 }
 
@@ -266,11 +312,31 @@ fn io_refusal(error: &io::Error) -> LaneError {
 }
 
 const START_BOUND: Duration = Duration::from_secs(5);
+const ACK_BOUND: Duration = Duration::from_secs(30);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const NODE_DRAIN_AND_WRITE: Duration = Duration::from_secs(240);
 const FINAL_BOUND: Duration = Duration::from_secs(5);
 
+/// The door's own reason for setting the stop flag, retained beside node cause.
+#[derive(Clone, Copy)]
+pub(super) struct WorkspaceStop<'a> {
+    pub(crate) flag: &'a AtomicBool,
+    pub(crate) cause: &'static str,
+}
+
+#[derive(Clone, Copy)]
+struct DriverBounds {
+    lifetime: Instant,
+    heartbeat_interval: Duration,
+    output_limit: usize,
+}
+
 struct ChildGuard(Child);
+
+#[cfg(test)]
+thread_local! {
+    static LAST_ROUTE_GROUP: std::cell::Cell<i32> = const { std::cell::Cell::new(0) };
+}
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
@@ -280,9 +346,86 @@ impl Drop for ChildGuard {
     }
 }
 
+/// Drain route diagnostics without retaining their text or letting a full pipe
+/// block the route. The worker-visible result contains no route stderr.
+struct RouteStderrGuard {
+    stop: Arc<AtomicBool>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl RouteStderrGuard {
+    #[allow(unsafe_code)]
+    fn new(mut stderr: ChildStderr) -> Self {
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopped = Arc::clone(&stop);
+        let thread = thread::spawn(move || {
+            let mut bytes = [0_u8; 8192];
+            loop {
+                if stopped.load(Ordering::Acquire) {
+                    break;
+                }
+                let mut poll = libc::pollfd {
+                    fd: stderr.as_raw_fd(),
+                    events: libc::POLLIN | libc::POLLHUP,
+                    revents: 0,
+                };
+                // SAFETY: this thread owns stderr until poll returns.
+                let ready = unsafe { libc::poll(&raw mut poll, 1, 100) };
+                if ready < 0 {
+                    if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    break;
+                }
+                if ready > 0 {
+                    match stderr.read(&mut bytes) {
+                        Ok(0) => break,
+                        Ok(_) => {}
+                        Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                        Err(_) => break,
+                    }
+                }
+            }
+        });
+        Self {
+            stop,
+            thread: Some(thread),
+        }
+    }
+}
+
+impl Drop for RouteStderrGuard {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::Release);
+        if let Some(thread) = self.thread.take() {
+            let _joined = thread.join();
+        }
+    }
+}
+
 enum Control {
     Stop,
     Finish,
+}
+
+struct WriterGuard {
+    control: mpsc::Sender<Control>,
+    thread: Option<thread::JoinHandle<io::Result<()>>>,
+}
+
+impl WriterGuard {
+    fn stop(&self) {
+        let _sent = self.control.send(Control::Stop);
+    }
+}
+
+impl Drop for WriterGuard {
+    fn drop(&mut self) {
+        let _sent = self.control.send(Control::Finish);
+        if let Some(thread) = self.thread.take() {
+            let _joined = thread.join();
+        }
+    }
 }
 
 /// Run one already composed call over a route process. The host route supplies
@@ -292,7 +435,8 @@ enum Control {
 pub(super) fn run_command(
     call: &WorkspaceCall,
     mut command: Command,
-    stop: &AtomicBool,
+    sink: &mut impl WorkspaceOutputSink,
+    stop: WorkspaceStop<'_>,
     lifetime: Instant,
 ) -> Result<WorkspaceResult, LaneError> {
     command.process_group(0);
@@ -301,6 +445,9 @@ pub(super) fn run_command(
             .spawn()
             .map_err(|error| refusal("door-compute-tool-refusal", error.to_string()))?,
     );
+    #[cfg(test)]
+    LAST_ROUTE_GROUP.set(child.0.id().cast_signed());
+    let _route_stderr = child.0.stderr.take().map(RouteStderrGuard::new);
     let input = child
         .0
         .stdin
@@ -311,9 +458,21 @@ pub(super) fn run_command(
         .stdout
         .take()
         .ok_or_else(|| refusal("door-compute-tool-refusal", "route output is absent"))?;
-    let answer = run_stream(call, input, &mut output, stop, lifetime, HEARTBEAT_INTERVAL);
-    if answer.is_err() {
-        let settle = Instant::now() + Duration::from_millis(100);
+    let mut first_frame_seen = false;
+    let answer = run_stream(
+        call,
+        input,
+        &mut output,
+        sink,
+        stop,
+        DriverBounds {
+            lifetime,
+            heartbeat_interval: HEARTBEAT_INTERVAL,
+            output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
+        },
+        &mut first_frame_seen,
+    );
+    if answer.is_err() && !first_frame_seen {
         loop {
             if let Ok(Some(status)) = child.0.try_wait() {
                 if matches!(status.code(), Some(126 | 127)) {
@@ -324,7 +483,7 @@ pub(super) fn run_command(
                 }
                 break;
             }
-            if Instant::now() >= settle {
+            if Instant::now() >= lifetime {
                 break;
             }
             thread::sleep(Duration::from_millis(5));
@@ -342,18 +501,20 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
     call: &WorkspaceCall,
     input: I,
     output: &mut O,
-    stop: &AtomicBool,
-    lifetime: Instant,
-    heartbeat_interval: Duration,
+    sink: &mut impl WorkspaceOutputSink,
+    stop: WorkspaceStop<'_>,
+    bounds: DriverBounds,
+    first_frame_seen: &mut bool,
 ) -> Result<WorkspaceResult, LaneError> {
     write_frame_before(&input, call.frame(), Instant::now() + START_BOUND)
         .map_err(|error| io_refusal(&error))?;
     let first = read_frame_before(
         output,
-        lifetime.min(Instant::now() + Duration::from_secs(20)),
-        stop,
+        bounds.lifetime.min(Instant::now() + ACK_BOUND),
+        stop.flag,
     )
     .map_err(|error| io_refusal(&error))?;
+    *first_frame_seen = true;
     if first["type"] == "refusal" {
         let object = first.as_object().ok_or_else(|| {
             refusal(
@@ -403,7 +564,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
         let _sent = started_tx.send(start.as_ref().err().map(ToString::to_string));
         start?;
         loop {
-            match control_rx.recv_timeout(heartbeat_interval) {
+            match control_rx.recv_timeout(bounds.heartbeat_interval) {
                 Ok(Control::Stop) => {
                     let _sent = write_frame_before(
                         &input,
@@ -421,6 +582,10 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             }
         }
     });
+    let writer = WriterGuard {
+        control: control_tx,
+        thread: Some(writer),
+    };
     let started = started_rx.recv_timeout(START_BOUND).map_err(|error| {
         refusal(
             "door-workspace-protocol-refusal",
@@ -428,33 +593,43 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
         )
     })?;
     if let Some(error) = started {
-        let _joined = writer.join();
+        let no_stop = AtomicBool::new(false);
+        if let Ok(frame) = read_frame_before(
+            output,
+            bounds.lifetime.min(Instant::now() + START_BOUND),
+            &no_stop,
+        ) && frame["type"] == "terminal"
+        {
+            return WorkspaceResult::from_terminal(call, frame, build);
+        }
         return Err(refusal("door-workspace-protocol-refusal", error));
     }
-    let terminal_deadline = lifetime.min(
+    let terminal_deadline = bounds.lifetime.min(
         Instant::now()
             + Duration::from_millis(call.frame.envelope["deadline_ms"].as_u64().unwrap_or(0))
             + NODE_DRAIN_AND_WRITE
             + FINAL_BOUND,
     );
     let mut forwarded = 0_usize;
-    let mut stdout = Vec::new();
-    let mut stderr = Vec::new();
     let mut sent_stop = false;
     let mut frame_fault = None;
     let never_stop = AtomicBool::new(false);
     let terminal = loop {
-        let check_stop = if sent_stop { &never_stop } else { stop };
+        let check_stop = if sent_stop { &never_stop } else { stop.flag };
         let frame = match read_frame_before(output, terminal_deadline, check_stop) {
             Ok(frame) => frame,
             Err(error) if error.kind() == io::ErrorKind::Interrupted && !sent_stop => {
-                let _sent = control_tx.send(Control::Stop);
+                writer.stop();
                 sent_stop = true;
                 continue;
             }
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                frame_fault = Some("node output frame is malformed");
+                break None;
+            }
             Err(_) => {
                 if !sent_stop {
-                    let _sent = control_tx.send(Control::Stop);
+                    writer.stop();
                 }
                 break None;
             }
@@ -475,7 +650,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
                 forwarded = forwarded.checked_add(bytes.len()).ok_or_else(|| {
                     refusal("door-output-limit-refusal", "node output length overflow")
                 })?;
-                if forwarded > crate::workspace_node::MAX_OUTPUT_BYTES {
+                if forwarded > bounds.output_limit {
                     break None;
                 }
                 let bytes = bytes
@@ -488,11 +663,12 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
                             "node output byte differs",
                         )
                     })?;
-                if frame["type"] == "stdout" {
-                    stdout.extend_from_slice(&bytes);
+                let channel = if frame["type"] == "stdout" {
+                    OutputChannel::Stdout
                 } else {
-                    stderr.extend_from_slice(&bytes);
-                }
+                    OutputChannel::Stderr
+                };
+                sink.forward(channel, &bytes, bounds.lifetime)?;
             }
             _ => {
                 frame_fault = Some("node frame kind differs");
@@ -500,16 +676,15 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             }
         }
     };
-    let _sent = control_tx.send(Control::Finish);
-    let _joined = writer.join();
+    drop(writer);
     if let Some(detail) = frame_fault {
         return Err(refusal("door-workspace-protocol-refusal", detail));
     }
     let Some(terminal) = terminal else {
-        if forwarded > crate::workspace_node::MAX_OUTPUT_BYTES {
+        if forwarded > bounds.output_limit {
             return Err(refusal(
                 "door-output-limit-refusal",
-                "door output exceeded 16 MiB",
+                "door output exceeded its forwarding ceiling",
             ));
         }
         return Ok(WorkspaceResult {
@@ -525,8 +700,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             output_bytes: forwarded,
             output_incomplete: true,
             build,
-            stdout,
-            stderr,
+            door_cause: sent_stop.then_some(stop.cause),
         });
     };
     let mut result = WorkspaceResult::from_terminal(call, terminal, build)?;
@@ -536,8 +710,9 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             "node output count differs from forwarded bytes",
         ));
     }
-    result.stdout = stdout;
-    result.stderr = stderr;
+    if sent_stop {
+        result.door_cause = Some(stop.cause);
+    }
     Ok(result)
 }
 
@@ -548,8 +723,136 @@ mod tests {
     use std::os::unix::net::UnixStream;
     use std::process::Stdio;
 
+    #[derive(Default)]
+    struct Collected {
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+    }
+    impl WorkspaceOutputSink for Collected {
+        fn forward(
+            &mut self,
+            channel: OutputChannel,
+            bytes: &[u8],
+            _deadline: Instant,
+        ) -> Result<(), LaneError> {
+            match channel {
+                OutputChannel::Stdout => self.stdout.extend_from_slice(bytes),
+                OutputChannel::Stderr => self.stderr.extend_from_slice(bytes),
+            }
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Copy)]
+    enum MockOutput {
+        Ceiling,
+        CountMismatch,
+        Malformed,
+        TerminalBeforeStart,
+    }
+
+    fn mock_output(case: MockOutput) -> (Result<WorkspaceResult, LaneError>, Collected) {
+        let fixture = crate::workspace_node::tests::Fixture::new();
+        let frame = fixture.call(Execution::Argv {
+            words: vec![b"/bin/true".to_vec()],
+        });
+        let digest = canonical_digest(&frame).unwrap();
+        let call = WorkspaceCall {
+            frame,
+            handle: digest[..16].to_owned(),
+        };
+        let (door_input, mut node_input) = UnixStream::pair().unwrap();
+        let (mut node_output, mut door_output) = UnixStream::pair().unwrap();
+        let ack = json!({"schema":1,"type":"ack","request_id":call.frame.request_id,
+            "nonce":call.frame.nonce,"frame_handle":call.handle,
+            "entry_version":env!("CARGO_PKG_VERSION")});
+        let terminal = json!({"schema":1,"type":"terminal",
+            "request_id":call.frame.request_id,"nonce":call.frame.nonce,
+            "result":{"outcome":{"kind":"Exited","code":0},"wall_seconds":0.0,
+                "user_cpu_seconds":null,"system_cpu_seconds":null},
+            "steps":[{"outcome":{"kind":"Exited","code":0},"wall_seconds":0.0,
+                "user_cpu_seconds":null,"system_cpu_seconds":null}],
+            "output_bytes":1,"reason":"node-complete","output_incomplete":false});
+        let node = thread::spawn(move || {
+            let _call = crate::workspace_node::read_frame(&mut node_input).unwrap();
+            if matches!(case, MockOutput::TerminalBeforeStart) {
+                drop(node_input);
+                crate::workspace_node::write_frame(&mut node_output, &ack).unwrap();
+                let terminal = json!({"schema":1,"type":"terminal",
+                    "request_id":ack["request_id"],"nonce":ack["nonce"],
+                    "result":{"outcome":{"kind":"TimedOut"},"wall_seconds":0.0,
+                        "user_cpu_seconds":null,"system_cpu_seconds":null},
+                    "steps":[],"output_bytes":0,"reason":"node-stopped",
+                    "output_incomplete":false});
+                crate::workspace_node::write_frame(&mut node_output, &terminal).unwrap();
+                return;
+            }
+            crate::workspace_node::write_frame(&mut node_output, &ack).unwrap();
+            let _start = crate::workspace_node::read_frame(&mut node_input).unwrap();
+            let output = match case {
+                MockOutput::Ceiling => json!({"schema":1,"type":"stdout","bytes":[1,2,3,4,5]}),
+                MockOutput::CountMismatch => {
+                    json!({"schema":1,"type":"stdout","bytes":[1,2]})
+                }
+                MockOutput::Malformed => json!({"schema":1,"type":"stdout","bytes":"bad"}),
+                MockOutput::TerminalBeforeStart => unreachable!(),
+            };
+            crate::workspace_node::write_frame(&mut node_output, &output).unwrap();
+            if matches!(case, MockOutput::CountMismatch) {
+                crate::workspace_node::write_frame(&mut node_output, &terminal).unwrap();
+            }
+        });
+        let mut collected = Collected::default();
+        let answer = run_stream(
+            &call,
+            door_input,
+            &mut door_output,
+            &mut collected,
+            WorkspaceStop {
+                flag: &AtomicBool::new(false),
+                cause: "fixture-stop",
+            },
+            DriverBounds {
+                lifetime: Instant::now() + Duration::from_secs(5),
+                heartbeat_interval: Duration::from_secs(1),
+                output_limit: 4,
+            },
+            &mut false,
+        );
+        node.join().unwrap();
+        (answer, collected)
+    }
+
+    /// ´test:unit:workspace-adapter-refuses-output-ceiling-count-and-frame´
+    #[test]
+    fn workspace_adapter_refuses_output_ceiling_count_and_frame() {
+        for (case, kind) in [
+            (MockOutput::Ceiling, "door-output-limit-refusal"),
+            (MockOutput::CountMismatch, "door-workspace-protocol-refusal"),
+            (MockOutput::Malformed, "door-workspace-protocol-refusal"),
+        ] {
+            let (answer, collected) = mock_output(case);
+            assert_eq!(answer.err().unwrap().kind, kind);
+            if matches!(case, MockOutput::Ceiling) {
+                assert_eq!(collected.stdout, [] as [u8; 0]);
+            }
+        }
+    }
+
+    /// ´test:unit:workspace-adapter-terminal-precedes-closed-start-write´
+    #[test]
+    fn workspace_adapter_terminal_precedes_closed_start_write() {
+        let (answer, collected) = mock_output(MockOutput::TerminalBeforeStart);
+        let result = answer.expect("terminal frame wins over closed control channel");
+        assert_eq!(result.ending, Ending::NothingRan("stop"));
+        assert_eq!(collected.stdout, [] as [u8; 0]);
+    }
+
     #[allow(unsafe_code)]
-    fn process_fixture(identity: &std::path::Path) -> (UnixStream, UnixStream, ChildGuard) {
+    fn process_fixture(
+        identity: &std::path::Path,
+        silence: Duration,
+    ) -> (UnixStream, UnixStream, ChildGuard) {
         let (door_input, node_input) = UnixStream::pair().expect("call pipe");
         let (node_output, door_output) = UnixStream::pair().expect("reply pipe");
         door_output
@@ -566,6 +869,10 @@ mod tests {
             ])
             .env("SUPERLOOP_NODE_PROCESS_FIXTURE", "1")
             .env("SUPERLOOP_NODE_PROCESS_IDENTITY", identity)
+            .env(
+                "SUPERLOOP_NODE_PROCESS_SILENCE_MS",
+                silence.as_millis().to_string(),
+            )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -638,21 +945,91 @@ mod tests {
             frame,
             handle: digest[..16].to_owned(),
         };
-        let (input, mut output, mut child) = process_fixture(&fixture.identity);
+        let (input, mut output, mut child) =
+            process_fixture(&fixture.identity, Duration::from_secs(2));
+        let mut collected = Collected::default();
         let result = run_stream(
             &call,
             input,
             &mut output,
-            &AtomicBool::new(false),
-            Instant::now() + Duration::from_secs(15),
-            Duration::from_millis(100),
+            &mut collected,
+            WorkspaceStop {
+                flag: &AtomicBool::new(false),
+                cause: "fixture-stop",
+            },
+            DriverBounds {
+                lifetime: Instant::now() + Duration::from_secs(15),
+                heartbeat_interval: Duration::from_millis(100),
+                output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
+            },
+            &mut false,
         )
         .expect("node call");
         assert_eq!(result.ending, Ending::Complete);
-        assert_eq!(result.stdout, b"answer");
-        assert_eq!(result.stderr, b"warning");
+        assert_eq!(collected.stdout, b"answer");
+        assert_eq!(collected.stderr, b"warning");
         assert!(!result.build.differs);
         assert!(child.0.wait().expect("node exit").success());
+    }
+
+    /// ´test:unit:workspace-adapter-driver-sends-stop-after-stream-event´
+    #[test]
+    fn workspace_adapter_driver_sends_stop_after_stream_event() {
+        struct StopOnOutput {
+            seen: Vec<u8>,
+            stop: Arc<AtomicBool>,
+        }
+        impl WorkspaceOutputSink for StopOnOutput {
+            fn forward(
+                &mut self,
+                _channel: OutputChannel,
+                bytes: &[u8],
+                _deadline: Instant,
+            ) -> Result<(), LaneError> {
+                self.seen.extend_from_slice(bytes);
+                self.stop.store(true, Ordering::Release);
+                Ok(())
+            }
+        }
+        let fixture = crate::workspace_node::tests::Fixture::new();
+        let frame = fixture.call(Execution::Shell {
+            shell: "/bin/sh".into(),
+            text: "printf ready; exec /usr/bin/sleep 30".into(),
+        });
+        let digest = canonical_digest(&frame).unwrap();
+        let call = WorkspaceCall {
+            frame,
+            handle: digest[..16].to_owned(),
+        };
+        let (input, mut output, mut child) =
+            process_fixture(&fixture.identity, Duration::from_secs(10));
+        let stop = Arc::new(AtomicBool::new(false));
+        let mut sink = StopOnOutput {
+            seen: Vec::new(),
+            stop: Arc::clone(&stop),
+        };
+        let result = run_stream(
+            &call,
+            input,
+            &mut output,
+            &mut sink,
+            WorkspaceStop {
+                flag: &stop,
+                cause: "worker-disconnected",
+            },
+            DriverBounds {
+                lifetime: Instant::now() + Duration::from_secs(15),
+                heartbeat_interval: Duration::from_millis(100),
+                output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
+            },
+            &mut false,
+        )
+        .unwrap();
+        assert_eq!(sink.seen, b"ready");
+        assert_eq!(result.ending, Ending::Interrupted("stop"));
+        assert_eq!(result.door_cause, Some("worker-disconnected"));
+        assert_eq!(result.evidence()["door_cause"], "worker-disconnected");
+        assert!(child.0.wait().unwrap().success());
     }
 
     /// ´test:unit:workspace-adapter-refuses-node-mismatch-before-route-spawn´
@@ -666,14 +1043,24 @@ mod tests {
         let request = custodied_request(&fixture, &envelope);
         let allowance = super::super::workspace::fixture_allowance(&request);
         let foreign = super::super::transport::fixture_node("foreign-node");
-        let error = WorkspaceCall::compose(&request, &allowance, &foreign, "R:1")
-            .err()
-            .expect("node mismatch");
+        let error = WorkspaceCall::compose(
+            &request,
+            WorkspaceAdmission::Allowance(&allowance),
+            &foreign,
+            "R:1",
+        )
+        .err()
+        .expect("node mismatch");
         assert_eq!(error.kind, "door-workspace-context-differs");
         assert!(error.detail.contains("register-door-node --node"));
         let own = super::super::transport::fixture_node(&fixture.grant.node);
-        let call = WorkspaceCall::compose(&request, &allowance, &own, "R:1")
-            .expect("registered node and protected request");
+        let call = WorkspaceCall::compose(
+            &request,
+            WorkspaceAdmission::Allowance(&allowance),
+            &own,
+            "R:1",
+        )
+        .expect("registered node and protected request");
         assert_eq!(call.frame.node, fixture.grant.node);
         assert_eq!(call.frame.grant, json!(fixture.grant));
         assert_eq!(call.frame.placement, fixture.placement);
@@ -742,7 +1129,8 @@ mod tests {
                 frame,
                 handle: digest[..16].to_owned(),
             };
-            let (mut input, mut output, mut child) = process_fixture(&fixture.identity);
+            let (mut input, mut output, mut child) =
+                process_fixture(&fixture.identity, Duration::from_secs(2));
             crate::workspace_node::write_frame(&mut input, call.frame()).unwrap();
             match control {
                 "eof" => input.shutdown(Shutdown::Write).unwrap(),
@@ -758,7 +1146,7 @@ mod tests {
             let terminal = crate::workspace_node::read_frame(&mut output).unwrap();
             let result = WorkspaceResult::from_terminal(&call, terminal, build).unwrap();
             assert_eq!(result.node_reason, reason);
-            assert_eq!(result.ending, Ending::Interrupted(cause));
+            assert_eq!(result.ending, Ending::NothingRan(cause));
             assert_eq!(result.steps.len(), 0);
             assert!(child.0.wait().unwrap().success());
         }
@@ -779,7 +1167,8 @@ mod tests {
                 frame,
                 handle: digest[..16].to_owned(),
             };
-            let (mut input, mut output, mut child) = process_fixture(&fixture.identity);
+            let (mut input, mut output, mut child) =
+                process_fixture(&fixture.identity, Duration::from_secs(10));
             crate::workspace_node::write_frame(&mut input, call.frame()).unwrap();
             crate::workspace_node::write_frame(&mut input, &json!({"schema":1,"type":"start"}))
                 .unwrap();
@@ -819,7 +1208,8 @@ mod tests {
                 frame,
                 handle: digest[..16].to_owned(),
             };
-            let (mut input, mut output, mut child) = process_fixture(&fixture.identity);
+            let (mut input, mut output, mut child) =
+                process_fixture(&fixture.identity, Duration::from_secs(2));
             crate::workspace_node::write_frame(&mut input, call.frame()).unwrap();
             crate::workspace_node::write_frame(&mut input, &json!({"schema":1,"type":"start"}))
                 .unwrap();
@@ -886,13 +1276,51 @@ mod tests {
         let error = run_command(
             &call,
             command,
-            &AtomicBool::new(false),
+            &mut Collected::default(),
+            WorkspaceStop {
+                flag: &AtomicBool::new(false),
+                cause: "fixture-stop",
+            },
             Instant::now() + Duration::from_secs(5),
         )
         .err()
         .expect("absent entry");
         assert_eq!(error.kind, "door-compute-tool-refusal");
         assert!(error.detail.contains("install superloop-lane-node-exec"));
+    }
+
+    /// ´test:unit:workspace-adapter-drains-route-diagnostics-before-missing-tool´
+    #[test]
+    fn workspace_adapter_drains_route_diagnostics_before_missing_tool() {
+        let fixture = crate::workspace_node::tests::Fixture::new();
+        let frame = fixture.call(Execution::Argv {
+            words: vec![b"/bin/true".to_vec()],
+        });
+        let digest = canonical_digest(&frame).unwrap();
+        let call = WorkspaceCall {
+            frame,
+            handle: digest[..16].to_owned(),
+        };
+        let mut command = Command::new("/bin/sh");
+        command
+            .arg("-c")
+            .arg("head -c 131072 /dev/zero >&2; exit 127")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let error = run_command(
+            &call,
+            command,
+            &mut Collected::default(),
+            WorkspaceStop {
+                flag: &AtomicBool::new(false),
+                cause: "fixture-stop",
+            },
+            Instant::now() + Duration::from_secs(5),
+        )
+        .err()
+        .expect("absent entry after bounded stderr drain");
+        assert_eq!(error.kind, "door-compute-tool-refusal");
     }
 
     /// ´test:unit:workspace-adapter-stalled-route-cannot-outlive-its-call´
@@ -917,12 +1345,22 @@ mod tests {
         let error = run_command(
             &call,
             command,
-            &AtomicBool::new(false),
+            &mut Collected::default(),
+            WorkspaceStop {
+                flag: &AtomicBool::new(false),
+                cause: "fixture-stop",
+            },
             Instant::now() + Duration::from_millis(100),
         )
         .err()
         .expect("stalled route");
         assert_eq!(error.kind, "door-workspace-protocol-refusal");
+        let group = nix::unistd::Pid::from_raw(LAST_ROUTE_GROUP.get());
+        assert_eq!(
+            nix::sys::signal::killpg(group, None).unwrap_err(),
+            nix::errno::Errno::ESRCH,
+            "a stalled route must leave no child group"
+        );
     }
 
     /// ´test:unit:workspace-adapter-maps-node-reasons-without-reply-reason-passthrough´
@@ -940,6 +1378,7 @@ mod tests {
         for (reason, incomplete, ending) in [
             ("node-deadline", false, Ending::NodeDeadline),
             ("node-deadline", true, Ending::NodeDeadline),
+            ("node-stopped", true, Ending::Interrupted("stop")),
             ("node-output-limit", false, Ending::OutputLimit),
             ("node-output-incomplete", true, Ending::OutputIncomplete),
         ] {
@@ -947,7 +1386,9 @@ mod tests {
                 "request_id":call.frame.request_id,"nonce":call.frame.nonce,
                 "result":{"outcome":{"kind":"TimedOut"},"wall_seconds":0.0,
                     "user_cpu_seconds":null,"system_cpu_seconds":null},
-                "steps":[],"output_bytes":0,"reason":reason,
+                "steps":[{"outcome":{"kind":"TimedOut"},"wall_seconds":0.0,
+                    "user_cpu_seconds":null,"system_cpu_seconds":null}],
+                "output_bytes":0,"reason":reason,
                 "output_incomplete":incomplete});
             let result = WorkspaceResult::from_terminal(
                 &call,

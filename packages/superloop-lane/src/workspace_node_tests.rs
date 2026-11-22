@@ -139,13 +139,17 @@ fn workspace_node_process_entry_fixture() {
     let identity = PathBuf::from(
         std::env::var_os("SUPERLOOP_NODE_PROCESS_IDENTITY").expect("fixture identity path"),
     );
+    let silence_ms = std::env::var("SUPERLOOP_NODE_PROCESS_SILENCE_MS")
+        .expect("fixture silence bound")
+        .parse::<u64>()
+        .expect("fixture silence milliseconds");
     serve_with_limits(
         input,
         output,
         &identity,
         Fixture::owner(),
         StreamBounds {
-            silence: Duration::from_secs(2),
+            silence: Duration::from_millis(silence_ms),
             output_limit: MAX_OUTPUT_BYTES,
             write: Duration::from_secs(2),
             drain: Duration::from_secs(2),

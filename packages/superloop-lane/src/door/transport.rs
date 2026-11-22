@@ -539,18 +539,19 @@ impl HostRunner {
     pub(super) fn run_workspace(
         &self,
         request: &super::WorkspaceRequest,
-        allowance: &super::WorkspaceAllowance,
+        admission: super::workspace_adapter::WorkspaceAdmission<'_>,
         request_id: &str,
-        stop: &std::sync::atomic::AtomicBool,
+        sink: &mut impl super::workspace_adapter::WorkspaceOutputSink,
+        stop: super::workspace_adapter::WorkspaceStop<'_>,
         lifetime: Instant,
     ) -> Result<super::workspace_adapter::WorkspaceResult, LaneError> {
         let call = super::workspace_adapter::WorkspaceCall::compose(
             request,
-            allowance,
+            admission,
             self.authenticated_node(),
             request_id,
         )?;
-        super::workspace_adapter::run_command(&call, self.workspace_command(), stop, lifetime)
+        super::workspace_adapter::run_command(&call, self.workspace_command(), sink, stop, lifetime)
     }
 
     /// Run the installed node entry over this verified host route. Request bytes

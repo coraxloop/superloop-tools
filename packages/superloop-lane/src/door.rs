@@ -1091,6 +1091,83 @@ mod workspace {
         origin: AllowanceOrigin,
     }
 
+    /// An allow-mode execution intent read from this request's protected record.
+    pub struct WorkspaceIntent {
+        record_id: String,
+        envelope_digest: String,
+        context_key: Value,
+    }
+
+    impl WorkspaceIntent {
+        /// Read the filed intent before an allow-mode miss runs beside judgement.
+        /// # Errors
+        /// Refuses a changed record, envelope, grant or policy binding.
+        #[allow(dead_code)] // The serving caller is the next W3 cut.
+        pub fn from_store(
+            store: &Store,
+            id: &str,
+            request: &WorkspaceRequest,
+        ) -> Result<Self, LaneError> {
+            let record = store.request(id)?;
+            let value = record.value();
+            let detail = &value["effect"]["workspace"];
+            if value["schema"] != 7
+                || value["class"] != "compute"
+                || value["operation"] != "compute-workspace"
+                || value["mode"] != "allow"
+                || value["state"] != "waiting"
+                || value["effect"]["state"] != "pending"
+                || detail["envelope"] != json!(request.envelope)
+                || detail["grant"] != json!(request.grant)
+                || detail["policy_revision"] != request.grant.quick_policy_digest
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "allow-mode intent and exact workspace request differ",
+                ));
+            }
+            let envelope_digest = canonical_digest(&request.envelope)
+                .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let context_key = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &request.grant.quick_policy_digest,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            Ok(Self {
+                record_id: record.id().to_owned(),
+                envelope_digest,
+                context_key,
+            })
+        }
+
+        /// Check the same filed request at the adapter boundary.
+        /// # Errors
+        /// Refuses a replayed record id, envelope or context.
+        pub fn check(&self, request: &WorkspaceRequest, id: &str) -> Result<(), LaneError> {
+            let envelope_digest = canonical_digest(&request.envelope)
+                .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let context_key = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &request.grant.quick_policy_digest,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            if self.record_id != id
+                || self.envelope_digest != envelope_digest
+                || self.context_key != context_key
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "allow-mode intent belongs to another request",
+                ));
+            }
+            Ok(())
+        }
+    }
+
     enum AllowanceOrigin {
         Store(Value),
         Judgement(String),
