@@ -13,7 +13,7 @@ pub fn validate_words(words: &[String]) -> Result<(), &'static str> {
                 || word.len() > 256
                 || !word
                     .bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b"_./:=+,-".contains(&b))
+                    .all(|b| b.is_ascii_alphanumeric() || b"_./:=+,-~^@%#".contains(&b))
         })
     {
         return Err("door-compute-words-refusal");
@@ -54,6 +54,8 @@ mod tests {
                 "fetch",
                 "--locked",
             ],
+            vec!["git", "diff", "HEAD~1"],
+            vec!["make", "target^name", "user@host", "100%", "id#tag"],
         ] {
             let words: Vec<_> = argv.into_iter().map(str::to_owned).collect();
             assert_eq!(validate_words(&words), Ok(()), "{words:?}");

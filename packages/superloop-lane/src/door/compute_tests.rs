@@ -768,6 +768,8 @@ fn door_compute_frame_admits_unfamiliar_words_and_refuses_operators() {
         "cargo test",
         "env CARGO_NET_OFFLINE=false cargo fetch --locked",
         "scripts/prepare.sh check",
+        "git diff HEAD~1",
+        "make target^name user@host 100% id#tag",
         "cargo fmt --all -- --check",
         "cargo fmt --all --check",
         "cargo fmt --all",
@@ -825,7 +827,6 @@ fn door_compute_frame_admits_unfamiliar_words_and_refuses_operators() {
         "cargo\ttest --locked",
         "cargo  test --locked",
         "",
-        "cargo test --locked foo~bar",
     ] {
         let fixture = Fixture::new();
         fixture.set_floor("allow");
