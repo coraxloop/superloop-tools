@@ -1205,6 +1205,9 @@ fn retire_record_confirmed_with(
                 json!({"present":true,"regular":metadata.file_type().is_file(),"uid":metadata.uid(),"mode":metadata.mode() & 0o7777})
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => json!({"present":false}),
+            Err(error) if error.kind() == std::io::ErrorKind::PermissionDenied => {
+                json!({"present":null,"visibility":"not-visible-to-caller"})
+            }
             Err(error) => return Err(LaneError::input("retire-projection", error.to_string())),
         };
         return Ok(
@@ -2191,6 +2194,47 @@ mod tests {
         );
         assert!(!lease.exists());
         assert!(!root.join(".letter-R.lock").exists());
+    }
+
+    /// ´test:unit:public-retire-preview-reports-a-hidden-worker-projection´
+    #[test]
+    fn public_retire_preview_reports_a_hidden_worker_projection() {
+        struct RestoreHome(PathBuf);
+        impl Drop for RestoreHome {
+            fn drop(&mut self) {
+                let _restored = fs::set_permissions(&self.0, fs::Permissions::from_mode(0o700));
+            }
+        }
+
+        assert_ne!(
+            Uid::effective().as_raw(),
+            0,
+            "fixture needs a non-root caller"
+        );
+        let (fixture, root, request) = public_fixture();
+        let owner = Uid::effective().as_raw();
+        drop(lock_run_preparation(&root, "R", owner).expect("existing preparation lease"));
+        let home = fixture.path().join(".cache/tmp/lane-alpha-R");
+        fs::create_dir_all(&home).expect("worker home");
+        let record = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"imports":[],"harvest_agreement":null,"collection":null,"plan":{"home":home,"driver_dir":root.join("R"),"runtime_argv":["/usr/bin/true"]},"launcher_pid":u32::MAX,"launcher_start":1,"driver_entry_pid":u32::MAX,"driver_entry_start":1,"helper_pid":u32::MAX,"helper_start":1,"observer_pid":u32::MAX,"observer_start":1,"observer_state":"ended","probe_starts":[]});
+        publish_reservation(&reservation_path(&root, "R"), &record).expect("settled run");
+        fs::set_permissions(&home, fs::Permissions::from_mode(0o000))
+            .expect("hide worker home from caller");
+        let restore = RestoreHome(home);
+        let hidden =
+            run(fixture.path(), &request).expect("hidden projection does not block preview");
+        assert_eq!(hidden["retirement"]["state"], "would-retire");
+        assert_eq!(
+            hidden["retirement"]["worker_projection"],
+            json!({"present":null,"visibility":"not-visible-to-caller"})
+        );
+        drop(restore);
+        let readable = run(fixture.path(), &request).expect("readable worker home");
+        assert_eq!(
+            readable["retirement"]["worker_projection"],
+            json!({"present":false})
+        );
+        assert_eq!(hidden["preview_sha256"], readable["preview_sha256"]);
     }
 
     /// ´test:unit:retire-old-started-record-dry-run-and-uid-release´
