@@ -4,7 +4,7 @@ use super::{Registration, Scope, compute, serve_request};
 use crate::requests::{
     RequestRecord,
     modes::Rubric,
-    store::{Store, tests::Fixture},
+    store::{FixtureFault, Store, fixture_fault, tests::Fixture},
 };
 use serde_json::{Value, json};
 use std::io::{self, Write as _};
@@ -106,7 +106,18 @@ pub(super) fn compute_stub_service(
     Arc<AtomicUsize>,
     thread::JoinHandle<io::Result<Value>>,
 ) {
-    compute_stub_service_with_policy(fixture, run, worker, peer, scope, decision, &[], None, None)
+    compute_stub_service_with_policy(
+        fixture,
+        run,
+        worker,
+        peer,
+        scope,
+        decision,
+        &[],
+        None,
+        None,
+        None,
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -120,6 +131,7 @@ fn compute_stub_service_with_policy(
     forms: &[super::config::ComputeDeadline],
     remaining: Option<Arc<std::sync::Mutex<f64>>>,
     contended: Option<std::sync::mpsc::Sender<()>>,
+    fault: Option<FixtureFault>,
 ) -> (
     PathBuf,
     Arc<AtomicUsize>,
@@ -159,6 +171,7 @@ fn compute_stub_service_with_policy(
     let check = super::transport::CHECK_DEADLINE.with(|slot| slot.borrow_mut().take());
     let credit = super::WAIT_CREDIT_CAP.with(std::cell::Cell::take);
     let server = thread::spawn(move || {
+        fixture_fault(fault);
         super::WAIT_CREDIT_OBSERVED.with(|slot| *slot.borrow_mut() = contended);
         super::REQUEST_FILED.with(|slot| *slot.borrow_mut() = filed);
         super::REQUEST_READY.with(|slot| *slot.borrow_mut() = ready);
@@ -196,6 +209,45 @@ fn compute_call(socket: &std::path::Path, command: &str) -> (Value, Vec<u8>, Vec
     )
     .expect("stub call");
     (reply, output, errors)
+}
+
+/// ´test:unit:door-compute-stub-keeps-command-failure-beside-record-failure´
+#[test]
+fn door_compute_stub_keeps_command_failure_beside_record_failure() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let (socket, calls, server) = compute_stub_service_with_policy(
+        &fixture,
+        "R",
+        3000,
+        3000,
+        Scope::Work,
+        None,
+        &[],
+        None,
+        None,
+        Some(FixtureFault::EffectWrite),
+    );
+    let command = "/opt/fixture/bin/report cargo test --locked";
+    let (reply, output, errors) = compute_call(&socket, command);
+    server.join().expect("server").expect("service");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(reply["compute_exit_status"], 3);
+    assert_eq!(reply["status"], 3);
+    assert_eq!(reply["reason"], "door-record-incomplete");
+    assert_eq!(
+        reply["request_record_error"],
+        "requests-record-refusal: fixture effect write failure"
+    );
+    assert!(String::from_utf8_lossy(&output).contains("generator output"));
+    assert!(String::from_utf8_lossy(&errors).contains("generator stderr"));
+    assert_eq!(
+        super::final_line(&["fixture".into(), command.into()], &reply),
+        Some(
+            "door-record-incomplete: requests-record-refusal: fixture effect write failure"
+                .to_owned()
+        )
+    );
 }
 
 fn request_command(fixture: &Fixture, action: &str) -> Value {
@@ -1456,6 +1508,7 @@ fn door_compute_deadline_selects_only_the_exact_owner_form() {
                 std::slice::from_ref(&form),
                 Some(Arc::clone(&remaining)),
                 contended,
+                None,
             );
             let (reply, _, _) = compute_call(&socket, &format!("/opt/fixture/bin/report {tail}"));
             server.join().expect("server").expect("service");
@@ -1586,6 +1639,7 @@ fn compute_deadline_refusal_case(
         &[form],
         None,
         contended,
+        None,
     );
     let answer = (queue == "refused").then(|| compute_queue_refusal(&fixture, filed_rx));
     let (reply, observed_credit) = compute_refusal_call(&socket, use_stub);

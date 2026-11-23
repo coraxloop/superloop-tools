@@ -1872,7 +1872,6 @@ pub(super) fn serve_compute(
         && let Err(error) = complete(&reply)
     {
         let _logged = writeln!(io::stderr().lock(), "door effect record: {}", error.line());
-        reply["status"] = json!(125);
         reply["reason"] = json!("door-record-incomplete");
         reply["request_record_error"] = json!(error.line());
     }

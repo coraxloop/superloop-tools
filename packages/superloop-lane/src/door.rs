@@ -5447,6 +5447,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         seen_state: Arc<Mutex<Vec<String>>>,
         store: Store,
+        fail_after_input: bool,
     }
 
     impl Runner for CountingRunner {
@@ -5461,7 +5462,11 @@ mod tests {
                 .lock()
                 .expect("fixture states")
                 .push(state.to_owned());
-            Command::new("/usr/bin/cat")
+            let mut command = Command::new("/usr/bin/cat");
+            if self.fail_after_input {
+                command.args(["-", "/definitely-unavailable-door-fixture-source"]);
+            }
+            command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -5813,6 +5818,7 @@ mod tests {
                 calls: calls.clone(),
                 seen_state: states.clone(),
                 store: fixture.store(),
+                fail_after_input: false,
             },
             calls,
             states,
@@ -8090,10 +8096,76 @@ mod tests {
             }
             let reply = client.answer();
             server.join().expect("service").expect("incomplete reply");
-            assert_eq!(reply["status"], 125);
+            assert_eq!(reply["status"], 0);
             assert_eq!(reply["reason"], "door-record-incomplete");
             assert_eq!(reply["compute_exit_status"], 0);
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_incomplete(&fixture, &id);
+        }
+    }
+
+    /// ´test:unit:door-stub-keeps-command-status-after-effect-record-failure´
+    #[test]
+    fn door_stub_keeps_command_status_after_effect_record_failure() {
+        for exit in [0, 1] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, crate::requests::Mode::Allow);
+            let (mut runner, calls, _) = counting_runner(&fixture);
+            runner.fail_after_input = exit != 0;
+            let (socket, server) = fixture_stub_service_with(
+                &fixture,
+                runner,
+                rubric(Some("allow")),
+                2000,
+                None,
+                Some(FixtureFault::EffectWrite),
+                true,
+            );
+            let args = [OsString::from("door-attribution-probe")];
+            let mut output = Vec::new();
+            let mut errors = Vec::new();
+            let reply = super::stub_call_stream(
+                &socket,
+                &args,
+                io::Cursor::new(b"fictional output\n"),
+                &mut output,
+                &mut errors,
+            )
+            .expect("stub final reply");
+            server
+                .join()
+                .expect("service")
+                .expect("record failure reply");
+            assert_eq!(output, b"fictional output\n");
+            if exit == 0 {
+                assert_eq!(errors, Vec::<u8>::new());
+            } else {
+                assert!(
+                    String::from_utf8_lossy(&errors)
+                        .contains("/definitely-unavailable-door-fixture-source")
+                );
+            }
+            assert_eq!(reply["status"], exit);
+            assert_eq!(reply["compute_exit_status"], exit);
+            assert_eq!(reply["reason"], "door-record-incomplete");
+            let line = super::final_line(&args, &reply).expect("visible record failure");
+            let visible: serde_json::Value =
+                serde_json::from_str(&line).expect("probe prints its final reply");
+            assert_eq!(visible["reason"], "door-record-incomplete");
+            assert_eq!(
+                visible["request_record_error"],
+                "requests-record-refusal: fixture effect write failure"
+            );
+            let command_line = super::final_line(&[OsString::from("git")], &reply)
+                .expect("ordinary command prints its final failure");
+            assert_eq!(
+                command_line,
+                "door-record-incomplete: requests-record-refusal: fixture effect write failure"
+            );
+            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            let id = store.list().expect("filed request").0[0].id().to_owned();
             assert_incomplete(&fixture, &id);
         }
     }
@@ -8125,7 +8197,7 @@ mod tests {
             let reply = client.answer();
             server.join().expect("service").expect("reply");
             assert_eq!(reply["reason"], "door-record-incomplete");
-            assert_eq!(reply["status"], 125);
+            assert_eq!(reply["status"], if decision == "allow" { 0 } else { 125 });
             assert_eq!(
                 calls.load(std::sync::atomic::Ordering::Relaxed),
                 usize::from(decision == "allow")
