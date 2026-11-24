@@ -2662,9 +2662,14 @@ fn serve_request_with_agent_at(
     );
     let request = &bounded_request;
     // Classify only a route-validated operation; all other shapes retain exclusive admission.
-    let admission_operation = route.and_then(|route| {
-        transport::argument_bytes(request).and_then(|args| route.allowed(&args, registration))
-    });
+    let workspace_request = request["schema"] == 3;
+    let admission_operation = if workspace_request {
+        Some(transport::Operation::Compute)
+    } else {
+        route.and_then(|route| {
+            transport::argument_bytes(request).and_then(|args| route.allowed(&args, registration))
+        })
+    };
     let maximum = if admission_operation == Some(transport::Operation::Compute) {
         registered_deadline_ms
     } else {
@@ -2746,6 +2751,21 @@ fn serve_request_with_agent_at(
             started,
         )
     };
+    if workspace_request {
+        let mut reply = transport::refusal(
+            registration,
+            peer,
+            "door-workspace-protocol-refusal",
+            started,
+        );
+        reply["schema"] = json!(3);
+        reply["request_record_error"] = json!(
+            "this door does not yet run a workspace command without an exact rule; nothing was run"
+        );
+        wait.report(&mut reply);
+        wait.write_final(&reply, admission_deadline)?;
+        return Ok((reply, Vec::new()));
+    }
     let args = transport::argument_bytes(request);
     let compute_candidate = args.as_deref().is_some_and(compute::candidate);
     let maximum = if compute_candidate {
