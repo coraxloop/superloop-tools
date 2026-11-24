@@ -267,6 +267,67 @@ fn output_bytes(frames: &[Value], kind: &str) -> Vec<u8> {
         .collect()
 }
 
+/// ´test:unit:workspace-node-entry-names-failed-start-and-prior-step´
+#[test]
+fn workspace_node_entry_names_failed_start_and_prior_step() {
+    let fixture = Fixture::new();
+    let missing = "/no-such-workspace-program";
+    let noexec = fixture.root.path().join("work/sub/noexec");
+    fs::write(&noexec, b"fictional program").unwrap();
+    fs::set_permissions(&noexec, fs::Permissions::from_mode(0o644)).unwrap();
+    let noexec = noexec.to_str().unwrap();
+    for (execution, kind, index, started, line) in [
+        (
+            argv(&[missing]),
+            "not-found",
+            0,
+            false,
+            format!("{missing}: not found\n"),
+        ),
+        (
+            argv(&[noexec]),
+            "not-executable",
+            0,
+            false,
+            format!("{noexec}: not executable\n"),
+        ),
+        (
+            Execution::Sequence {
+                steps: vec![
+                    vec![
+                        b"/bin/sh".to_vec(),
+                        b"-c".to_vec(),
+                        b"printf prior".to_vec(),
+                    ],
+                    vec![missing.as_bytes().to_vec()],
+                ],
+            },
+            "not-found",
+            1,
+            true,
+            format!("{missing}: not found\n"),
+        ),
+    ] {
+        let call = fixture.call(execution);
+        let (mut input, mut output, thread) =
+            fixture.start(&call, CONTROL_SILENCE, MAX_OUTPUT_BYTES);
+        assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+        control(&mut input, "start");
+        let frames = frames_until_terminal(&mut output);
+        let terminal = frames.last().unwrap();
+        assert_eq!(terminal["reason"], "node-start-failed");
+        assert_eq!(terminal["start_failure"]["kind"], kind);
+        assert_eq!(terminal["start_failure"]["step_index"], index);
+        assert_eq!(terminal["child_started"], started);
+        assert_eq!(terminal["result"]["outcome"], json!(Outcome::Unknown));
+        assert_eq!(output_bytes(&frames, "stderr"), line.as_bytes());
+        if started {
+            assert_eq!(output_bytes(&frames, "stdout"), b"prior");
+        }
+        thread.join().unwrap().unwrap();
+    }
+}
+
 /// ´test:unit:workspace-node-entry-refuses-changed-context-before-open´
 #[test]
 fn workspace_node_entry_refuses_changed_context_before_open() {

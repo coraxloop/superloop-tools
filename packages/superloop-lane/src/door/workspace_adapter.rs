@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::error::LaneError;
+use crate::workspace_executor::StartFailure;
 use crate::workspace_node::NodeCall;
 use crate::workspace_node::{read_frame_before, write_frame_before};
 
@@ -188,6 +189,7 @@ pub(super) struct WorkspaceResult {
     pub(crate) output_bytes: usize,
     pub(crate) output_incomplete: bool,
     pub(crate) child_started: Option<bool>,
+    pub(crate) start_failure: Option<StartFailure>,
     pub(crate) build: BuildEvidence,
     pub(crate) door_cause: Option<&'static str>,
 }
@@ -227,6 +229,8 @@ struct Terminal {
     output_incomplete: bool,
     #[serde(default)]
     child_started: Option<bool>,
+    #[serde(default)]
+    start_failure: Option<StartFailure>,
 }
 
 impl WorkspaceResult {
@@ -259,6 +263,13 @@ impl WorkspaceResult {
             "node-malformed-control" => Ending::Interrupted("malformed-control"),
             "node-output-limit" => Ending::OutputLimit,
             "node-output-incomplete" if terminal.output_incomplete => Ending::OutputIncomplete,
+            "node-start-failed" if terminal.start_failure.is_some() => {
+                if terminal.child_started == Some(false) {
+                    Ending::NothingRan("start-failed")
+                } else {
+                    Ending::Interrupted("start-failed")
+                }
+            }
             _ => {
                 return Err(refusal(
                     "door-workspace-protocol-refusal",
@@ -267,6 +278,7 @@ impl WorkspaceResult {
             }
         };
         if terminal.child_started == Some(false)
+            && terminal.start_failure.is_none()
             && (!terminal.steps.is_empty() || terminal.output_bytes != 0)
         {
             return Err(refusal(
@@ -308,11 +320,17 @@ impl WorkspaceResult {
             output_bytes: terminal.output_bytes,
             output_incomplete: terminal.output_incomplete,
             child_started: terminal.child_started,
+            start_failure: terminal.start_failure,
             build,
             door_cause: None,
         };
         let evidence = result.evidence();
-        if !crate::requests::workspace_node_result_matches(&evidence, &evidence["ending"]) {
+        if !crate::requests::workspace_node_result_matches(&evidence, &evidence["ending"])
+            || !crate::requests::workspace_start_failure_matches(
+                &evidence,
+                &call.frame.envelope["execution"],
+            )
+        {
             return Err(refusal(
                 "door-workspace-protocol-refusal",
                 "node terminal differs from record-readable result",
@@ -335,13 +353,36 @@ impl WorkspaceResult {
             "entry_version_differs":self.build.differs,"output_incomplete":self.output_incomplete,
             "output_bytes":self.output_bytes,"result":self.result,"steps":self.steps,
             "child_started":self.child_started,
+            "start_failure":self.start_failure,
             "ending":state,"cause":cause,"door_cause":self.door_cause})
+    }
+
+    /// A shell-style status for a failed start, separate from door refusals.
+    pub(crate) fn command_status(&self) -> Option<i32> {
+        self.start_failure
+            .as_ref()
+            .map(|failure| failure.kind.status())
     }
 }
 
 /// Exercise the real adapter mapping from the record reader's fixture table.
 #[cfg(test)]
 pub fn fixture_terminal_evidence(frame: Value) -> Result<Value, LaneError> {
+    fixture_terminal_result(frame, &json!({"kind":"Argv","words":[[99]]}))
+        .map(|result| result.evidence())
+}
+
+#[cfg(test)]
+pub fn fixture_failed_start(
+    frame: Value,
+    execution: &Value,
+) -> Result<(Value, Option<i32>), LaneError> {
+    fixture_terminal_result(frame, execution)
+        .map(|result| (result.evidence(), result.command_status()))
+}
+
+#[cfg(test)]
+fn fixture_terminal_result(frame: Value, execution: &Value) -> Result<WorkspaceResult, LaneError> {
     let call = WorkspaceCall {
         frame: NodeCall {
             protocol: 1,
@@ -350,7 +391,7 @@ pub fn fixture_terminal_evidence(frame: Value) -> Result<Value, LaneError> {
             node: "fixture-node".to_owned(),
             grant: Value::Null,
             placement: Value::Null,
-            envelope: Value::Null,
+            envelope: json!({"execution":execution}),
         },
         handle: String::new(),
     };
@@ -358,7 +399,7 @@ pub fn fixture_terminal_evidence(frame: Value) -> Result<Value, LaneError> {
         entry_version: "0.11.0".to_owned(),
         differs: false,
     };
-    WorkspaceResult::from_terminal(&call, frame, build).map(|result| result.evidence())
+    WorkspaceResult::from_terminal(&call, frame, build)
 }
 
 /// ´test:unit:workspace-quiet-stop-needs-positive-no-start-evidence´
@@ -796,6 +837,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             output_bytes: forwarded,
             output_incomplete: true,
             child_started: None,
+            start_failure: None,
             build,
             door_cause: sent_stop.then_some(stop.cause),
         });

@@ -49,6 +49,7 @@ fn finished_row(
         "entry_version_differs":false,
         "output_incomplete":matches!(ending, "incomplete" | "unknown"),
         "child_started":if cause == "unobserved" { Value::Null } else { json!(ending != "not-started") },
+        "start_failure":null,
         "output_bytes":output_bytes,
         "result":row["effect"]["workspace"]["result"],
         "steps":row["effect"]["workspace"]["steps"],
@@ -288,6 +289,78 @@ fn workspace_record_reader_agrees_with_adapter_terminal_mapping() {
     );
     older_entry["effect"]["workspace_node"]["child_started"] = Value::Null;
     assert!(RequestRecord::decode(older_entry).is_ok());
+}
+
+/// ´test:unit:workspace-failed-start-status-is-record-readable´
+#[test]
+fn workspace_failed_start_status_is_record_readable() {
+    use crate::door::workspace_adapter::fixture_failed_start;
+    for (kind, status, line) in [
+        ("not-found", 127, "custom: not found\n"),
+        ("not-executable", 126, "custom: not executable\n"),
+        ("other", 126, "custom: could not start\n"),
+    ] {
+        let mut row = finished_row(
+            "not-started",
+            "door-workspace-not-started",
+            "node-start-failed",
+            json!({"kind":"Unknown"}),
+            line.len() as u64,
+        );
+        let frame = json!({"schema":1,"type":"terminal","request_id":"R:1a",
+            "nonce":"fixture","result":row["effect"]["workspace"]["result"],
+            "steps":[],"output_bytes":line.len(),"reason":"node-start-failed",
+            "output_incomplete":false,"child_started":false,
+            "start_failure":{"kind":kind,"step_index":0}});
+        let (evidence, mapped_status) =
+            fixture_failed_start(frame, &row["effect"]["workspace"]["envelope"]["execution"])
+                .unwrap();
+        assert_eq!(mapped_status, Some(status), "{kind}");
+        assert_eq!(evidence["ending"], "not-started");
+        row["effect"]["workspace_node"] = evidence;
+        row["effect"]["exit_status"] = json!(status);
+        assert!(RequestRecord::decode(row).is_ok(), "{kind}");
+    }
+    let output_len = b"prior".len() + b"/no-such-workspace-program: not found\n".len();
+    let mut row = finished_row(
+        "interrupted",
+        "door-workspace-start-failed",
+        "node-start-failed",
+        json!({"kind":"Unknown"}),
+        output_len as u64,
+    );
+    let grant = Grant::decode(row["effect"]["workspace"]["grant"].clone()).unwrap();
+    let envelope = Envelope::decode(json!({
+        "schema":3,"grant_digest":grant.digest().unwrap(),"cwd":["checkout"],
+        "execution":{"kind":"Sequence","steps":[
+            [b"/bin/sh".to_vec(),b"-c".to_vec(),b"printf prior".to_vec()],
+            [b"/no-such-workspace-program".to_vec()]]},
+        "env_additions":[],"deadline_ms":1000
+    }))
+    .unwrap();
+    let detail = &mut row["effect"]["workspace"];
+    detail["execution_digest"] = json!(canonical_digest(&envelope.execution).unwrap());
+    detail["context_digest"] =
+        json!(learned_key("compute", &envelope, &grant, "quick-1").unwrap()[2]);
+    detail["envelope"] = json!(envelope);
+    row["shape_key"] = detail["context_digest"].clone();
+    let successful = json!({"outcome":{"kind":"Exited","code":0},
+        "wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null});
+    let failed = json!({"outcome":{"kind":"Unknown"},
+        "wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null});
+    row["effect"]["workspace"]["steps"] = json!([successful, failed]);
+    let frame = json!({"schema":1,"type":"terminal","request_id":"R:1a",
+        "nonce":"fixture","result":row["effect"]["workspace"]["result"],
+        "steps":row["effect"]["workspace"]["steps"],"output_bytes":output_len,
+        "reason":"node-start-failed","output_incomplete":false,"child_started":true,
+        "start_failure":{"kind":"not-found","step_index":1}});
+    let (evidence, status) =
+        fixture_failed_start(frame, &row["effect"]["workspace"]["envelope"]["execution"]).unwrap();
+    assert_eq!(evidence["ending"], "interrupted");
+    assert_eq!(status, Some(127));
+    row["effect"]["workspace_node"] = evidence;
+    row["effect"]["exit_status"] = json!(127);
+    assert!(RequestRecord::decode(row).is_ok());
 }
 /// ´test:unit:workspace-record-seven-is-strict-and-six-is-unchanged´
 #[test]

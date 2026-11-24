@@ -1,6 +1,6 @@
 //! Protocol-one node entry for an admitted workspace command.
 //! The door owns admission; this entry verifies the received execution context.
-use crate::workspace_executor::{ExecutionMeasurements, PreparedExecution};
+use crate::workspace_executor::{ExecutionMeasurements, PreparedExecution, StartFailure};
 use execute_command::workspace::{Envelope, Grant, Measurement, Outcome, canonical_digest};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -497,6 +497,7 @@ enum Event {
     Done(ExecutionMeasurements, Instant),
 }
 
+#[allow(clippy::too_many_arguments)] // Each argument is one distinct terminal frame observation.
 fn terminal_frame(
     call: &NodeCall,
     result: &Measurement,
@@ -505,6 +506,7 @@ fn terminal_frame(
     reason: &str,
     output_incomplete: bool,
     child_started: bool,
+    start_failure: Option<&StartFailure>,
 ) -> Value {
     json!({
         "schema":1,"type":"terminal","request_id":call.request_id,
@@ -512,6 +514,7 @@ fn terminal_frame(
         "output_bytes":output_bytes,"reason":reason,
         "output_incomplete":output_incomplete,
         "child_started":child_started,
+        "start_failure":start_failure,
     })
 }
 
@@ -531,6 +534,7 @@ fn ended_before_spawn<W: Write>(output: &mut W, call: &NodeCall, cause: u8) -> i
             end_reason(cause, &Outcome::TimedOut, false),
             false,
             false,
+            None,
         ),
     )
 }
@@ -713,11 +717,15 @@ fn relay_events<W: AsRawFd>(
         }
     }
     let measured = result.ok_or_else(|| io::Error::other("measurements absent"))?;
-    let reason = end_reason(
-        state.cause.load(Ordering::Acquire),
-        &measured.result.outcome,
-        incomplete,
-    );
+    let reason = if measured.start_failure.is_some() {
+        "node-start-failed"
+    } else {
+        end_reason(
+            state.cause.load(Ordering::Acquire),
+            &measured.result.outcome,
+            incomplete,
+        )
+    };
     write_frame_before(
         output,
         &terminal_frame(
@@ -728,6 +736,7 @@ fn relay_events<W: AsRawFd>(
             reason,
             incomplete,
             measured.child_started,
+            measured.start_failure.as_ref(),
         ),
         Instant::now() + bounds.write,
     )

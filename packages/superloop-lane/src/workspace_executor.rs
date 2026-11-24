@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs::File;
 use std::io;
+use std::io::Write as _;
 use std::os::fd::AsRawFd as _;
 use std::os::unix::ffi::OsStringExt as _;
 use std::os::unix::process::CommandExt as _;
@@ -23,6 +24,42 @@ pub struct ExecutionMeasurements {
     pub steps: Vec<Measurement>,
     /// Set immediately after any child is spawned, including a quiet child.
     pub child_started: bool,
+    pub start_failure: Option<StartFailure>,
+}
+
+/// A failed attempt to start one step; no child exists for this step.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StartFailure {
+    pub kind: StartFailureKind,
+    pub step_index: usize,
+}
+
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum StartFailureKind {
+    NotFound,
+    NotExecutable,
+    Other,
+}
+
+impl StartFailureKind {
+    #[must_use]
+    pub const fn status(self) -> i32 {
+        match self {
+            Self::NotFound => 127,
+            Self::NotExecutable | Self::Other => 126,
+        }
+    }
+
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            Self::NotFound => "not found",
+            Self::NotExecutable => "not executable",
+            Self::Other => "could not start",
+        }
+    }
 }
 
 /// Retained cwd and exact execution context. Preparing this value is not admission.
@@ -142,12 +179,16 @@ impl PreparedExecution {
         };
         let mut measurements = Vec::new();
         let mut child_started = false;
+        let mut start_failure = None;
         let mut outcome = Outcome::TimedOut;
-        for words in &vectors {
-            let Some((measured, started)) = self.step(words, stdout, stderr, cancel) else {
+        for (step_index, words) in vectors.iter().enumerate() {
+            let Some((measured, started, failure)) =
+                self.step(words, step_index, stdout, stderr, cancel)
+            else {
                 break;
             };
             child_started |= started;
+            start_failure = failure;
             outcome = measured.outcome.clone();
             let successful = outcome == (Outcome::Exited { code: 0 });
             measurements.push(measured);
@@ -171,6 +212,7 @@ impl PreparedExecution {
         ExecutionMeasurements {
             result,
             child_started,
+            start_failure,
             steps: if matches!(self.envelope.execution, Execution::Sequence { .. }) {
                 measurements
             } else {
@@ -182,10 +224,11 @@ impl PreparedExecution {
     fn step(
         &self,
         words: &[Vec<u8>],
+        step_index: usize,
         stdout: &File,
         stderr: &File,
         cancel: &AtomicBool,
-    ) -> Option<(Measurement, bool)> {
+    ) -> Option<(Measurement, bool, Option<StartFailure>)> {
         if self.expired(cancel) {
             return None;
         }
@@ -227,6 +270,25 @@ impl PreparedExecution {
                     );
                 }
             });
+        let start_failure = if child_started {
+            None
+        } else {
+            result.as_ref().err().map(|error| {
+                let kind = match error.kind() {
+                    io::ErrorKind::NotFound => StartFailureKind::NotFound,
+                    io::ErrorKind::PermissionDenied => StartFailureKind::NotExecutable,
+                    _ => StartFailureKind::Other,
+                };
+                let program = String::from_utf8_lossy(&words[0]);
+                let _written = writeln!(
+                    &mut &*stderr,
+                    "{}: {}",
+                    program.escape_debug(),
+                    kind.message()
+                );
+                StartFailure { kind, step_index }
+            })
+        };
         let mut measured = result.unwrap_or(Measurement {
             outcome: Outcome::Unknown,
             wall_seconds: None,
@@ -234,7 +296,7 @@ impl PreparedExecution {
             system_cpu_seconds: None,
         });
         measured.wall_seconds = Some(began.elapsed().as_secs_f64());
-        Some((measured, child_started))
+        Some((measured, child_started, start_failure))
     }
 
     fn expired(&self, cancel: &AtomicBool) -> bool {

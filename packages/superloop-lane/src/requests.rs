@@ -281,6 +281,11 @@ fn validate_workspace_effect(value: &Value) -> Result<(), LaneError> {
         execute_command::workspace::Outcome::Exited { code } => json!(code),
         _ => Value::Null,
     };
+    let exit = match value["effect"]["workspace_node"]["start_failure"]["kind"].as_str() {
+        Some("not-found") => json!(127),
+        Some("not-executable" | "other") => json!(126),
+        _ => exit,
+    };
     if value["effect"]["exit_status"] != exit
         || (value["effect"]["state"] == "pending"
             && (detail.result.outcome != execute_command::workspace::Outcome::Unknown
@@ -304,6 +309,7 @@ pub(crate) fn workspace_node_result_matches(node: &Value, state: &Value) -> bool
     let outcome = node["result"]["outcome"]["kind"].as_str();
     let no_work = node["child_started"] == false;
     if no_work
+        && node["start_failure"].is_null()
         && (!node["steps"].as_array().is_some_and(Vec::is_empty) || node["output_bytes"] != 0)
     {
         return false;
@@ -346,6 +352,18 @@ pub(crate) fn workspace_node_result_matches(node: &Value, state: &Value) -> bool
             )
         }
         Some("node-output-limit") => ("refused", Some("output-limit"), true),
+        Some("node-start-failed") => (
+            if no_work {
+                "not-started"
+            } else {
+                "interrupted"
+            },
+            Some("start-failed"),
+            outcome == Some("Unknown")
+                && node["child_started"].as_bool().is_some()
+                && node["output_incomplete"] == false
+                && node["start_failure"].is_object(),
+        ),
         Some("node-output-incomplete") => (
             "incomplete",
             Some("held-output"),
@@ -364,6 +382,44 @@ pub(crate) fn workspace_node_result_matches(node: &Value, state: &Value) -> bool
     valid && node["ending"] == ending && *state == ending && node["cause"].as_str() == cause
 }
 
+/// Bind a failed start to the attempted step in the recorded exact execution.
+pub(crate) fn workspace_start_failure_matches(node: &Value, execution: &Value) -> bool {
+    let failure = &node["start_failure"];
+    if node["node_reason"] != "node-start-failed" {
+        return failure.is_null();
+    }
+    if !exact(failure, &["kind", "step_index"])
+        || !matches!(
+            failure["kind"].as_str(),
+            Some("not-found" | "not-executable" | "other")
+        )
+    {
+        return false;
+    }
+    let Some(index) = failure["step_index"].as_u64() else {
+        return false;
+    };
+    let steps = node["steps"].as_array();
+    match execution["kind"].as_str() {
+        Some("Sequence") => {
+            execution["steps"]
+                .as_array()
+                .is_some_and(|commands| index < commands.len() as u64)
+                && steps.is_some_and(|steps| {
+                    steps.len() as u64 == index + 1
+                        && steps
+                            .last()
+                            .is_some_and(|step| step["outcome"]["kind"] == "Unknown")
+                })
+                && node["child_started"] == (index > 0)
+        }
+        Some("Argv" | "Shell") => {
+            index == 0 && steps.is_some_and(Vec::is_empty) && node["child_started"] == false
+        }
+        _ => false,
+    }
+}
+
 fn validate_workspace_node(value: &Value) -> Result<(), LaneError> {
     let node = &value["effect"]["workspace_node"];
     if !exact(
@@ -374,6 +430,7 @@ fn validate_workspace_node(value: &Value) -> Result<(), LaneError> {
             "entry_version_differs",
             "output_incomplete",
             "child_started",
+            "start_failure",
             "output_bytes",
             "result",
             "steps",
@@ -382,6 +439,10 @@ fn validate_workspace_node(value: &Value) -> Result<(), LaneError> {
             "door_cause",
         ],
     ) || !workspace_node_result_matches(node, &value["effect"]["state"])
+        || !workspace_start_failure_matches(
+            node,
+            &value["effect"]["workspace"]["envelope"]["execution"],
+        )
         || !node["entry_version"].as_str().is_some_and(|version| {
             !version.is_empty()
                 && version.len() <= 80
