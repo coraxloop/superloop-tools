@@ -4,8 +4,87 @@ use execute_command::workspace::{Grant, GrantSnapshot};
 use serde::Deserialize;
 use serde_json::json;
 use std::collections::BTreeSet;
+use std::fs;
+use std::io::Write as _;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
 
 const MAX_DECLARATION: usize = 65_536;
+
+pub(super) fn context_name(worker_uid: u32) -> String {
+    format!("workspace-{worker_uid}.json")
+}
+
+/// Publish one run's context in the existing read-only directory bind. The
+/// directory bind, rather than a file bind, makes later rename replacement
+/// visible to a running box. Undeclared runs clear a reused UID's old name.
+pub(super) fn publish_context(
+    plan: &Plan,
+    settings: &Settings,
+    owner_home: &Path,
+    worker_uid: u32,
+    owner: u32,
+) -> Result<Option<PathBuf>, LaneError> {
+    let snapshot = &plan.document["compute_workspace"];
+    if !snapshot.is_object() && settings.socket_dir.is_none() {
+        return Ok(None);
+    }
+    let socket_root = settings
+        .socket_dir
+        .as_ref()
+        .ok_or_else(|| LaneError::input("workspace-context", "socket root is absent"))?;
+    let directory = socket_root.join("door");
+    if !snapshot.is_object() && !directory.exists() {
+        return Ok(None);
+    }
+    let _held = crate::pinned::open_protected(owner_home, &directory, owner)?;
+    let path = directory.join(context_name(worker_uid));
+    if !snapshot.is_object() {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(LaneError::operation("workspace-context", error.to_string()));
+            }
+        }
+        return Ok(None);
+    }
+    let node = snapshot["grant"]["node"]
+        .as_str()
+        .ok_or_else(|| refusal("workspace node is absent"))?;
+    let loop_name = plan.document["loop"]
+        .as_str()
+        .ok_or_else(|| refusal("workspace loop is absent"))?;
+    let alias = crate::door_node::workspace_alias(owner_home, loop_name, node, owner)?;
+    let checkout = plan.document["compute_placement"]["root"]
+        .as_str()
+        .or_else(|| snapshot["grant"]["workspace"].as_str())
+        .ok_or_else(|| refusal("workspace checkout is absent"))?;
+    let context = json!({"schema":1,"run":plan.document["run"],"worker_uid":worker_uid,
+        "node_alias":alias,"grant_digest":snapshot["digest"],"checkout":checkout,"cwd":[]});
+    let bytes = serde_json::to_vec(&context)
+        .map_err(|error| LaneError::operation("workspace-context", error.to_string()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(&directory)
+        .map_err(|error| LaneError::operation("workspace-context", error.to_string()))?;
+    temporary
+        .as_file()
+        .set_permissions(fs::Permissions::from_mode(0o644))
+        .map_err(|error| LaneError::operation("workspace-context", error.to_string()))?;
+    temporary
+        .write_all(&bytes)
+        .map_err(|error| LaneError::operation("workspace-context", error.to_string()))?;
+    temporary
+        .as_file()
+        .sync_all()
+        .map_err(|error| LaneError::operation("workspace-context", error.to_string()))?;
+    temporary
+        .persist(&path)
+        .map_err(|error| LaneError::operation("workspace-context", error.to_string()))?;
+    fs::File::open(&directory)
+        .and_then(|directory| directory.sync_all())
+        .map_err(|error| LaneError::operation("workspace-context", error.to_string()))?;
+    Ok(Some(path))
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -192,7 +271,6 @@ pub(super) fn reserve_before_publish<T>(
 mod tests {
     use super::super::{LaunchRequest, initial_reservation, publish_reservation, read_reservation};
     use super::*;
-    use std::os::unix::fs::PermissionsExt as _;
     use std::path::Path;
 
     fn input() -> String {
@@ -228,6 +306,47 @@ mod tests {
             &[],
             crate::door::Scope::Work,
         )
+    }
+
+    /// ´test:unit:workspace-launch-context-replaces-through-read-only-directory-bind´
+    #[test]
+    fn workspace_launch_context_replaces_through_read_only_directory_bind() {
+        let home = tempfile::tempdir().expect("owner home");
+        let config = home.path().join(".config/loops/alpha");
+        fs::create_dir_all(&config).expect("config");
+        let _configured = crate::door_node::fixture_for(&config, "fixture");
+        let socket_root = home.path().join(".var/loops/alpha/sockets");
+        fs::create_dir_all(socket_root.join("door")).expect("bound directory");
+        let mut settings = settings();
+        settings.socket_dir = Some(socket_root.clone());
+        let mut plan = plan();
+        plan.document["compute_workspace"] = crate::plan::fixture_workspace_snapshot();
+        plan.document["compute_placement"] = json!({"root":"/work/R"});
+        let owner = nix::unistd::Uid::effective().as_raw();
+        let path = publish_context(&plan, &settings, home.path(), 3000, owner)
+            .expect("publication")
+            .expect("declared context");
+        assert_eq!(path.parent(), Some(socket_root.join("door").as_path()));
+        let first: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("first read")).expect("first context");
+        assert_eq!(first["node_alias"], "fixture");
+        assert_eq!(
+            first["checkout"],
+            plan.document["compute_placement"]["root"]
+        );
+        assert_eq!(first["cwd"], json!([]));
+        plan.document["compute_workspace"]["digest"] = json!("b".repeat(64));
+        publish_context(&plan, &settings, home.path(), 3000, owner).expect("replacement");
+        let second: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("replacement read"))
+                .expect("replacement context");
+        assert_eq!(second["grant_digest"], "b".repeat(64));
+        plan.document
+            .as_object_mut()
+            .expect("plan")
+            .remove("compute_workspace");
+        publish_context(&plan, &settings, home.path(), 3000, owner).expect("undeclared");
+        assert!(!path.exists(), "reused worker UID has no stale context");
     }
 
     /// ´test:unit:workspace-declaration-binds-preview-before-publication´

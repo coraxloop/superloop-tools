@@ -4493,6 +4493,12 @@ fn run_with_program(
         let saved = record_failed_pre_driver(&reservation, &mut None, &error, caller.0, false);
         return Err(retain_startup_refusal(error, saved));
     }
+    if let Err(error) =
+        workspace::publish_context(&plan, &settings, owner_home, worker_uid, caller.0)
+    {
+        let saved = record_failed_pre_driver(&reservation, &mut None, &error, caller.0, false);
+        return Err(retain_startup_refusal(error, saved));
+    }
     let evidence_path = protected_identity_dir(&plan.driver_dir)?.join("launch-evidence.json");
     let primary = matrix::probe_on_host(
         &plan,
