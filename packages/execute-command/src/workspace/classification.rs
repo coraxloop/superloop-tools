@@ -250,7 +250,7 @@ pub fn classify(
             ));
         }
         return Ok(Classification::QuickAllow(QuickAllowance {
-            context_key: learned_key("compute", envelope, grant, &policy.revision)?,
+            context_key: learned_key("compute", envelope, grant, &grant.quick_policy_digest)?,
             rule: rule.id.clone(),
             revision: policy.revision.clone(),
             bindings: json!({"workspace":grant.workspace,"cwd":envelope.cwd,"PATH":rule.path,"programs":rule.programs,"env_additions":envelope.env_additions,"workspace_operands":rule.workspace_operands}),
