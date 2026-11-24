@@ -798,6 +798,8 @@ impl Store {
         input["publication"] = serde_json::to_value(&next).map_err(core)?;
         #[cfg(test)]
         view_tests::capture_service_before(&preview, &next, &input);
+        #[cfg(test)]
+        view_tests::before_owner_commit(&mut input);
         if let Some(key) = self.channel_view_key() {
             super::view::replace(key, None);
         }
