@@ -351,7 +351,12 @@ pub(crate) fn workspace_node_result_matches(node: &Value, state: &Value) -> bool
                 true,
             )
         }
-        Some("node-output-limit") => ("refused", Some("output-limit"), true),
+        Some("node-output-limit") => (
+            "refused",
+            Some("output-limit"),
+            node["start_failure"].is_null()
+                || (node["child_started"] == true && outcome == Some("Unknown")),
+        ),
         Some("node-start-failed") => (
             if no_work {
                 "not-started"
@@ -367,7 +372,9 @@ pub(crate) fn workspace_node_result_matches(node: &Value, state: &Value) -> bool
         Some("node-output-incomplete") => (
             "incomplete",
             Some("held-output"),
-            node["output_incomplete"] == true,
+            node["output_incomplete"] == true
+                && (node["start_failure"].is_null()
+                    || (node["child_started"] == true && outcome == Some("Unknown"))),
         ),
         Some("unobserved") => (
             "unknown",
@@ -385,8 +392,14 @@ pub(crate) fn workspace_node_result_matches(node: &Value, state: &Value) -> bool
 /// Bind a failed start to the attempted step in the recorded exact execution.
 pub(crate) fn workspace_start_failure_matches(node: &Value, execution: &Value) -> bool {
     let failure = &node["start_failure"];
-    if node["node_reason"] != "node-start-failed" {
-        return failure.is_null();
+    match node["node_reason"].as_str() {
+        Some("node-start-failed") => {}
+        Some("node-output-incomplete" | "node-output-limit") if failure.is_object() => {
+            if node["child_started"] != true {
+                return false;
+            }
+        }
+        _ => return failure.is_null(),
     }
     if !exact(failure, &["kind", "step_index"])
         || !matches!(

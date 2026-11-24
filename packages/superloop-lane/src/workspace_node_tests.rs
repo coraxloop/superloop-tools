@@ -625,6 +625,128 @@ fn workspace_node_entry_bounds_escaped_descendant_output_pipe() {
     }
 }
 
+struct EscapedHolder {
+    marker: PathBuf,
+}
+
+impl Drop for EscapedHolder {
+    fn drop(&mut self) {
+        let Ok(pid) = fs::read_to_string(&self.marker) else {
+            return;
+        };
+        let Ok(pid) = pid.trim().parse::<i32>() else {
+            return;
+        };
+        let _ = nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid),
+            nix::sys::signal::Signal::SIGKILL,
+        );
+    }
+}
+
+/// ´test:unit:workspace-node-held-output-precedes-a-later-failed-start´
+#[test]
+fn workspace_node_held_output_precedes_a_later_failed_start() {
+    let fixture = Fixture::new();
+    let _holder = EscapedHolder {
+        marker: fixture.root.path().join("work/sub/escaped.pid"),
+    };
+    let call = fixture.call(Execution::Sequence {
+        steps: vec![
+            vec![
+                b"/bin/sh".to_vec(),
+                b"-c".to_vec(),
+                b"setsid /usr/bin/sleep 30 & echo $! > escaped.pid; printf ready".to_vec(),
+            ],
+            vec![b"/no-such-workspace-program".to_vec()],
+        ],
+    });
+    let (mut input, mut output, thread) = fixture.start_with_bounds(
+        &call,
+        CONTROL_SILENCE,
+        CONTROL_SILENCE,
+        MAX_OUTPUT_BYTES,
+        OUTPUT_WRITE_BOUND,
+        Duration::ZERO,
+    );
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+    control(&mut input, "start");
+    let frames = frames_until_terminal(&mut output);
+    let terminal = frames.last().unwrap();
+    assert_eq!(output_bytes(&frames, "stdout"), b"ready");
+    assert_eq!(terminal["reason"], "node-output-incomplete");
+    assert_eq!(terminal["output_incomplete"], true);
+    assert_eq!(terminal["child_started"], true);
+    assert_eq!(
+        terminal["start_failure"],
+        json!({"kind":"not-found","step_index":1})
+    );
+    assert_eq!(terminal["result"]["outcome"]["kind"], "Unknown");
+    thread.join().unwrap().unwrap();
+}
+
+/// ´test:unit:workspace-node-output-limit-precedes-a-later-failed-start´
+#[test]
+fn workspace_node_output_limit_precedes_a_later_failed_start() {
+    let fixture = Fixture::new();
+    let _holder = EscapedHolder {
+        marker: fixture.root.path().join("work/sub/escaped.pid"),
+    };
+    let call = fixture.call(Execution::Sequence {
+        steps: vec![
+            vec![
+                b"/bin/sh".to_vec(),
+                b"-c".to_vec(),
+                br"setsid /bin/sh -c 'while [ ! -e release ]; do /usr/bin/sleep 0.01; done; /usr/bin/head -c 4096 /dev/zero' & echo $! > escaped.pid; printf ready".to_vec(),
+            ],
+            vec![b"/no-such-workspace-program".to_vec()],
+        ],
+    });
+    let (mut input, mut output, thread) = fixture.start_with_bounds(
+        &call,
+        CONTROL_SILENCE,
+        CONTROL_SILENCE,
+        1024,
+        OUTPUT_WRITE_BOUND,
+        Duration::from_secs(30),
+    );
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+    control(&mut input, "start");
+    let mut stderr = Vec::new();
+    loop {
+        let frame = read_frame(&mut output).unwrap();
+        if frame["type"] == "stderr" {
+            stderr.extend(serde_json::from_value::<Vec<u8>>(frame["bytes"].clone()).unwrap());
+            if stderr.ends_with(b"not found\n") {
+                break;
+            }
+        }
+    }
+    fs::write(fixture.root.path().join("work/sub/release"), b"go").unwrap();
+    let terminal = frames_until_terminal(&mut output).pop().unwrap();
+    assert_eq!(terminal["reason"], "node-output-limit");
+    assert_eq!(terminal["output_incomplete"], true);
+    assert_eq!(terminal["child_started"], true);
+    assert_eq!(
+        terminal["start_failure"],
+        json!({"kind":"not-found","step_index":1})
+    );
+    thread.join().unwrap().unwrap();
+
+    let first = fixture.call(argv(&["/no-such-workspace-program"]));
+    let (mut input, mut output, thread) = fixture.start(&first, CONTROL_SILENCE, 1);
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+    control(&mut input, "start");
+    let terminal = frames_until_terminal(&mut output).pop().unwrap();
+    assert_eq!(terminal["reason"], "node-output-limit");
+    assert_eq!(terminal["child_started"], false);
+    assert_eq!(
+        terminal["start_failure"],
+        json!({"kind":"not-found","step_index":0})
+    );
+    thread.join().unwrap().unwrap();
+}
+
 /// ´test:unit:workspace-node-drain-follows-last-byte-with-total-bound´
 #[test]
 fn workspace_node_drain_follows_last_byte_with_total_bound() {
@@ -732,9 +854,38 @@ fn workspace_node_terminal_reasons_stay_separate_from_door_replies() {
         (CAUSE_NONE, &timed_out, true, "node-output-incomplete"),
         (CAUSE_NONE, &timed_out, false, "node-deadline"),
         (CAUSE_NONE, &completed, false, "node-complete"),
-        (CAUSE_STOP, &timed_out, true, "node-stopped"),
+        (CAUSE_STOP, &timed_out, true, "node-output-incomplete"),
+        (CAUSE_OUTPUT_LIMIT, &timed_out, true, "node-output-limit"),
     ] {
         assert_eq!(end_reason(cause, outcome, incomplete), reason);
         assert!(!reason.starts_with("door-"));
     }
+
+    let fixture = Fixture::new();
+    let _holder = EscapedHolder {
+        marker: fixture.root.path().join("work/sub/escaped.pid"),
+    };
+    let call = fixture.call(Execution::Shell {
+        shell: "/bin/sh".into(),
+        text:
+            "setsid /usr/bin/sleep 30 & echo $! > escaped.pid; printf ready; exec /usr/bin/sleep 30"
+                .into(),
+    });
+    let (mut input, mut output, thread) = fixture.start_with_bounds(
+        &call,
+        CONTROL_SILENCE,
+        CONTROL_SILENCE,
+        MAX_OUTPUT_BYTES,
+        OUTPUT_WRITE_BOUND,
+        Duration::ZERO,
+    );
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+    control(&mut input, "start");
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "stdout");
+    control(&mut input, "stop");
+    let terminal = frames_until_terminal(&mut output).pop().unwrap();
+    assert_eq!(terminal["reason"], "node-output-incomplete");
+    assert_eq!(terminal["output_incomplete"], true);
+    assert_eq!(terminal["start_failure"], Value::Null);
+    thread.join().unwrap().unwrap();
 }

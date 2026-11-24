@@ -291,6 +291,43 @@ fn workspace_record_reader_agrees_with_adapter_terminal_mapping() {
     assert!(RequestRecord::decode(older_entry).is_ok());
 }
 
+fn failed_sequence_fixture() -> (Value, Value) {
+    let output_len = b"prior".len() + b"/no-such-workspace-program: not found\n".len();
+    let mut row = finished_row(
+        "interrupted",
+        "door-complete",
+        "node-start-failed",
+        json!({"kind":"Unknown"}),
+        output_len as u64,
+    );
+    let grant = Grant::decode(row["effect"]["workspace"]["grant"].clone()).unwrap();
+    let envelope = Envelope::decode(json!({
+        "schema":3,"grant_digest":grant.digest().unwrap(),"cwd":["checkout"],
+        "execution":{"kind":"Sequence","steps":[
+            [b"/bin/sh".to_vec(),b"-c".to_vec(),b"printf prior".to_vec()],
+            [b"/no-such-workspace-program".to_vec()]]},
+        "env_additions":[],"deadline_ms":1000
+    }))
+    .unwrap();
+    let detail = &mut row["effect"]["workspace"];
+    detail["execution_digest"] = json!(canonical_digest(&envelope.execution).unwrap());
+    detail["context_digest"] =
+        json!(learned_key("compute", &envelope, &grant, "quick-1").unwrap()[2]);
+    detail["envelope"] = json!(envelope);
+    row["shape_key"] = detail["context_digest"].clone();
+    let successful = json!({"outcome":{"kind":"Exited","code":0},
+        "wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null});
+    let failed = json!({"outcome":{"kind":"Unknown"},
+        "wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null});
+    row["effect"]["workspace"]["steps"] = json!([successful, failed]);
+    let frame = json!({"schema":1,"type":"terminal","request_id":"R:1a",
+        "nonce":"fixture","result":row["effect"]["workspace"]["result"],
+        "steps":row["effect"]["workspace"]["steps"],"output_bytes":output_len,
+        "reason":"node-start-failed","output_incomplete":false,"child_started":true,
+        "start_failure":{"kind":"not-found","step_index":1}});
+    (row, frame)
+}
+
 /// ´test:unit:workspace-failed-start-status-is-record-readable´
 #[test]
 fn workspace_failed_start_status_is_record_readable() {
@@ -321,39 +358,9 @@ fn workspace_failed_start_status_is_record_readable() {
         row["effect"]["exit_status"] = json!(status);
         assert!(RequestRecord::decode(row).is_ok(), "{kind}");
     }
-    let output_len = b"prior".len() + b"/no-such-workspace-program: not found\n".len();
-    let mut row = finished_row(
-        "interrupted",
-        "door-workspace-start-failed",
-        "node-start-failed",
-        json!({"kind":"Unknown"}),
-        output_len as u64,
-    );
-    let grant = Grant::decode(row["effect"]["workspace"]["grant"].clone()).unwrap();
-    let envelope = Envelope::decode(json!({
-        "schema":3,"grant_digest":grant.digest().unwrap(),"cwd":["checkout"],
-        "execution":{"kind":"Sequence","steps":[
-            [b"/bin/sh".to_vec(),b"-c".to_vec(),b"printf prior".to_vec()],
-            [b"/no-such-workspace-program".to_vec()]]},
-        "env_additions":[],"deadline_ms":1000
-    }))
-    .unwrap();
-    let detail = &mut row["effect"]["workspace"];
-    detail["execution_digest"] = json!(canonical_digest(&envelope.execution).unwrap());
-    detail["context_digest"] =
-        json!(learned_key("compute", &envelope, &grant, "quick-1").unwrap()[2]);
-    detail["envelope"] = json!(envelope);
-    row["shape_key"] = detail["context_digest"].clone();
-    let successful = json!({"outcome":{"kind":"Exited","code":0},
-        "wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null});
-    let failed = json!({"outcome":{"kind":"Unknown"},
-        "wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null});
-    row["effect"]["workspace"]["steps"] = json!([successful, failed]);
-    let frame = json!({"schema":1,"type":"terminal","request_id":"R:1a",
-        "nonce":"fixture","result":row["effect"]["workspace"]["result"],
-        "steps":row["effect"]["workspace"]["steps"],"output_bytes":output_len,
-        "reason":"node-start-failed","output_incomplete":false,"child_started":true,
-        "start_failure":{"kind":"not-found","step_index":1}});
+    let (mut row, frame) = failed_sequence_fixture();
+    let mut held_row = row.clone();
+    let mut held_frame = frame.clone();
     let (evidence, status) =
         fixture_failed_start(frame, &row["effect"]["workspace"]["envelope"]["execution"]).unwrap();
     assert_eq!(evidence["ending"], "interrupted");
@@ -361,6 +368,92 @@ fn workspace_failed_start_status_is_record_readable() {
     row["effect"]["workspace_node"] = evidence;
     row["effect"]["exit_status"] = json!(127);
     assert!(RequestRecord::decode(row).is_ok());
+
+    held_frame["reason"] = json!("node-output-incomplete");
+    held_frame["output_incomplete"] = json!(true);
+    held_row["effect"]["state"] = json!("incomplete");
+    held_row["effect"]["reason"] = json!("door-workspace-incomplete");
+    let (evidence, status) = fixture_failed_start(
+        held_frame.clone(),
+        &held_row["effect"]["workspace"]["envelope"]["execution"],
+    )
+    .unwrap();
+    assert_eq!(evidence["ending"], "incomplete");
+    assert_eq!(evidence["cause"], "held-output");
+    assert_eq!(
+        evidence["start_failure"],
+        json!({"kind":"not-found","step_index":1})
+    );
+    assert_eq!(status, Some(127));
+    held_row["effect"]["workspace_node"] = evidence;
+    held_row["effect"]["exit_status"] = json!(127);
+    assert!(RequestRecord::decode(held_row.clone()).is_ok());
+
+    held_frame["child_started"] = json!(false);
+    assert_eq!(
+        fixture_failed_start(
+            held_frame,
+            &held_row["effect"]["workspace"]["envelope"]["execution"],
+        )
+        .unwrap_err()
+        .kind,
+        "door-workspace-protocol-refusal"
+    );
+}
+
+/// ´test:unit:workspace-output-limit-retains-a-later-failed-start´
+#[test]
+fn workspace_output_limit_retains_a_later_failed_start() {
+    use crate::door::workspace_adapter::fixture_failed_start;
+    let (mut row, mut frame) = failed_sequence_fixture();
+    frame["reason"] = json!("node-output-limit");
+    frame["output_incomplete"] = json!(true);
+    row["effect"]["state"] = json!("refused");
+    row["effect"]["reason"] = json!("door-output-limit-refusal");
+    let (evidence, status) = fixture_failed_start(
+        frame.clone(),
+        &row["effect"]["workspace"]["envelope"]["execution"],
+    )
+    .unwrap();
+    assert_eq!(evidence["ending"], "refused");
+    assert_eq!(evidence["cause"], "output-limit");
+    assert_eq!(
+        evidence["start_failure"],
+        json!({"kind":"not-found","step_index":1})
+    );
+    assert_eq!(status, Some(127));
+    row["effect"]["workspace_node"] = evidence;
+    row["effect"]["exit_status"] = json!(127);
+    assert!(RequestRecord::decode(row.clone()).is_ok());
+
+    frame["child_started"] = json!(false);
+    assert_eq!(
+        fixture_failed_start(frame, &row["effect"]["workspace"]["envelope"]["execution"])
+            .unwrap_err()
+            .kind,
+        "door-workspace-protocol-refusal"
+    );
+    let first_row = finished_row(
+        "refused",
+        "door-output-limit-refusal",
+        "node-output-limit",
+        json!({"kind":"Unknown"}),
+        1,
+    );
+    let first_frame = json!({"schema":1,"type":"terminal","request_id":"R:1a",
+        "nonce":"fixture","result":first_row["effect"]["workspace"]["result"],
+        "steps":[],"output_bytes":1,"reason":"node-output-limit",
+        "output_incomplete":true,"child_started":false,
+        "start_failure":{"kind":"not-found","step_index":0}});
+    assert_eq!(
+        fixture_failed_start(
+            first_frame,
+            &first_row["effect"]["workspace"]["envelope"]["execution"],
+        )
+        .unwrap_err()
+        .kind,
+        "door-workspace-protocol-refusal"
+    );
 }
 /// ´test:unit:workspace-record-seven-is-strict-and-six-is-unchanged´
 #[test]

@@ -35,12 +35,12 @@ const CAUSE_OUTPUT_LIMIT: u8 = 5;
 
 const fn end_reason(cause: u8, outcome: &Outcome, incomplete: bool) -> &'static str {
     match cause {
+        CAUSE_OUTPUT_LIMIT => "node-output-limit",
+        _ if incomplete => "node-output-incomplete",
         CAUSE_STOP => "node-stopped",
         CAUSE_INPUT_GONE => "node-input-closed",
         CAUSE_SILENCE => "node-heartbeat-silence",
         CAUSE_MALFORMED => "node-malformed-control",
-        CAUSE_OUTPUT_LIMIT => "node-output-limit",
-        _ if incomplete => "node-output-incomplete",
         _ if matches!(outcome, Outcome::TimedOut) => "node-deadline",
         _ => "node-complete",
     }
@@ -671,6 +671,7 @@ fn relay_events<W: AsRawFd>(
     let mut result = None;
     let mut command_ended = None;
     let mut incomplete = false;
+    let mut held_output = false;
     while streams_closed < 2 || result.is_none() {
         if let Some(ended) = command_ended {
             let last_byte = *state
@@ -680,6 +681,7 @@ fn relay_events<W: AsRawFd>(
             if drain_expired(ended, last_byte, Instant::now(), bounds.drain) {
                 state.stop_readers.store(true, Ordering::Release);
                 incomplete = streams_closed < 2;
+                held_output |= incomplete;
             }
         }
         let event = if result.is_some() {
@@ -717,14 +719,15 @@ fn relay_events<W: AsRawFd>(
         }
     }
     let measured = result.ok_or_else(|| io::Error::other("measurements absent"))?;
-    let reason = if measured.start_failure.is_some() {
+    let cause = state.cause.load(Ordering::Acquire);
+    let reason = if cause == CAUSE_OUTPUT_LIMIT {
+        "node-output-limit"
+    } else if held_output || incomplete {
+        "node-output-incomplete"
+    } else if measured.start_failure.is_some() {
         "node-start-failed"
     } else {
-        end_reason(
-            state.cause.load(Ordering::Acquire),
-            &measured.result.outcome,
-            incomplete,
-        )
+        end_reason(cause, &measured.result.outcome, incomplete)
     };
     write_frame_before(
         output,
