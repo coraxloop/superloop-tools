@@ -1695,6 +1695,35 @@ fn frame_read_until(stream: &mut UnixStream, deadline: Instant) -> io::Result<Va
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))
 }
 
+// Keep the original schema-three bytes for the custody decoder. The socket
+// limit is selected only after parsing the frame; schema two retains its old
+// limit even when the peer supplies a longer length prefix.
+fn request_frame_read_until(
+    stream: &mut UnixStream,
+    deadline: Instant,
+) -> io::Result<(Value, Vec<u8>)> {
+    let mut length = [0_u8; 4];
+    read_exact_until(stream, &mut length, deadline)?;
+    let length = usize::try_from(u32::from_be_bytes(length)).unwrap_or(usize::MAX);
+    if length > execute_command::workspace::MAX_WIRE_BYTES {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door frame exceeds limit",
+        ));
+    }
+    let mut bytes = vec![0; length];
+    read_exact_until(stream, &mut bytes, deadline)?;
+    let value: Value = serde_json::from_slice(&bytes)
+        .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    if length > FRAME_LIMIT && value["schema"] != 3 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door frame exceeds limit",
+        ));
+    }
+    Ok((value, bytes))
+}
+
 #[allow(unsafe_code)]
 fn peer_uid(stream: &UnixStream) -> io::Result<u32> {
     let mut cred = libc::ucred {
@@ -3819,7 +3848,8 @@ fn run_service_with_snapshot(
             let started = acceptance.awake;
             let result = (|| {
                 let uid = mapped_peer_uid(&stream, &peer_map)?;
-                let request = frame_read_until(&mut stream, started + PEER_DEADLINE)?;
+                let (request, _request_wire) =
+                    request_frame_read_until(&mut stream, started + PEER_DEADLINE)?;
                 let probe_run = transport::argument_bytes(&request).and_then(|args| {
                     (args.len() == 2 && args[0] == b"door-shape-probe")
                         .then(|| String::from_utf8(args[1].clone()).ok())
@@ -9348,5 +9378,42 @@ mod tests {
         writer.join().expect("bounded writer");
         let error = result.expect_err("whole frame deadline");
         assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+    }
+
+    /// ´test:unit:workspace-socket-reader-preserves-wire-and-legacy-bound´
+    #[test]
+    fn workspace_socket_reader_preserves_wire_and_legacy_bound() {
+        let payload = " ".repeat(super::FRAME_LIMIT);
+        for schema in [2, 3] {
+            let (mut client, mut server) = FixtureClient::pair().expect("fixture pair");
+            let wire = serde_json::to_vec(&json!({"schema":schema,"padding":payload}))
+                .expect("request bytes");
+            let writer = thread::spawn(move || {
+                client
+                    .write_all(
+                        &u32::try_from(wire.len())
+                            .expect("bounded length")
+                            .to_be_bytes(),
+                    )
+                    .expect("frame length");
+                client.write_all(&wire).expect("frame body");
+                wire
+            });
+            let result = super::request_frame_read_until(
+                server.wire(),
+                Instant::now() + Duration::from_secs(5),
+            );
+            let original = writer.join().expect("writer");
+            if schema == 3 {
+                let (value, exact) = result.expect("workspace bound");
+                assert_eq!(value["schema"], 3);
+                assert_eq!(exact, original);
+            } else {
+                assert_eq!(
+                    result.expect_err("legacy bound").kind(),
+                    io::ErrorKind::InvalidData
+                );
+            }
+        }
     }
 }
