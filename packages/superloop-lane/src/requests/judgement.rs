@@ -44,6 +44,21 @@ fn registered_receive_rule(record: &Value) -> bool {
         && rule["mirror_ref"] == record["mirror_ref"]
 }
 
+fn workspace_quick_rule(record: &Value) -> bool {
+    let rule = &record["matched_rule"];
+    record["schema"] == 7
+        && record["class"] == "compute"
+        && record["operation"] == "compute-workspace"
+        && record["would_do_source"] == "quick-rule"
+        && (record["decision_tier"] == "quick-rule"
+            || (!record["label"].is_null() && record["decision_tier"] == "superloop"))
+        && record["would_do"]["decision"] == "allow"
+        && super::exact(rule, &["rule", "policy_digest"])
+        && super::word(&rule["rule"], 160)
+        && rule["policy_digest"] == record["effect"]["workspace"]["grant"]["quick_policy_digest"]
+        && record["would_do"]["reason"] == rule["rule"]
+}
+
 /// Initialize an intent or mechanically convert historical evidence.
 pub fn initialize(record: &mut Value) {
     record["effect"]["ending"] = super::unobserved_ending();
@@ -111,10 +126,10 @@ pub fn valid(record: &Value) -> bool {
     }
     if !matches!(
         record["decision_tier"].as_str(),
-        Some("fast-lane" | "agent" | "superloop" | "transport-rule")
+        Some("fast-lane" | "agent" | "superloop" | "transport-rule" | "quick-rule")
     ) || !matches!(
         record["would_do_source"].as_str(),
-        Some("fast-lane" | "agent" | "superloop" | "transport-rule")
+        Some("fast-lane" | "agent" | "superloop" | "transport-rule" | "quick-rule")
     ) {
         return false;
     }
@@ -126,6 +141,7 @@ pub fn valid(record: &Value) -> bool {
     let rule = &record["matched_rule"];
     if !rule.is_null()
         && !registered_receive_rule(record)
+        && !workspace_quick_rule(record)
         && (!super::exact(rule, &["class", "operation", "shape_key", "request_ids"])
             || rule["class"] != record["class"]
             || rule["operation"] != record["operation"]
@@ -148,6 +164,7 @@ pub fn valid(record: &Value) -> bool {
                 ),
                 Some("superloop") => record["would_do"]["decision"] == "undecided",
                 Some("transport-rule") => registered_receive_rule(record),
+                Some("quick-rule") => workspace_quick_rule(record),
                 _ => false,
             };
     }
@@ -199,7 +216,7 @@ pub(super) fn invalid_field(record: &Value) -> &'static str {
     for key in ["decision_tier", "would_do_source"] {
         if !matches!(
             record[key].as_str(),
-            Some("fast-lane" | "agent" | "superloop" | "transport-rule")
+            Some("fast-lane" | "agent" | "superloop" | "transport-rule" | "quick-rule")
         ) {
             return key;
         }

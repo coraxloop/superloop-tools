@@ -55,7 +55,10 @@ fn judgement_response(store: &Store, row: &super::RequestRecord) -> Value {
         .as_u64()
         .map_or_else(
             || {
-                if value["would_do_source"] == "fast-lane" {
+                if matches!(
+                    value["would_do_source"].as_str(),
+                    Some("fast-lane" | "quick-rule")
+                ) {
                     (json!(0), "fast-lane-provenance")
                 } else {
                     (Value::Null, "unmeasured")

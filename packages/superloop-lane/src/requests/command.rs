@@ -194,7 +194,7 @@ pub(super) fn retained_decision(value: &Value) -> Result<Verdict, LaneError> {
         match value["would_do_source"].as_str() {
             Some("agent") => Rung::BoundedAgent,
             Some("fast-lane") if !value["matched_rule"].is_null() => Rung::LearnedExactMatch,
-            Some("fast-lane" | "transport-rule") => Rung::DeterministicChecks,
+            Some("fast-lane" | "transport-rule" | "quick-rule") => Rung::DeterministicChecks,
             _ => Rung::LoopReview,
         },
         if value["agent_scope"] == "estate" {

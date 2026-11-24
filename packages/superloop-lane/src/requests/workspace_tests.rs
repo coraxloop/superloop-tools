@@ -27,6 +27,37 @@ fn record() -> Value {
     record
 }
 
+/// ´test:unit:workspace-quick-rule-citation-reads-only-for-its-grant-table´
+#[test]
+fn workspace_quick_rule_citation_reads_only_for_its_grant_table() {
+    let mut row = record();
+    let grant: Grant = serde_json::from_value(row["effect"]["workspace"]["grant"].clone()).unwrap();
+    let envelope: Envelope =
+        serde_json::from_value(row["effect"]["workspace"]["envelope"].clone()).unwrap();
+    let digest = grant.quick_policy_digest.clone();
+    let key = learned_key("compute", &envelope, &grant, &digest).unwrap();
+    row["shape_key"] = key[2].clone();
+    row["effect"]["workspace"]["context_digest"] = key[2].clone();
+    row["effect"]["workspace"]["policy_revision"] = json!(digest);
+    row["would_do_source"] = json!("quick-rule");
+    row["decision_tier"] = json!("quick-rule");
+    row["would_do"] = json!({"decision":"allow","reason":"fixture-rule"});
+    row["matched_rule"] = json!({"rule":"fixture-rule","policy_digest":digest});
+    assert_eq!(
+        RequestRecord::decode(row.clone()).unwrap().into_value(),
+        row
+    );
+    let mut changed = row.clone();
+    changed["matched_rule"]["policy_digest"] = json!("b".repeat(64));
+    assert!(RequestRecord::decode(changed).is_err());
+    let mut changed = row.clone();
+    changed["would_do"]["reason"] = json!("another-rule");
+    assert!(RequestRecord::decode(changed).is_err());
+    let mut changed = row;
+    changed["would_do_source"] = json!("fast-lane");
+    assert!(RequestRecord::decode(changed).is_err());
+}
+
 fn finished_row(
     ending: &str,
     reason: &str,
