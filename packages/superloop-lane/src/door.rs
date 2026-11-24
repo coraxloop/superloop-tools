@@ -907,6 +907,8 @@ pub(crate) mod retirement;
 mod transport;
 #[cfg(test)]
 pub(crate) use transport::Operation as RetirementOperation;
+#[cfg(test)]
+pub(crate) use transport::fixture_workspace_context_run;
 pub(crate) use transport::read_owner_leaf_optional;
 pub use transport::stub_call_stream;
 

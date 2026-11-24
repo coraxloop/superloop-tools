@@ -24,7 +24,12 @@ fn main() {
                 .unwrap_or(125)
         }
         Err(error) => {
-            let _written = writeln!(io::stderr().lock(), "door-socket: {error}");
+            let detail = error.to_string();
+            if detail.starts_with("door-workspace-") {
+                let _written = writeln!(io::stderr().lock(), "{detail}");
+            } else {
+                let _written = writeln!(io::stderr().lock(), "door-socket: {error}");
+            }
             125
         }
     };

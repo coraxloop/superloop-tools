@@ -55,13 +55,22 @@ pub(super) fn publish_context(
     let loop_name = plan.document["loop"]
         .as_str()
         .ok_or_else(|| refusal("workspace loop is absent"))?;
+    let run = plan.document["run"]
+        .as_str()
+        .filter(|run| crate::valid_run_name(run))
+        .ok_or_else(|| refusal("workspace run name differs"))?;
     let alias = crate::door_node::workspace_alias(owner_home, loop_name, node, owner)?;
     let checkout = plan.document["compute_placement"]["root"]
         .as_str()
         .or_else(|| snapshot["grant"]["workspace"].as_str())
         .ok_or_else(|| refusal("workspace checkout is absent"))?;
-    let context = json!({"schema":1,"run":plan.document["run"],"worker_uid":worker_uid,
-        "node_alias":alias,"grant_digest":snapshot["digest"],"checkout":checkout,"cwd":[]});
+    let shell = snapshot["grant"]["shells"]
+        .as_array()
+        .and_then(|shells| shells.first())
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default();
+    let context = json!({"schema":1,"run":run,"worker_uid":worker_uid,
+        "node_alias":alias,"grant_digest":snapshot["digest"],"checkout":checkout,"cwd":[],"shell":shell});
     let bytes = serde_json::to_vec(&context)
         .map_err(|error| LaneError::operation("workspace-context", error.to_string()))?;
     let mut temporary = tempfile::NamedTempFile::new_in(&directory)
@@ -320,10 +329,11 @@ mod tests {
         let mut settings = settings();
         settings.socket_dir = Some(socket_root.clone());
         let mut plan = plan();
+        plan.document["run"] = json!("R_2.3");
         plan.document["compute_workspace"] = crate::plan::fixture_workspace_snapshot();
         plan.document["compute_placement"] = json!({"root":"/work/R"});
         let owner = nix::unistd::Uid::effective().as_raw();
-        let path = publish_context(&plan, &settings, home.path(), 3000, owner)
+        let path = publish_context(&plan, &settings, home.path(), owner, owner)
             .expect("publication")
             .expect("declared context");
         assert_eq!(path.parent(), Some(socket_root.join("door").as_path()));
@@ -335,17 +345,28 @@ mod tests {
             plan.document["compute_placement"]["root"]
         );
         assert_eq!(first["cwd"], json!([]));
+        assert_eq!(first["shell"], "/bin/sh");
+        assert_eq!(
+            crate::door::fixture_workspace_context_run(&path).expect("stub reader"),
+            Some("R_2.3".into())
+        );
         plan.document["compute_workspace"]["digest"] = json!("b".repeat(64));
-        publish_context(&plan, &settings, home.path(), 3000, owner).expect("replacement");
+        publish_context(&plan, &settings, home.path(), owner, owner).expect("replacement");
         let second: serde_json::Value =
             serde_json::from_slice(&fs::read(&path).expect("replacement read"))
                 .expect("replacement context");
         assert_eq!(second["grant_digest"], "b".repeat(64));
+        plan.document["compute_workspace"]["grant"]["shells"] = json!([]);
+        publish_context(&plan, &settings, home.path(), owner, owner).expect("no declared shell");
+        let no_shell: serde_json::Value =
+            serde_json::from_slice(&fs::read(&path).expect("no-shell read"))
+                .expect("no-shell context");
+        assert_eq!(no_shell["shell"], "");
         plan.document
             .as_object_mut()
             .expect("plan")
             .remove("compute_workspace");
-        publish_context(&plan, &settings, home.path(), 3000, owner).expect("undeclared");
+        publish_context(&plan, &settings, home.path(), owner, owner).expect("undeclared");
         assert!(!path.exists(), "reused worker UID has no stale context");
     }
 
