@@ -328,6 +328,33 @@ fn workspace_node_entry_names_failed_start_and_prior_step() {
     }
 }
 
+/// ´test:unit:workspace-node-closed-standard-streams-do-not-hold-output´
+#[test]
+fn workspace_node_closed_standard_streams_do_not_hold_output() {
+    let fixture = Fixture::new();
+    let _holder = EscapedHolder {
+        marker: fixture.root.path().join("work/sub/escaped.pid"),
+    };
+    let call = fixture.call(Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "exec 1>&- 2>&-; setsid /usr/bin/sleep infinity & echo $! > escaped.pid".into(),
+    });
+    let (mut input, mut output, thread) = fixture.start_with_bounds(
+        &call,
+        CONTROL_SILENCE,
+        CONTROL_SILENCE,
+        MAX_OUTPUT_BYTES,
+        OUTPUT_WRITE_BOUND,
+        Duration::from_secs(5),
+    );
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+    control(&mut input, "start");
+    let terminal = frames_until_terminal(&mut output).pop().unwrap();
+    assert_eq!(terminal["reason"], "node-complete");
+    assert_eq!(terminal["output_incomplete"], false);
+    thread.join().unwrap().unwrap();
+}
+
 /// ´test:unit:workspace-node-entry-refuses-changed-context-before-open´
 #[test]
 fn workspace_node_entry_refuses_changed_context_before_open() {
@@ -812,6 +839,25 @@ fn workspace_node_entry_bounds_output_and_sequence() {
     let frames = frames_until_terminal(&mut output);
     assert_eq!(frames.last().unwrap()["reason"], "node-output-limit");
     assert!(output_bytes(&frames, "stdout").len() <= 1024);
+    thread.join().unwrap().unwrap();
+
+    let call = fixture.call(Execution::Sequence {
+        steps: vec![
+            vec![
+                b"/bin/sh".to_vec(),
+                b"-c".to_vec(),
+                b"/usr/bin/head -c 8388608 /dev/zero; /usr/bin/touch after-limit".to_vec(),
+            ],
+            vec![b"/usr/bin/touch".to_vec(), b"later-step".to_vec()],
+        ],
+    });
+    let (mut input, mut output, thread) = fixture.start(&call, CONTROL_SILENCE, 1024);
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+    control(&mut input, "start");
+    let frames = frames_until_terminal(&mut output);
+    assert_eq!(frames.last().unwrap()["reason"], "node-output-limit");
+    assert!(!fixture.root.path().join("work/sub/after-limit").exists());
+    assert!(!fixture.root.path().join("work/sub/later-step").exists());
     thread.join().unwrap().unwrap();
 
     let call = fixture.call(Execution::Sequence {
