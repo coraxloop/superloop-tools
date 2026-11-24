@@ -25,6 +25,7 @@ mod lifetime;
 pub mod metadata;
 #[allow(dead_code)] // The serving caller is the next W3 cut.
 pub(crate) mod workspace_adapter;
+mod workspace_tables;
 pub use workspace::{
     WorkspaceAllowance, WorkspaceIntent, WorkspaceLearned, WorkspaceRequest, workspace_request,
 };
@@ -2652,6 +2653,48 @@ fn serve_request_with_agent_at(
     started: Instant,
     acceptance: lifetime::Start,
 ) -> io::Result<(Value, Vec<u8>)> {
+    serve_request_with_agent_at_context(
+        stream,
+        registration,
+        peer,
+        request,
+        route,
+        runner,
+        owner_home,
+        rubric,
+        fixture_store,
+        agent,
+        configured_model,
+        started,
+        acceptance,
+        None,
+    )
+}
+
+struct WorkspaceSocketContext<'a> {
+    runs: &'a OwnedFd,
+    config_directory: &'a OwnedFd,
+    owner: u32,
+    wire: &'a [u8],
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn serve_request_with_agent_at_context(
+    stream: &mut UnixStream,
+    registration: &Registration,
+    peer: u32,
+    request: &Value,
+    route: Option<&transport::HostRunner>,
+    runner: Option<&dyn transport::Runner>,
+    owner_home: Option<&Path>,
+    rubric: Option<&Rubric>,
+    fixture_store: Option<&Store>,
+    agent: Option<&dyn agent::AgentRunner>,
+    configured_model: Option<&str>,
+    started: Instant,
+    acceptance: lifetime::Start,
+    workspace: Option<WorkspaceSocketContext<'_>>,
+) -> io::Result<(Value, Vec<u8>)> {
     let (bounded_request, registered_deadline_ms) = announce_compute_deadline(
         stream,
         registration,
@@ -2662,8 +2705,8 @@ fn serve_request_with_agent_at(
     );
     let request = &bounded_request;
     // Classify only a route-validated operation; all other shapes retain exclusive admission.
-    let workspace_request = request["schema"] == 3;
-    let admission_operation = if workspace_request {
+    let is_workspace_request = request["schema"] == 3;
+    let admission_operation = if is_workspace_request {
         Some(transport::Operation::Compute)
     } else {
         route.and_then(|route| {
@@ -2751,17 +2794,69 @@ fn serve_request_with_agent_at(
             started,
         )
     };
-    if workspace_request {
-        let mut reply = transport::refusal(
-            registration,
-            peer,
-            "door-workspace-protocol-refusal",
-            started,
-        );
+    if is_workspace_request {
+        let answer = (|| -> Result<String, LaneError> {
+            let context = workspace.ok_or_else(|| {
+                LaneError::input(
+                    "door-workspace-protocol-refusal",
+                    "workspace socket custody is absent",
+                )
+            })?;
+            let route = route.ok_or_else(|| {
+                LaneError::input(
+                    "door-workspace-unregistered",
+                    "registered node route is absent",
+                )
+            })?;
+            let request = workspace_request(
+                context.runs,
+                registration,
+                context.owner,
+                route.authenticated_node().name(),
+                context.wire,
+            )?;
+            let (quick, blacklist) =
+                workspace_tables::read(context.config_directory, context.owner, &request)?;
+            let classification = execute_command::workspace::classify(
+                request.envelope(),
+                request.grant(),
+                &quick,
+                &blacklist,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let opened = if fixture_store.is_none() {
+                Some(Store::open(
+                    owner_home.ok_or_else(|| {
+                        LaneError::input(
+                            "door-workspace-unregistered",
+                            "request store home is absent",
+                        )
+                    })?,
+                    &registration.loop_name,
+                    true,
+                )?)
+            } else {
+                None
+            };
+            let store = fixture_store.or(opened.as_ref()).ok_or_else(|| {
+                LaneError::input("door-workspace-unregistered", "request store is absent")
+            })?;
+            let (learned, _fault) = WorkspaceAllowance::from_store_lookup(store, &request)?;
+            let setting = store.effective_mode("compute")?;
+            let mode = execute_command::policy::DoorMode::from_record(setting["mode"].as_str())
+                .map_err(|error| LaneError::input(error.0, "workspace mode differs"))?;
+            let disposition = request.disposition(mode, &classification, learned.as_ref())?;
+            Ok(format!(
+                "{disposition:?}: this door does not yet run a workspace command without an exact rule; nothing was run"
+            ))
+        })();
+        let (reason, detail) = match answer {
+            Ok(detail) => ("door-workspace-protocol-refusal", detail),
+            Err(error) => (error.kind, error.detail),
+        };
+        let mut reply = transport::refusal(registration, peer, reason, started);
         reply["schema"] = json!(3);
-        reply["request_record_error"] = json!(
-            "this door does not yet run a workspace command without an exact rule; nothing was run"
-        );
+        reply["request_record_error"] = json!(detail);
         wait.report(&mut reply);
         wait.write_final(&reply, admission_deadline)?;
         return Ok((reply, Vec::new()));
@@ -3937,7 +4032,7 @@ fn run_service_with_snapshot(
             let started = acceptance.awake;
             let result = (|| {
                 let uid = mapped_peer_uid(&stream, &peer_map)?;
-                let (request, _request_wire) =
+                let (request, request_wire) =
                     request_frame_read_until(&mut stream, started + PEER_DEADLINE)?;
                 let probe_run = transport::argument_bytes(&request).and_then(|args| {
                     (args.len() == 2 && args[0] == b"door-shape-probe")
@@ -3981,7 +4076,7 @@ fn run_service_with_snapshot(
                         None
                     }
                 };
-                serve_request_with_agent_at(
+                serve_request_with_agent_at_context(
                     &mut stream,
                     &registration,
                     uid,
@@ -3995,6 +4090,12 @@ fn run_service_with_snapshot(
                     Some(&agent_runner.model),
                     started,
                     acceptance,
+                    Some(WorkspaceSocketContext {
+                        runs: runs.as_ref(),
+                        config_directory: config_directory.as_ref(),
+                        owner,
+                        wire: &request_wire,
+                    }),
                 )
                 .map(|_reply| ())
             })();
