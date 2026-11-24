@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-24
+
 ### Added
 
 - Read the workspace caller terminal states and node observation before a serving caller writes them, count the three new endings separately from pending in request shapes, and bind the observation's reason, ending and outcome to the adapter's results (``proto:superlooplane:workspace-readers``). The existing reply reader accepts the documented final reason names. Compatibility: this release writes no new workspace record or reply, and the readers need no box repin of their own. The whole release installs in one window, in the order the other entries here refer to: at an idle boundary for each loop, with no request in flight, stop its door service; replace `superloop-lane`, whose release carries the door service, door stub and vendor proxy, together with its entry `superloop` and the private `requests-helper`, all from this release; then for each loop run `superloop-lane install-door LOOP --dry-run`, `install-door LOOP` and `systemctl --user daemon-reload`, repin each run listed in `repin_required_runs` with `launch LOOP RUN --repin-door --dry-run` and then `--expect-digest`, and start its door service; refresh each pilot installation's vendor proxy with `install --pilot LOOP --refresh-proxy --dry-run` and `install --pilot LOOP --refresh-proxy` (``rule:superlooplane:door-rebuild-rollout``, ``alg:superlooplane:door-rollout-sequence``); and rebuild and reinstall `superloop-lane-node-exec` on each compute node in the same window, rehearsing it over the registered route before a later workspace caller is enabled. The derived shape index is repaired from records; once a later caller has written these forms, a rollback must retain this reader.
@@ -1197,7 +1199,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/coraxloop/superloop-tools/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/coraxloop/superloop-tools/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/coraxloop/superloop-tools/compare/v0.8.2...v0.9.0
 [0.8.2]: https://github.com/coraxloop/superloop-tools/compare/v0.8.1...v0.8.2
