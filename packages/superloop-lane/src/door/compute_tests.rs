@@ -211,6 +211,28 @@ fn compute_call(socket: &std::path::Path, command: &str) -> (Value, Vec<u8>, Vec
     (reply, output, errors)
 }
 
+/// ´test:unit:door-compute-held-preparation-reaches-worker-through-serving-route´
+#[test]
+fn door_compute_held_preparation_reaches_worker_through_serving_route() {
+    let fixture = Fixture::new();
+    fixture.set_floor("allow");
+    let (socket, calls, server) =
+        compute_stub_service(&fixture, "R", 3000, 3000, Scope::Work, None);
+    // Exercise the production serving path and its framed reply with a node
+    // footer under the same outer timeout shape as compute_command.
+    crate::fixture_exec::write_executable(
+        &fixture.home.join("node-R"),
+        b"#!/bin/sh\nexec /usr/bin/timeout -k 10 7 /usr/bin/python3 -c 'import json,sys; sys.stdin.buffer.read(); row=json.loads(sys.argv[1]); row[\"reason\"]=\"door-compute-preparation-held\"; print(\"earlier request preparation still holds the run lock; do not remove the lock file\",file=sys.stderr); print(\"DOOR-COMPUTE \"+json.dumps(row),file=sys.stderr); sys.exit(124)' \"$@\"\n",
+    )
+    .expect("held route fixture");
+    let (reply, _, errors) = compute_call(&socket, "/opt/fixture/bin/report cargo test --locked");
+    server.join().expect("server").expect("service");
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+    assert_eq!(reply["reason"], "door-compute-preparation-held");
+    assert_eq!(reply["status"], 125);
+    assert!(String::from_utf8_lossy(&errors).contains("do not remove the lock file"));
+}
+
 /// ´test:unit:door-compute-stub-keeps-command-failure-beside-record-failure´
 #[test]
 fn door_compute_stub_keeps_command_failure_beside_record_failure() {
@@ -1771,6 +1793,14 @@ fn door_compute_node_measurements_do_not_require_a_report_line() {
         json!({"wall_seconds":0.2,"exit_status":3})
     );
     assert!(missing["compute"]["wrapper_wall_seconds"].is_null());
+    let evidence = format!(
+        "DOOR-COMPUTE {}\n",
+        json!({"reason":"door-compute-preparation-held","detail":compute::pending(&words)})
+    );
+    let mut reply = json!({"reason":"door-complete","status":124,"compute_exit_status":124});
+    compute::finish(&mut reply, &words, evidence.as_bytes());
+    assert_eq!(reply["reason"], "door-compute-preparation-held");
+    assert_eq!(reply["status"], 125);
 }
 
 /// ´test:unit:door-rejected-compute-announces-before-admission´

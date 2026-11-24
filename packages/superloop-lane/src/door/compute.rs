@@ -162,6 +162,7 @@ pub(super) fn finish(reply: &mut Value, words: &[String], bytes: &[u8]) {
                 "door-complete"
                     | "door-compute-root-refusal"
                     | "door-compute-refresh-refusal"
+                    | "door-compute-preparation-held"
                     | "door-compute-lane-ref-absent"
                     | "door-compute-tool-refusal"
                     | "door-compute-retired-run"

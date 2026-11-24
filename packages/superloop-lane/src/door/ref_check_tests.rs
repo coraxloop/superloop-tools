@@ -118,6 +118,7 @@ fn door_input_pump_deadline_before_packet_keeps_ref_not_reached() {
         &abort,
         &stopped,
         Instant::now() + Duration::from_millis(40),
+        false,
     );
     assert_eq!(result, Err("door-deadline-refusal"));
     assert_eq!(ref_check.load(Ordering::Relaxed), super::REF_NOT_REACHED);
