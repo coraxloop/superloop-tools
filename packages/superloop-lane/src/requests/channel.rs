@@ -800,6 +800,10 @@ impl Store {
             super::view::replace(key, None);
         }
         let committed = client.call("--owner-commit", action, &self.loop_name, Some(&input))?;
+        #[cfg(test)]
+        let mut committed = committed;
+        #[cfg(test)]
+        view_tests::after_reply(&mut committed);
         if decode(committed["collection"].clone())? != next {
             return Err(core("service publication reply differs"));
         }

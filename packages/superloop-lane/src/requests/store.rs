@@ -1827,27 +1827,14 @@ impl Store {
             != Some(expected))
     }
 
-    fn record_attempt(&self, event: Value) -> Result<(), LaneError> {
-        let _phase = hold::phase(hold::Phase::AttemptJournal);
-        let phase = event["phase"]
-            .as_str()
-            .ok_or_else(|| problem("requests-record-refusal", "attempt phase is absent"))?;
-        if !matches!(
-            phase,
-            "withdrawn" | "withdrawal-failed" | "repaired" | "incomplete"
-        ) {
-            return Err(problem(
-                "requests-record-refusal",
-                "attempt phase is invalid",
-            ));
-        }
+    fn attempt_journal(&self) -> Result<Value, LaneError> {
         let prior = read_leaf(
             self.state_dir(),
             ATTEMPT_FILE,
             self.owner,
             MAX_ATTEMPT_BYTES,
         )?;
-        let mut journal: Value = if let Some(bytes) = prior {
+        let journal: Value = if let Some(bytes) = prior {
             serde_json::from_slice(&bytes)
                 .map_err(|_| problem("requests-record-refusal", "attempt journal is not JSON"))?
         } else {
@@ -1860,7 +1847,7 @@ impl Store {
             ));
         }
         let latest = journal["latest"]
-            .as_object_mut()
+            .as_object()
             .ok_or_else(|| problem("requests-record-refusal", "attempt journal latest differs"))?;
         if latest.len() > 4
             || latest.keys().any(|key| {
@@ -1875,7 +1862,7 @@ impl Store {
                 "attempt journal phases differ",
             ));
         }
-        for (saved_phase, saved) in latest.iter() {
+        for (saved_phase, saved) in latest {
             let keys = ["phase", "run", "reason", "rollback", "at_unix_ns"];
             if saved.as_object().is_none_or(|row| {
                 row.len() != keys.len() || keys.iter().any(|key| !row.contains_key(*key))
@@ -1903,6 +1890,31 @@ impl Store {
                 ));
             }
         }
+        Ok(journal)
+    }
+
+    pub(super) fn incomplete_attempt(&self) -> Result<Value, LaneError> {
+        Ok(self.attempt_journal()?["latest"]["incomplete"].clone())
+    }
+
+    fn record_attempt(&self, event: Value) -> Result<(), LaneError> {
+        let _phase = hold::phase(hold::Phase::AttemptJournal);
+        let phase = event["phase"]
+            .as_str()
+            .ok_or_else(|| problem("requests-record-refusal", "attempt phase is absent"))?;
+        if !matches!(
+            phase,
+            "withdrawn" | "withdrawal-failed" | "repaired" | "incomplete"
+        ) {
+            return Err(problem(
+                "requests-record-refusal",
+                "attempt phase is invalid",
+            ));
+        }
+        let mut journal = self.attempt_journal()?;
+        let latest = journal["latest"]
+            .as_object_mut()
+            .expect("validated attempt journal latest");
         latest.insert(phase.to_owned(), event);
         let bytes = serde_json::to_vec(&journal)
             .map_err(|error| problem("requests-record-refusal", error.to_string()))?;

@@ -6,7 +6,15 @@ use std::io::Write as _;
 
 type CommitHook = Box<dyn FnOnce(&Store)>;
 type ReadHook = Box<dyn FnOnce(&Client)>;
+type ReplyHook = Box<dyn FnOnce(&mut Value)>;
 thread_local! { static READ: RefCell<Option<ReadHook>> = const { RefCell::new(None) }; }
+thread_local! { static REPLY: RefCell<Option<ReplyHook>> = const { RefCell::new(None) }; }
+pub(super) fn after_reply(reply: &mut Value) {
+    let hook = REPLY.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(reply);
+    }
+}
 pub(super) fn after_read(client: &Client) {
     let hook = READ.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
@@ -25,6 +33,7 @@ impl Drop for Reset {
     fn drop(&mut self) {
         COMMITTED.with(|slot| slot.replace(None));
         READ.with(|slot| slot.replace(None));
+        REPLY.with(|slot| slot.replace(None));
     }
 }
 
@@ -49,6 +58,227 @@ fn seed() -> (Fixture, Store, Client) {
         .expect("bind real owner helper");
     let client = store.bound_client().unwrap().unwrap();
     (fixture, store, client)
+}
+
+fn duration_measurements() -> Vec<f64> {
+    let mut measurements = Vec::new();
+    let mut state = 0x6a09_e667_f3bc_c909_u64;
+    for scale in [
+        1_u64,
+        10,
+        1_000,
+        1_000_000,
+        1_000_000_000,
+        86_400_000_000_000,
+    ] {
+        for _ in 0..1_024 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let nanos = 1 + state % scale;
+            measurements.push(std::time::Duration::from_nanos(nanos).as_secs_f64());
+        }
+    }
+    measurements
+}
+
+/// ´test:unit:owner-service-reply-preserves-duration-measurement-bits´
+#[test]
+fn owner_service_reply_preserves_duration_measurement_bits() {
+    if !publication_tests::in_namespace() {
+        return;
+    }
+    let (_fixture, store, client) = seed();
+    let id = common_id("alpha", "R:aa");
+    store
+        .collection_command(
+            "triage",
+            Some(&json!({"schema":1,"items":[{"id":id,"decision":{
+                "answer":{"outcome":"allow"},"reason":"fixture"}}]})),
+            None,
+            false,
+        )
+        .expect("triage through owner");
+    store
+        .channel_service_locked(
+            &client,
+            "claim",
+            &json!({"schema":1,"id":id,"claim":"fixture-measurement"}),
+            None,
+        )
+        .expect("claim through owner");
+    let measurements = duration_measurements();
+    let original_bits = measurements
+        .iter()
+        .map(|value| value.to_bits())
+        .collect::<Vec<_>>();
+    let document = json!({"schema":1,"id":id,"claim":"fixture-measurement",
+        "result":{"effect":{"compute_wall_seconds":measurements}}});
+    let mut input = envelope(
+        &[],
+        Some(&document),
+        None,
+        false,
+        request_core::now_ns().expect("fixture clock"),
+    );
+    let preview = client
+        .call("--owner-preview", "complete", "alpha", Some(&input))
+        .expect("preview through helper");
+    let next = decode(preview["collection"].clone()).expect("preview collection");
+    input["expected"] = preview["before"].clone();
+    input["publication"] = serde_json::to_value(&next).expect("publication value");
+    let committed = client
+        .call("--owner-commit", "complete", "alpha", Some(&input))
+        .expect("commit through helper");
+    let returned = decode(committed["collection"].clone()).expect("returned collection");
+    let submitted = next
+        .requests
+        .iter()
+        .find(|row| row.id == id)
+        .and_then(|row| row.service_result.as_ref())
+        .expect("submitted result");
+    let received = returned
+        .requests
+        .iter()
+        .find(|row| row.id == id)
+        .and_then(|row| row.service_result.as_ref())
+        .expect("returned result");
+    let submitted = submitted["effect"]["compute_wall_seconds"]
+        .as_array()
+        .expect("submitted measurements");
+    let received = received["effect"]["compute_wall_seconds"]
+        .as_array()
+        .expect("returned measurements");
+    assert_eq!(submitted.len(), received.len());
+    let preview_differences = original_bits
+        .iter()
+        .zip(submitted)
+        .enumerate()
+        .filter_map(|(index, (before, after))| {
+            let after = after.as_f64().expect("preview float").to_bits();
+            (*before != after).then_some((index, *before, after))
+        })
+        .collect::<Vec<_>>();
+    let differences = submitted
+        .iter()
+        .zip(received)
+        .enumerate()
+        .filter_map(|(index, (before, after))| {
+            let before = before.as_f64().expect("submitted float").to_bits();
+            let after = after.as_f64().expect("returned float").to_bits();
+            (before != after).then_some((index, before, after))
+        })
+        .collect::<Vec<_>>();
+    let preview_first = preview_differences.first().map(|(index, before, after)| {
+        format!("effect.compute_wall_seconds[{index}]: {before:016x} -> {after:016x}")
+    });
+    let commit_first = differences.first().map(|(index, before, after)| {
+        format!("effect.compute_wall_seconds[{index}]: {before:016x} -> {after:016x}")
+    });
+    assert_eq!(
+        preview_differences.len() + differences.len(),
+        0,
+        "{} of {} values changed at preview, first {preview_first:?}; {} changed at commit, first {commit_first:?}",
+        preview_differences.len(),
+        submitted.len(),
+        differences.len(),
+    );
+    assert_eq!(next, returned, "owner collection differs after commit");
+}
+
+/// ´test:unit:status-names-incomplete-attempt-after-successful-owner-commit´
+#[test]
+fn status_names_incomplete_attempt_after_successful_owner_commit() {
+    if !publication_tests::in_namespace() {
+        return;
+    }
+    let (fixture, store, client) = seed();
+    let id = common_id("alpha", "R:aa");
+    store
+        .collection_command(
+            "triage",
+            Some(&json!({"schema":1,"items":[{"id":id,"decision":{
+                "answer":{"outcome":"allow"},"reason":"fixture"}}]})),
+            None,
+            false,
+        )
+        .expect("triage through owner");
+    store
+        .channel_service_locked(
+            &client,
+            "claim",
+            &json!({"schema":1,"id":id,"claim":"fixture-status"}),
+            None,
+        )
+        .expect("claim through owner");
+    let document = json!({"schema":1,"id":id,"claim":"fixture-status",
+        "result":{"reason":"door-complete","compute_exit_status":0}});
+    let wanted = id.clone();
+    let _reset = Reset;
+    REPLY.with(|slot| {
+        slot.replace(Some(Box::new(move |reply| {
+            let rows = reply["collection"]["requests"]
+                .as_array_mut()
+                .expect("owner rows");
+            let row = rows
+                .iter_mut()
+                .find(|row| row["id"] == wanted)
+                .expect("request");
+            row["service_result"] = json!({"reason":"changed"});
+        })));
+    });
+    let error = store
+        .channel_service_locked(&client, "complete", &document, None)
+        .expect_err("changed publication reply");
+    assert_eq!(error.kind, "requests-channel-refusal");
+    assert_eq!(error.detail, "service publication reply differs");
+    let saved = store
+        .channel_owner_read(&client)
+        .expect("owner committed despite reply mismatch");
+    assert_eq!(
+        saved
+            .requests
+            .iter()
+            .find(|row| row.id == id)
+            .expect("request")
+            .state,
+        State::Completed
+    );
+    store
+        .record_incomplete("R", "R:aa", "requests-channel-refusal")
+        .expect("door's incomplete marker");
+    let status = fixture
+        .command(&["status", "alpha"], b"")
+        .expect("production status");
+    assert_eq!(status["incomplete_attempt"]["phase"], "incomplete");
+    assert_eq!(status["incomplete_attempt"]["run"], "R");
+    assert_eq!(
+        status["incomplete_attempt"]["reason"],
+        "R:aa: requests-channel-refusal"
+    );
+    assert!(
+        status["counts"]
+            .as_array()
+            .expect("status counts")
+            .iter()
+            .any(|row| {
+                row["kind"] == "door-before-effect"
+                    && row["state"] == "completed"
+                    && row["count"] == 1
+            })
+    );
+    let listed = fixture
+        .command(&["list", "alpha"], b"")
+        .expect("production list");
+    assert_eq!(
+        listed["requests"]
+            .as_array()
+            .expect("owner rows")
+            .iter()
+            .find(|row| row["id"] == id)
+            .expect("completed row")["state"],
+        "completed"
+    );
 }
 
 /// ´test:unit:collection-view-triage-refreshes-before-claim´
