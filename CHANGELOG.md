@@ -10,6 +10,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 - Publish a replaceable, read-only boxed workspace context for declared runs, including the grant's first shell, and teach the stub to send schema-three argv for shell-equivalent plain words or the worker's unchanged shell text for everything else, with a one-line waiting notice. A simple leading assignment becomes an environment addition; a grant with no shell uses `/bin/sh` and reaches judgement as an undeclared-shell miss. Compatibility: release this cut together with the serving caller, since no door before it serves schema three. An undeclared run publishes no context and its stub sends the same schema-two bytes; Git transport does not read a workspace context. Refresh the boxed stub and each loop's pinned door copy before any declaration and before the next launch round of an already-declared run. A box launched by an earlier program has the door directory bind but no context file, and keeps schema two until a later declared launch round publishes one. A schema-three stub against an older door reports `door-workspace-unavailable` at once. The node entry and stored request forms do not change in this cut (``proto:superlooplane:workspace-launch-declaration``, ``proto:executecommand:compute-workspace``).
 
+### Fixed
+
+- Cancel a workspace command when the node entry's output reader fails, and close a failed pipe setup without waiting for the control route's silence bound (``proto:superlooplane:workspace-executor-call``). Compatibility: no wire or record shape changes; a reader error now ends the command and reports incomplete output, and the repaired node entry is reinstalled on each compute node with the next release.
+
 ## [0.11.0] - 2026-11-24
 
 ### Added

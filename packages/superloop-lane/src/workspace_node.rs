@@ -2,7 +2,7 @@
 //! The door owns admission; this entry verifies the received execution context.
 use crate::workspace_executor::{ExecutionMeasurements, PreparedExecution, StartFailure};
 use execute_command::workspace::{Envelope, Grant, Measurement, Outcome, canonical_digest};
-use nix::fcntl::{FcntlArg, OFlag, fcntl};
+use nix::fcntl::OFlag;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{File, OpenOptions};
@@ -565,6 +565,7 @@ fn read_child_output(
             if io::Error::last_os_error().kind() == io::ErrorKind::Interrupted {
                 continue;
             }
+            state.cancelled.store(true, Ordering::Release);
             let _sent = events.send(Event::Closed(true));
             return;
         }
@@ -605,6 +606,7 @@ fn read_child_output(
             }
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(_) => {
+                state.cancelled.store(true, Ordering::Release);
                 let _sent = events.send(Event::Closed(true));
                 return;
             }
@@ -746,11 +748,8 @@ fn relay_events<W: AsRawFd>(
     )
 }
 
-#[allow(unsafe_code)]
 fn duplicate_read_end(descriptor: &OwnedFd) -> io::Result<OwnedFd> {
-    let raw = fcntl(descriptor, FcntlArg::F_DUPFD_CLOEXEC(0))?;
-    // SAFETY: successful F_DUPFD_CLOEXEC returns a new owned descriptor.
-    Ok(unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) })
+    descriptor.try_clone()
 }
 
 fn stream_execution<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
@@ -764,10 +763,28 @@ fn stream_execution<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
     let (sender, receiver) = mpsc::sync_channel::<Event>(OUTPUT_QUEUE);
     std::thread::scope(|scope| -> io::Result<()> {
         scope.spawn(|| monitor_control(&mut input, &state, bounds.silence));
-        let (out_read, out_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
-        let (err_read, err_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
-        let out_read_guard = duplicate_read_end(&out_read)?;
-        let err_read_guard = duplicate_read_end(&err_read)?;
+        let setup = (|| {
+            let (out_read, out_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
+            let (err_read, err_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
+            let out_read_guard = duplicate_read_end(&out_read)?;
+            let err_read_guard = duplicate_read_end(&err_read)?;
+            Ok::<_, io::Error>((
+                out_read,
+                out_write,
+                err_read,
+                err_write,
+                out_read_guard,
+                err_read_guard,
+            ))
+        })();
+        let (out_read, out_write, err_read, err_write, out_read_guard, err_read_guard) = match setup
+        {
+            Ok(pipes) => pipes,
+            Err(error) => {
+                state.finished.store(true, Ordering::Release);
+                return Err(error);
+            }
+        };
         let out_writer = File::from(out_write);
         let err_writer = File::from(err_write);
         for (kind, descriptor) in [("stdout", out_read), ("stderr", err_read)] {
