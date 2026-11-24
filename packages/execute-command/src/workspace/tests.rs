@@ -177,7 +177,15 @@ fn workspace_shell_never_quick_and_blacklist_is_published() {
     let key = learned_key("compute", &e, &g, &p.revision).unwrap();
     for mode in [DoorMode::Allow, DoorMode::Audit, DoorMode::Enforce] {
         assert_eq!(
-            disposition(mode, &deny, &e, &g, &p.revision, Some(&key)).unwrap(),
+            disposition(
+                mode,
+                &deny,
+                &e,
+                &g,
+                &p.revision,
+                Some(LearnedDecision::Allow(&key)),
+            )
+            .unwrap(),
             Disposition::Block
         );
     }
@@ -313,12 +321,30 @@ fn workspace_identity_refusals_precede_classification() {
         shell: "/bin/foreign".into(),
         text: "true".into(),
     };
+    admit(&bad, Some(&g), "example", "R", "node-fingerprint").unwrap();
+}
+/// ´test:unit:workspace-undeclared-shell-reaches-judgement-with-mark´
+#[test]
+fn workspace_undeclared_shell_reaches_judgement_with_mark() {
+    let (mut envelope, mut grant, policy, blacklist) = fixture();
+    envelope.execution = Execution::Shell {
+        shell: "/bin/foreign".into(),
+        text: "printf '%s' 'fictional'".into(),
+    };
+    rebind(&mut envelope, &mut grant, &policy, &blacklist);
+    admit(&envelope, Some(&grant), "example", "R", "node-fingerprint").unwrap();
+    let Classification::Miss { reasons } =
+        classify(&envelope, &grant, &policy, &blacklist).unwrap()
+    else {
+        panic!("an undeclared shell must reach judgement");
+    };
     assert_eq!(
-        admit(&bad, Some(&g), "example", "R", "node-fingerprint")
-            .unwrap_err()
-            .kind,
-        "door-workspace-protocol-refusal"
+        reasons,
+        vec!["undeclared shell; syntax analysis is not authoritative"]
     );
+    let input = agent_input(&envelope, &grant, &reasons).unwrap();
+    assert_eq!(input["execution"], json!(envelope.execution));
+    assert_eq!(input["miss_reasons"], json!(reasons));
 }
 /// ´test:unit:workspace-learned-context-and-mode-do-not-import-legacy-labels´
 #[test]
@@ -329,18 +355,38 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
         reasons: vec!["unknown command".into()],
     };
     let old = json!(["compute", "compute", "compute:cargo test"]);
-    for mode in [DoorMode::Allow, DoorMode::Audit, DoorMode::Enforce] {
+    for (mode, expected) in [
+        (DoorMode::Allow, Disposition::ImmediateJudgeAlongside),
+        (DoorMode::Audit, Disposition::WaitForJudgement),
+        (DoorMode::Enforce, Disposition::WaitForJudgement),
+    ] {
         assert_eq!(
             disposition(mode, &miss, &e, &g, &p.revision, None).unwrap(),
-            Disposition::WaitForJudgement
+            expected
         );
         assert_eq!(
-            disposition(mode, &miss, &e, &g, &p.revision, Some(&old)).unwrap(),
-            Disposition::WaitForJudgement
+            disposition(
+                mode,
+                &miss,
+                &e,
+                &g,
+                &p.revision,
+                Some(LearnedDecision::Allow(&old))
+            )
+            .unwrap(),
+            expected
         );
     }
     assert_eq!(
-        disposition(DoorMode::Allow, &miss, &e, &g, &p.revision, Some(&key)).unwrap(),
+        disposition(
+            DoorMode::Allow,
+            &miss,
+            &e,
+            &g,
+            &p.revision,
+            Some(LearnedDecision::Allow(&key)),
+        )
+        .unwrap(),
         Disposition::Immediate
     );
     assert_eq!(
@@ -382,6 +428,83 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
             learned_key(class, &e, &g, &revision).unwrap(),
             key,
             "context component {slot}"
+        );
+    }
+}
+/// ´test:unit:workspace-disposition-modes-cover-each-decision-kind´
+#[test]
+fn workspace_disposition_modes_cover_each_decision_kind() {
+    let (e, g, p, b) = fixture();
+    let key = learned_key("compute", &e, &g, &p.revision).unwrap();
+    let quick = classify(&e, &g, &p, &b).unwrap();
+    let miss = Classification::Miss {
+        reasons: vec!["unknown command".into()],
+    };
+    let mut deny_table = b;
+    deny_table.entries.push(BlacklistEntry {
+        id: "published".into(),
+        execution_digest: canonical_digest(&e.execution).unwrap(),
+        reason: "owner block".into(),
+    });
+    let mut deny_grant = g.clone();
+    let mut deny_envelope = e.clone();
+    rebind(&mut deny_envelope, &mut deny_grant, &p, &deny_table);
+    let deny = classify(&deny_envelope, &deny_grant, &p, &deny_table).unwrap();
+    for (mode, quick_expected, miss_expected, refused_expected) in [
+        (
+            DoorMode::Allow,
+            Disposition::Immediate,
+            Disposition::ImmediateJudgeAlongside,
+            Disposition::ImmediateRecordRefusal,
+        ),
+        (
+            DoorMode::Enforce,
+            Disposition::Immediate,
+            Disposition::WaitForJudgement,
+            Disposition::Block,
+        ),
+        (
+            DoorMode::Audit,
+            Disposition::WaitForJudgement,
+            Disposition::WaitForJudgement,
+            Disposition::WaitForJudgement,
+        ),
+    ] {
+        assert_eq!(
+            disposition(mode, &quick, &e, &g, &p.revision, None).unwrap(),
+            quick_expected
+        );
+        assert_eq!(
+            disposition(
+                mode,
+                &miss,
+                &e,
+                &g,
+                &p.revision,
+                Some(LearnedDecision::Allow(&key)),
+            )
+            .unwrap(),
+            quick_expected
+        );
+        assert_eq!(
+            disposition(mode, &miss, &e, &g, &p.revision, None).unwrap(),
+            miss_expected
+        );
+        assert_eq!(
+            disposition(
+                mode,
+                &miss,
+                &e,
+                &g,
+                &p.revision,
+                Some(LearnedDecision::Refuse(&key)),
+            )
+            .unwrap(),
+            refused_expected
+        );
+        assert_eq!(
+            disposition(mode, &deny, &deny_envelope, &deny_grant, &p.revision, None).unwrap(),
+            Disposition::Block
         );
     }
 }
@@ -876,6 +999,33 @@ fn workspace_quick_evidence_cannot_be_replayed_for_another_context() {
                 .kind,
             "door-workspace-context-differs",
             "mutation {mutation}"
+        );
+    }
+}
+
+/// ´test:unit:workspace-learned-refusal-overrides-quick-allow-in-each-mode´
+#[test]
+fn workspace_learned_refusal_overrides_quick_allow_in_each_mode() {
+    let (envelope, grant, policy, blacklist) = fixture();
+    let quick = classify(&envelope, &grant, &policy, &blacklist).unwrap();
+    assert!(matches!(quick, Classification::QuickAllow(_)));
+    let key = learned_key("compute", &envelope, &grant, &policy.revision).unwrap();
+    for (mode, expected) in [
+        (DoorMode::Allow, Disposition::ImmediateRecordRefusal),
+        (DoorMode::Enforce, Disposition::Block),
+        (DoorMode::Audit, Disposition::WaitForJudgement),
+    ] {
+        assert_eq!(
+            disposition(
+                mode,
+                &quick,
+                &envelope,
+                &grant,
+                &policy.revision,
+                Some(LearnedDecision::Refuse(&key)),
+            )
+            .unwrap(),
+            expected,
         );
     }
 }

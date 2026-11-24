@@ -2470,11 +2470,10 @@ mod tests {
     use std::collections::BTreeMap;
     use std::fs;
     use std::os::fd::{AsRawFd as _, OwnedFd};
-    use std::os::unix::fs::PermissionsExt as _;
+    use std::os::unix::fs::{FileTypeExt as _, PermissionsExt as _};
     use std::os::unix::net::UnixListener;
-    use std::os::unix::process::CommandExt as _;
     use std::path::{Path, PathBuf};
-    use std::process::{Child, Command, Stdio};
+    use std::process::Command;
     use std::sync::{Arc, Mutex, mpsc};
     use std::time::{Duration, Instant};
     use tempfile::TempDir;
@@ -2695,31 +2694,15 @@ done
         );
     }
 
-    struct HeldWriterState {
-        child: Option<Child>,
-        closed: bool,
-    }
-
-    struct HeldWriterGuard(Arc<Mutex<HeldWriterState>>);
+    struct HeldWriterGuard(Arc<Mutex<Option<fs::File>>>);
 
     impl HeldWriterGuard {
         fn new() -> Self {
-            Self(Arc::new(Mutex::new(HeldWriterState {
-                child: None,
-                closed: false,
-            })))
+            Self(Arc::new(Mutex::new(None)))
         }
 
         fn close(&self) {
-            let child = {
-                let mut state = self.0.lock().expect("writer lock");
-                state.closed = true;
-                state.child.take()
-            };
-            if let Some(mut child) = child {
-                let _ignored = child.kill();
-                let _ignored = child.wait();
-            }
+            self.0.lock().expect("writer lock").take();
         }
     }
 
@@ -3435,7 +3418,7 @@ done
         let script = temp.path().join("stop-stand-in");
         executable(
             &script,
-            "printf ready > \"$TEST_READY\"; while [ ! -e \"$TEST_RELEASE\" ]; do sleep 0.01; done; exit 0",
+            "/usr/bin/touch \"$TEST_READY\"; while [ ! -e \"$TEST_RELEASE\" ]; do sleep 0.01; done; exit 0",
         );
         let ready = temp.path().join("ready");
         let release = temp.path().join("release");
@@ -3477,29 +3460,22 @@ done
                     .map_err(|error| {
                         crate::error::LaneError::operation("fixture", error.to_string())
                     })?;
-                let child = Command::new("/bin/sleep")
-                    .arg0("r002d23-fixture-holder")
-                    .arg("infinity")
-                    .process_group(0)
-                    .stdout(Stdio::from(writer))
-                    .spawn()
+                if !writer
+                    .metadata()
                     .map_err(|error| {
                         crate::error::LaneError::operation("fixture", error.to_string())
-                    })?;
-                let mut child = Some(child);
-                let closed = {
-                    let mut state = held.lock().expect("holder lock");
-                    if state.closed {
-                        true
-                    } else {
-                        state.child = child.take();
-                        false
-                    }
-                };
-                if closed && let Some(mut child) = child {
-                    let _ignored = child.kill();
-                    let _ignored = child.wait();
+                    })?
+                    .file_type()
+                    .is_fifo()
+                {
+                    return Err(crate::error::LaneError::operation(
+                        "fixture",
+                        "ready signal replaced the child's stdout pipe",
+                    ));
                 }
+                // This test process keeps the exact pipe writer open until the
+                // runner returns. No separately scheduled holder can exit first.
+                *held.lock().expect("holder lock") = Some(writer);
                 let _ = published.send(());
                 fs::write(&release, b"").map_err(|error| {
                     crate::error::LaneError::operation("fixture", error.to_string())
@@ -3526,7 +3502,7 @@ done
         fs::set_permissions(temp.path(), fs::Permissions::from_mode(0o700))
             .expect("protected fixture");
         let program = temp.path().join("child");
-        executable(&program, "printf 'before deadline\\n'; sleep 2");
+        executable(&program, "printf 'before deadline\\n'; sleep infinity");
         let spec = ChildSpec {
             program: PathBuf::from("/usr/bin/bash"),
             argv: vec![program.display().to_string()],

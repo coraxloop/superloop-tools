@@ -721,6 +721,7 @@ fn installed_seed_requires_recorded_image_program_and_repeats() {
     fs::remove_file(&historical_containerfile).expect("retire old build checkout template");
     let letter = home.join("letter");
     fs::write(&letter, "Launch this run.\n").expect("letter");
+    super::launch::fixture_work_route(home);
     let launch = crate::launch::LaunchRequest {
         backend: None,
         loop_name: "alpha".into(),

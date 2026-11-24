@@ -335,7 +335,7 @@ pub(crate) fn verify(
     alias: &str,
     pin: Option<&[u8]>,
     owner: u32,
-) -> Result<(), LaneError> {
+) -> Result<String, LaneError> {
     let Some(bytes) = crate::door::read_owner_leaf_optional(directory, RECORD, owner)? else {
         return Err(missing(directory)?);
     };
@@ -354,7 +354,7 @@ pub(crate) fn verify(
             "door-ssh_config or door-known_hosts differs from door-node-registration.json; run install-door",
         ));
     }
-    Ok(())
+    Ok(word(&value, "node")?.to_owned())
 }
 
 fn arguments(args: &[String]) -> Result<(Value, bool, Option<String>), LaneError> {

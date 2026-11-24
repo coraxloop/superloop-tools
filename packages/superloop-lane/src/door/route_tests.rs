@@ -386,6 +386,7 @@ fn route_service(
     )
     .expect("registration");
     let route = super::HostRunner {
+        node: crate::door::transport::AuthenticatedNode("fixture-node".to_owned()),
         node_root: "/srv/loops/loop-a".to_owned(),
         alias: "fixture".into(),
         ssh_options: Vec::new(),

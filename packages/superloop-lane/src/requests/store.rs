@@ -1764,7 +1764,7 @@ impl Store {
                     json!({
                         "class":key.0,"shape_key":key.1,"requests":0,"would_allow":0,
                         "would_refuse":0,"would_undecided":0,"would_refer":0,"labels_allow":0,"labels_refuse":0,
-                        "agreements":0,"corrections":0,"labels_after_undecided":0,"labels_after_refer":0,"effect_completed":0,"effect_refused":0,"effect_interrupted":0,"effect_pending":0,
+                        "agreements":0,"corrections":0,"labels_after_undecided":0,"labels_after_refer":0,"effect_completed":0,"effect_refused":0,"effect_interrupted":0,"effect_not_started":0,"effect_incomplete":0,"effect_unknown":0,"effect_pending":0,
                         "request_ids":[],"settings":[]
                     })
                 });
@@ -1794,6 +1794,9 @@ impl Store {
                     Some("completed") => "effect_completed",
                     Some("refused") => "effect_refused",
                     Some("interrupted") => "effect_interrupted",
+                    Some("not-started") => "effect_not_started",
+                    Some("incomplete") => "effect_incomplete",
+                    Some("unknown") => "effect_unknown",
                     _ => "effect_pending",
                 };
                 group[effect_group] = json!(group[effect_group].as_u64().unwrap_or(0) + 1);
@@ -1824,27 +1827,14 @@ impl Store {
             != Some(expected))
     }
 
-    fn record_attempt(&self, event: Value) -> Result<(), LaneError> {
-        let _phase = hold::phase(hold::Phase::AttemptJournal);
-        let phase = event["phase"]
-            .as_str()
-            .ok_or_else(|| problem("requests-record-refusal", "attempt phase is absent"))?;
-        if !matches!(
-            phase,
-            "withdrawn" | "withdrawal-failed" | "repaired" | "incomplete"
-        ) {
-            return Err(problem(
-                "requests-record-refusal",
-                "attempt phase is invalid",
-            ));
-        }
+    fn attempt_journal(&self) -> Result<Value, LaneError> {
         let prior = read_leaf(
             self.state_dir(),
             ATTEMPT_FILE,
             self.owner,
             MAX_ATTEMPT_BYTES,
         )?;
-        let mut journal: Value = if let Some(bytes) = prior {
+        let journal: Value = if let Some(bytes) = prior {
             serde_json::from_slice(&bytes)
                 .map_err(|_| problem("requests-record-refusal", "attempt journal is not JSON"))?
         } else {
@@ -1857,7 +1847,7 @@ impl Store {
             ));
         }
         let latest = journal["latest"]
-            .as_object_mut()
+            .as_object()
             .ok_or_else(|| problem("requests-record-refusal", "attempt journal latest differs"))?;
         if latest.len() > 4
             || latest.keys().any(|key| {
@@ -1872,7 +1862,7 @@ impl Store {
                 "attempt journal phases differ",
             ));
         }
-        for (saved_phase, saved) in latest.iter() {
+        for (saved_phase, saved) in latest {
             let keys = ["phase", "run", "reason", "rollback", "at_unix_ns"];
             if saved.as_object().is_none_or(|row| {
                 row.len() != keys.len() || keys.iter().any(|key| !row.contains_key(*key))
@@ -1900,6 +1890,31 @@ impl Store {
                 ));
             }
         }
+        Ok(journal)
+    }
+
+    pub(super) fn incomplete_attempt(&self) -> Result<Value, LaneError> {
+        Ok(self.attempt_journal()?["latest"]["incomplete"].clone())
+    }
+
+    fn record_attempt(&self, event: Value) -> Result<(), LaneError> {
+        let _phase = hold::phase(hold::Phase::AttemptJournal);
+        let phase = event["phase"]
+            .as_str()
+            .ok_or_else(|| problem("requests-record-refusal", "attempt phase is absent"))?;
+        if !matches!(
+            phase,
+            "withdrawn" | "withdrawal-failed" | "repaired" | "incomplete"
+        ) {
+            return Err(problem(
+                "requests-record-refusal",
+                "attempt phase is invalid",
+            ));
+        }
+        let mut journal = self.attempt_journal()?;
+        let latest = journal["latest"]
+            .as_object_mut()
+            .expect("validated attempt journal latest");
         latest.insert(phase.to_owned(), event);
         let bytes = serde_json::to_vec(&journal)
             .map_err(|error| problem("requests-record-refusal", error.to_string()))?;

@@ -281,6 +281,11 @@ fn validate_workspace_effect(value: &Value) -> Result<(), LaneError> {
         execute_command::workspace::Outcome::Exited { code } => json!(code),
         _ => Value::Null,
     };
+    let exit = match value["effect"]["workspace_node"]["start_failure"]["kind"].as_str() {
+        Some("not-found") => json!(127),
+        Some("not-executable" | "other") => json!(126),
+        _ => exit,
+    };
     if value["effect"]["exit_status"] != exit
         || (value["effect"]["state"] == "pending"
             && (detail.result.outcome != execute_command::workspace::Outcome::Unknown
@@ -295,6 +300,181 @@ fn validate_workspace_effect(value: &Value) -> Result<(), LaneError> {
         return Err(refusal(
             "requests-record-refusal",
             "workspace learning identity differs",
+        ));
+    }
+    Ok(())
+}
+
+pub(crate) fn workspace_node_result_matches(node: &Value, state: &Value) -> bool {
+    let outcome = node["result"]["outcome"]["kind"].as_str();
+    let no_work = node["child_started"] == false;
+    if no_work
+        && node["start_failure"].is_null()
+        && (!node["steps"].as_array().is_some_and(Vec::is_empty) || node["output_bytes"] != 0)
+    {
+        return false;
+    }
+    let (ending, cause, valid) = match node["node_reason"].as_str() {
+        Some("node-complete") => (
+            "completed",
+            None,
+            outcome != Some("Unknown") && !no_work && node["output_incomplete"] == false,
+        ),
+        Some("node-deadline") => (
+            if no_work {
+                "not-started"
+            } else {
+                "interrupted"
+            },
+            Some("node-command-deadline"),
+            outcome == Some("TimedOut"),
+        ),
+        Some(
+            "node-stopped"
+            | "node-input-closed"
+            | "node-heartbeat-silence"
+            | "node-malformed-control",
+        ) => {
+            let cause = match node["node_reason"].as_str() {
+                Some("node-stopped") => "stop",
+                Some("node-input-closed") => "input-closed",
+                Some("node-heartbeat-silence") => "heartbeat-silence",
+                _ => "malformed-control",
+            };
+            (
+                if no_work {
+                    "not-started"
+                } else {
+                    "interrupted"
+                },
+                Some(cause),
+                true,
+            )
+        }
+        Some("node-output-limit") => (
+            "refused",
+            Some("output-limit"),
+            node["start_failure"].is_null()
+                || (node["child_started"] == true && outcome == Some("Unknown")),
+        ),
+        Some("node-start-failed") => (
+            if no_work {
+                "not-started"
+            } else {
+                "interrupted"
+            },
+            Some("start-failed"),
+            outcome == Some("Unknown")
+                && node["child_started"].as_bool().is_some()
+                && node["output_incomplete"] == false
+                && node["start_failure"].is_object(),
+        ),
+        Some("node-output-incomplete") => (
+            "incomplete",
+            Some("held-output"),
+            node["output_incomplete"] == true
+                && (node["start_failure"].is_null()
+                    || (node["child_started"] == true && outcome == Some("Unknown"))),
+        ),
+        Some("unobserved") => (
+            "unknown",
+            Some("route-incomplete"),
+            outcome == Some("Unknown")
+                && node["child_started"].is_null()
+                && node["steps"].as_array().is_some_and(Vec::is_empty)
+                && node["output_incomplete"] == true,
+        ),
+        _ => return false,
+    };
+    valid && node["ending"] == ending && *state == ending && node["cause"].as_str() == cause
+}
+
+/// Bind a failed start to the attempted step in the recorded exact execution.
+pub(crate) fn workspace_start_failure_matches(node: &Value, execution: &Value) -> bool {
+    let failure = &node["start_failure"];
+    match node["node_reason"].as_str() {
+        Some("node-start-failed") => {}
+        Some("node-output-incomplete" | "node-output-limit") if failure.is_object() => {
+            if node["child_started"] != true {
+                return false;
+            }
+        }
+        _ => return failure.is_null(),
+    }
+    if !exact(failure, &["kind", "step_index"])
+        || !matches!(
+            failure["kind"].as_str(),
+            Some("not-found" | "not-executable" | "other")
+        )
+    {
+        return false;
+    }
+    let Some(index) = failure["step_index"].as_u64() else {
+        return false;
+    };
+    let steps = node["steps"].as_array();
+    match execution["kind"].as_str() {
+        Some("Sequence") => {
+            execution["steps"]
+                .as_array()
+                .is_some_and(|commands| index < commands.len() as u64)
+                && steps.is_some_and(|steps| {
+                    steps.len() as u64 == index + 1
+                        && steps
+                            .last()
+                            .is_some_and(|step| step["outcome"]["kind"] == "Unknown")
+                })
+                && node["child_started"] == (index > 0)
+        }
+        Some("Argv" | "Shell") => {
+            index == 0 && steps.is_some_and(Vec::is_empty) && node["child_started"] == false
+        }
+        _ => false,
+    }
+}
+
+fn validate_workspace_node(value: &Value) -> Result<(), LaneError> {
+    let node = &value["effect"]["workspace_node"];
+    if !exact(
+        node,
+        &[
+            "node_reason",
+            "entry_version",
+            "entry_version_differs",
+            "output_incomplete",
+            "child_started",
+            "start_failure",
+            "output_bytes",
+            "result",
+            "steps",
+            "ending",
+            "cause",
+            "door_cause",
+        ],
+    ) || !workspace_node_result_matches(node, &value["effect"]["state"])
+        || !workspace_start_failure_matches(
+            node,
+            &value["effect"]["workspace"]["envelope"]["execution"],
+        )
+        || !node["entry_version"].as_str().is_some_and(|version| {
+            !version.is_empty()
+                && version.len() <= 80
+                && version.bytes().all(|byte| byte.is_ascii_graphic())
+        })
+        || node["entry_version_differs"].as_bool().is_none()
+        || node["output_incomplete"].as_bool().is_none()
+        || !(node["child_started"].is_null() || node["child_started"].is_boolean())
+        || node["output_bytes"]
+            .as_u64()
+            .is_none_or(|bytes| bytes > (crate::workspace_node::MAX_OUTPUT_BYTES + 8192) as u64)
+        || !(node["cause"].is_null() || word(&node["cause"], 80))
+        || !(node["door_cause"].is_null() || word(&node["door_cause"], 80))
+        || node["result"] != value["effect"]["workspace"]["result"]
+        || node["steps"] != value["effect"]["workspace"]["steps"]
+    {
+        return Err(refusal(
+            "requests-record-refusal",
+            "workspace node observation differs",
         ));
     }
     Ok(())
@@ -706,6 +886,16 @@ impl RequestRecord {
         if value["operation"] == "compute-workspace" {
             effect_keys.push("workspace");
             validate_workspace_effect(&value)?;
+            if value["effect"].get("workspace_node").is_some() {
+                effect_keys.push("workspace_node");
+                if value["effect"]["state"] == "pending" {
+                    return Err(refusal(
+                        "requests-record-refusal",
+                        "pending workspace request has node observation",
+                    ));
+                }
+                validate_workspace_node(&value)?;
+            }
         }
         let needs_workspace_input =
             value["operation"] == "compute-workspace" && value["would_do_source"] == "agent";
@@ -766,12 +956,15 @@ impl RequestRecord {
                 "effect ending requires requests rewrite LOOP --dry-run",
             ));
         }
+        let effect_state = value["effect"]["state"].as_str();
+        let workspace_state = value["operation"] == "compute-workspace"
+            && matches!(effect_state, Some("not-started" | "incomplete" | "unknown"));
         if !valid_ending(&value["effect"]["ending"])
             || !exact(&value["effect"], &effect_keys)
-            || !matches!(
-                value["effect"]["state"].as_str(),
+            || !(matches!(
+                effect_state,
                 Some("pending" | "completed" | "refused" | "interrupted")
-            )
+            ) || workspace_state)
             || !(value["effect"]["reason"].is_null() || word(&value["effect"]["reason"], 128))
             || (effect_pending != ref_check.is_null())
             || (!effect_pending

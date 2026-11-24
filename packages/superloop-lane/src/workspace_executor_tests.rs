@@ -280,17 +280,19 @@ fn workspace_executor_refuses_stale_or_foreign_context() {
             .kind,
         "door-workspace-protocol-refusal"
     );
-    let invalid = f.envelope(Execution::Shell {
-        shell: "/unregistered-shell".into(),
+}
+
+/// ´test:unit:workspace-executor-does-not-recheck-shell-declaration´
+#[test]
+fn workspace_executor_does_not_recheck_shell_declaration() {
+    let mut alternate = Fixture::new();
+    alternate.grant.shells.clear();
+    let undeclared = alternate.envelope(Execution::Shell {
+        shell: "/bin/sh".into(),
         text: "exit 0".into(),
     });
-    assert_eq!(
-        PreparedExecution::from_reservation(&f.record(), &f.grant.node, &invalid)
-            .err()
-            .unwrap()
-            .kind,
-        "door-workspace-protocol-refusal"
-    );
+    let (measured, _, _) = alternate.run(alternate.prepare(&undeclared));
+    assert_eq!(measured.result.outcome, Outcome::Exited { code: 0 });
 }
 
 /// ´test:unit:workspace-executor-sequence-stops-with-explicit-unknown´
@@ -386,6 +388,7 @@ fn workspace_executor_timeout_retains_killed_step_and_stops_group() {
     assert_eq!(measured.steps.len(), 2);
     assert_eq!(measured.steps[1].outcome, Outcome::TimedOut);
     assert_eq!(measured.result.outcome, Outcome::TimedOut);
+    assert!(measured.child_started);
     assert!(measured.steps.iter().all(|m| m.wall_seconds.is_some()));
     let pid = fs::read_to_string(Path::new(&f.grant.workspace).join("sub/descendant")).unwrap();
     let path = format!("/proc/{}/stat", pid.trim());
@@ -427,6 +430,7 @@ fn workspace_executor_expiry_before_and_between_steps() {
     assert_eq!(out, [] as [u8; 0]);
     assert_eq!(measured.steps, [] as [Measurement; 0]);
     assert_eq!(measured.result.outcome, Outcome::TimedOut);
+    assert!(!measured.child_started);
     f.reader(&envelope, &measured);
     let mut prepared = f.prepare(&envelope);
     prepared.after_step = Some(|p, _| p.deadline = Instant::now());
@@ -470,8 +474,35 @@ fn workspace_executor_caller_cancellation_revokes_budget() {
         assert_eq!(measured.steps.len(), 1);
         assert_eq!(measured.steps[0].outcome, Outcome::TimedOut);
         assert_eq!(measured.result.outcome, Outcome::TimedOut);
+        assert!(measured.child_started);
         assert!(!Path::new(&f.grant.workspace).join("sub/forbidden").exists());
         f.reader(&envelope, &measured);
+    });
+}
+
+/// ´test:unit:workspace-quiet-child-carries-start-evidence´
+#[test]
+fn workspace_quiet_child_carries_start_evidence() {
+    let f = Fixture::new();
+    let envelope = f.envelope(Execution::Argv {
+        words: words(&["/bin/sh", "-c", "touch ready; exec sleep 60"]),
+    });
+    let cancelled = AtomicBool::new(false);
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            let ready = Path::new(&f.grant.workspace).join("sub/ready");
+            let deadline = Instant::now() + Duration::from_secs(5);
+            while !ready.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            cancelled.store(true, Ordering::Release);
+            assert!(ready.exists(), "quiet child reached cancellation witness");
+        });
+        let (measured, out, err) = f.run_with_cancel(f.prepare(&envelope), &cancelled);
+        assert!(measured.child_started);
+        assert_eq!(measured.steps, [] as [Measurement; 0]);
+        assert!(out.is_empty() && err.is_empty());
+        assert_eq!(measured.result.outcome, Outcome::TimedOut);
     });
 }
 

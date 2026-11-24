@@ -11,6 +11,10 @@ import time
 import resource
 import contextlib
 import stat
+import select
+import threading
+import struct
+import ctypes
 
 KILL_GRACE = 10
 DEADLINE_MARGIN = 5
@@ -20,13 +24,56 @@ class RetiredRun(Exception):
     pass
 
 
+class RouteClosed(Exception):
+    pass
+
+
+def route_ended():
+    # The route carries framed worker input; only this process reads it.
+    watcher = select.poll()
+    watcher.register(sys.stdin.fileno(), select.POLLHUP | select.POLLERR)
+    return any(events & (select.POLLHUP | select.POLLERR)
+               for _, events in watcher.poll(0))
+
+
+def lock_until(descriptor, deadline, preparation=False):
+    while True:
+        if time.monotonic() >= deadline:
+            if preparation and os.pread(descriptor, 64, 0) == b"pending\n":
+                since = os.fstat(descriptor).st_mtime_ns
+                raise PreparationHeld(
+                    "earlier request's preparation still holds the run lock "
+                    + f"since unix_ns={since}; wait for it to end, or inspect "
+                    + "and end that process on the registered node before retrying; "
+                    + "do not remove the lock file")
+            raise Deadline("node preparation deadline")
+        if route_ended():
+            raise RouteClosed("node compute route closed")
+        try:
+            fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            # The door's outer timeout sends TERM three seconds before this
+            # deadline. Name an inherited preparation hold while the route is
+            # still alive and able to carry its footer to the worker.
+            if (preparation and time.monotonic() >= deadline - 6
+                    and os.pread(descriptor, 64, 0) == b"pending\n"):
+                since = os.fstat(descriptor).st_mtime_ns
+                raise PreparationHeld(
+                    "earlier request's preparation still holds the run lock "
+                    + f"since unix_ns={since}; wait for it to end, or inspect "
+                    + "and end that process on the registered node before retrying; "
+                    + "do not remove the lock file")
+            threading.Event().wait(0.05)
+
+
 @contextlib.contextmanager
-def compute_lock(root, run):
+def compute_lock(root, run, deadline):
     # The directory hold only serializes open/unlink, never the run-lock wait.
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     lock = None
     try:
-        fcntl.flock(directory, fcntl.LOCK_EX)
+        lock_until(directory, deadline)
         try:
             if os.path.lexists(root / (run + ".retired")):
                 raise RetiredRun(run)
@@ -36,11 +83,11 @@ def compute_lock(root, run):
                 raise ValueError("run lock is not a regular file")
         finally:
             fcntl.flock(directory, fcntl.LOCK_UN)
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        lock_until(lock, deadline, preparation=True)
         # A retirement may have held the old inode while this caller waited.
         if os.path.lexists(root / (run + ".retired")):
             raise RetiredRun(run)
-        yield
+        yield lock
     finally:
         if lock is not None:
             os.close(lock)
@@ -51,17 +98,132 @@ class Deadline(Exception):
     pass
 
 
-def run_wrapper(command, **kwargs):
-    # Keep the group leader's pid so an outer TERM cannot orphan its wrapper.
-    with subprocess.Popen(command, start_new_session=True, **kwargs) as child:
+class PreparationHeld(Deadline):
+    pass
+
+
+LIBC = ctypes.CDLL(None, use_errno=True)
+PREPARATION_GRACE = 2
+
+
+def parent_death_signal(parent):
+    # This is called in the forked child before exec. The main Python thread
+    # starts both supervisors; Linux tracks that thread for PR_SET_PDEATHSIG.
+    if LIBC.prctl(1, signal.SIGTERM, 0, 0, 0) != 0 or os.getppid() != parent:
+        os._exit(125)
+
+
+@contextlib.contextmanager
+def supervised_process(command, lock=None, **kwargs):
+    parent = os.getpid()
+    passed = () if lock is None else (lock,)
+    child = subprocess.Popen(command, start_new_session=True, pass_fds=passed,
+                             preexec_fn=lambda: parent_death_signal(parent), **kwargs)
+    try:
+        yield child
+    finally:
+        if child.poll() is None:
+            child.terminate()
+        child.wait()
+
+
+def stop_supervisor(child):
+    if child.poll() is None:
+        child.terminate()
+    child.wait()
+
+
+def run_preparation(command, deadline, lock, **kwargs):
+    remaining = deadline - time.monotonic() - PREPARATION_GRACE
+    if remaining <= 0:
+        raise Deadline("node preparation deadline")
+    supervised = ["/usr/bin/timeout", "-k", str(PREPARATION_GRACE),
+                  str(remaining), *command]
+    with supervised_process(supervised, lock=lock, stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, stdin=subprocess.DEVNULL,
+                            **kwargs) as child:
         try:
-            return subprocess.CompletedProcess(command, child.wait())
+            while True:
+                if route_ended():
+                    raise RouteClosed("node compute route closed")
+                if time.monotonic() >= deadline:
+                    raise Deadline("node preparation deadline")
+                try:
+                    stdout, stderr = child.communicate(timeout=0.05)
+                    if child.returncode in (124, 137, -signal.SIGKILL):
+                        raise Deadline("node preparation deadline")
+                    result = subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+                    result.check_returncode()
+                    return result
+                except subprocess.TimeoutExpired:
+                    if child.poll() is not None:
+                        # A surviving writer may retain the supervisor's output
+                        # pipes. Its lock remains held, but this script must end.
+                        child.stdout.close()
+                        child.stderr.close()
+                        raise OSError("preparation supervisor ended while its writer remains; retry after that writer exits")
+        except (RouteClosed, Deadline):
+            stop_supervisor(child)
+            raise
+
+
+def remove_checkout(checkout, deadline, lock):
+    remover = "import shutil,sys; shutil.rmtree(sys.argv[1])"
+    run_preparation([sys.executable, "-c", remover, str(checkout)], deadline, lock)
+
+
+def read_exact(route, size):
+    collected = bytearray()
+    while len(collected) < size:
+        chunk = os.read(route, size - len(collected))
+        if not chunk:
+            return None
+        collected.extend(chunk)
+    return collected
+
+
+def child_input(route, destination):
+    try:
+        while True:
+            header = read_exact(route, 4)
+            if header is None:
+                return
+            size = struct.unpack(">I", header)[0]
+            if size == 0:
+                return
+            remaining = size
+            while remaining:
+                chunk = os.read(route, min(remaining, 65536))
+                if not chunk:
+                    return
+                destination.write(chunk)
+                destination.flush()
+                remaining -= len(chunk)
+    except (BrokenPipeError, OSError):
+        pass
+    finally:
+        destination.close()
+
+
+def run_wrapper(command, **kwargs):
+    # Timeout supervises its own command; the worker command inherits no lock.
+    with supervised_process(command, stdin=subprocess.PIPE, **kwargs) as child:
+        reader = threading.Thread(target=child_input,
+                                  args=(sys.stdin.fileno(), child.stdin), daemon=True)
+        reader.start()
+        try:
+            while True:
+                if route_ended():
+                    raise RouteClosed("node compute route closed")
+                try:
+                    return subprocess.CompletedProcess(command, child.wait(timeout=0.05))
+                except subprocess.TimeoutExpired:
+                    pass
+        except RouteClosed:
+            stop_supervisor(child)
+            raise
         except Deadline:
-            try:
-                os.killpg(child.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            child.wait()
+            stop_supervisor(child)
             raise
 
 
@@ -102,30 +264,41 @@ def main():
                 reason = "door-compute-settings-refusal"
                 raise ValueError("compute_environment." + key + " requires absolute paths")
         root.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with compute_lock(root, run):
+        with compute_lock(root, run, started + float(seconds)) as preparation_lock:
             for tool in ["/usr/bin/git", "/usr/bin/timeout", wrapper]:
                 if not os.access(tool, os.X_OK):
                     reason = "door-compute-tool-refusal"
                     raise ValueError("required node tool absent: " + tool)
             def git(*args, cwd=None):
-                return subprocess.run(["/usr/bin/git", *args], cwd=cwd,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                      check=True).stdout.decode().strip()
+                return run_preparation(["/usr/bin/git", *args], started + float(seconds),
+                                       preparation_lock, cwd=cwd).stdout.decode().strip()
             try:
                 commit = git("--git-dir=" + str(mirror), "rev-parse", "--verify", ref + "^{commit}")
             except subprocess.CalledProcessError:
                 reason = "door-compute-lane-ref-absent"
                 raise
+            os.lseek(preparation_lock, 0, os.SEEK_SET)
+            marker = os.read(preparation_lock, 64)
+            if marker not in (b"", b"pending\n"):
+                raise ValueError("run lock preparation marker malformed")
+            recovering = bool(marker)
+            if not recovering:
+                os.lseek(preparation_lock, 0, os.SEEK_SET)
+                os.write(preparation_lock, b"pending\n")
+                os.fsync(preparation_lock)
             if checkout.exists():
-                try:
-                    git("symbolic-ref", "--quiet", "HEAD", cwd=checkout)
-                except subprocess.CalledProcessError as error:
-                    if error.returncode != 1:
-                        raise
+                # An interrupted first clone or later fetch may leave a stale
+                # lock or partial tree. The marker survives every stopped step.
+                if recovering or not (checkout / ".git").is_dir():
+                    remove_checkout(checkout, started + float(seconds), preparation_lock)
                 else:
-                    # Clone --no-checkout can leave an unborn or default-branch
-                    # HEAD if preparation stops before the first detach.
-                    shutil.rmtree(checkout)
+                    try:
+                        git("symbolic-ref", "--quiet", "HEAD", cwd=checkout)
+                    except subprocess.CalledProcessError as error:
+                        if error.returncode != 1:
+                            raise
+                    else:
+                        remove_checkout(checkout, started + float(seconds), preparation_lock)
             created = not checkout.exists()
             if created:
                 git("clone", "--no-checkout", "--", str(mirror), str(checkout))
@@ -150,6 +323,8 @@ def main():
             changes = git("status", "--porcelain", "--untracked-files=all", "--ignored", cwd=checkout)
             detail["tree_clean"] = not changes
             detail["tree_change_count"] = len(changes.splitlines())
+            os.ftruncate(preparation_lock, 0)
+            os.fsync(preparation_lock)
             env = os.environ.copy()
             env.update(environment)
             env.pop("RUSTUP_TOOLCHAIN", None)
@@ -171,18 +346,25 @@ def main():
             if remaining <= 0:
                 reason = "door-request-deadline"
                 raise ValueError("no time remains for wrapper and termination grace")
+            if route_ended():
+                raise RouteClosed("node compute route closed")
             wrapper_started = time.monotonic()
             usage_before = resource.getrusage(resource.RUSAGE_CHILDREN)
             try:
-                result = run_wrapper(["/usr/bin/timeout", "-k", str(KILL_GRACE), str(remaining),
-                                      wrapper, *words], cwd=checkout, env=env)
+                # The inner deadline survives if the outer supervisor is killed
+                # without its child. Neither timeout nor the worker inherits the lock.
+                timed_command = ["/usr/bin/timeout", "-k", str(KILL_GRACE),
+                                 str(remaining), wrapper, *words]
+                result = run_wrapper(["/usr/bin/timeout", "-k", str(KILL_GRACE),
+                                      str(remaining), *timed_command],
+                                     cwd=checkout, env=env)
             finally:
                 wrapper_elapsed = time.monotonic() - wrapper_started
                 usage_after = resource.getrusage(resource.RUSAGE_CHILDREN)
                 detail["wrapper_wall_seconds"] = wrapper_elapsed
                 detail["wrapper_user_cpu_seconds"] = usage_after.ru_utime - usage_before.ru_utime
                 detail["wrapper_system_cpu_seconds"] = usage_after.ru_stime - usage_before.ru_stime
-            # GNU timeout's KILL also kills its own process group: Python then
+            # GNU timeout's KILL also kills its own process group: Python
             # observes -SIGKILL rather than the shell's conventional 137.
             status = 137 if result.returncode == -signal.SIGKILL else result.returncode
             if status < 0:
@@ -195,9 +377,17 @@ def main():
     except RetiredRun as error:
         reason = "door-compute-retired-run"
         print("retired run: " + str(error), file=sys.stderr, flush=True)
+    except PreparationHeld as error:
+        reason = "door-compute-preparation-held"
+        status = 124
+        print(str(error), file=sys.stderr, flush=True)
     except Deadline as error:
         reason = "door-request-deadline"
         status = 124
+        print(str(error), file=sys.stderr, flush=True)
+    except RouteClosed as error:
+        reason = "door-disconnect-refusal"
+        status = 125
         print(str(error), file=sys.stderr, flush=True)
     except (OSError, ValueError, subprocess.CalledProcessError) as error:
         print(str(error), file=sys.stderr, flush=True)

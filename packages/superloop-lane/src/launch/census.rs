@@ -38,6 +38,23 @@ fn root_entries(root: &Path) -> Result<Vec<(String, PathBuf)>, LaneError> {
     Ok(entries)
 }
 
+/// Find pending whole-record rewrites holding this run under the caller's runs-root lock.
+pub(super) fn pending_record_rewrites(
+    root: &Path,
+    loop_name: &str,
+    run: &str,
+) -> Result<Vec<Value>, LaneError> {
+    let mut counts = DesignationCounts::default();
+    for (name, path) in root_entries(root)? {
+        counts.rewrite(&name, &path, root, loop_name)?;
+    }
+    Ok(counts
+        .blockers
+        .into_iter()
+        .filter(|row| row["run"] == run)
+        .collect())
+}
+
 #[derive(Default)]
 struct DesignationCounts {
     live_without_member: usize,

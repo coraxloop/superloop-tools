@@ -132,6 +132,7 @@ fn read(store: &Store, action: &str, loop_name: &str, pending: bool) -> Result<V
             .collect::<Vec<_>>()
     );
     if action == "status" {
+        result["incomplete_attempt"] = store.incomplete_attempt()?;
         result["unpublished_effects"] = json!(
             records
                 .iter()

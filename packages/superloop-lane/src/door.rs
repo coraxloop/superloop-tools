@@ -23,7 +23,11 @@ mod agent_probes;
 pub mod config;
 mod lifetime;
 pub mod metadata;
-pub use workspace::{WorkspaceAllowance, WorkspaceRequest, workspace_request};
+#[allow(dead_code)] // The serving caller is the next W3 cut.
+pub(crate) mod workspace_adapter;
+pub use workspace::{
+    WorkspaceAllowance, WorkspaceIntent, WorkspaceLearned, WorkspaceRequest, workspace_request,
+};
 
 /// Format the final door reply for the SSH command boundary.
 #[must_use]
@@ -974,7 +978,9 @@ mod workspace {
     use std::os::fd::OwnedFd;
 
     use execute_command::policy::DoorMode;
-    use execute_command::workspace::{Classification, Disposition, canonical_digest, learned_key};
+    use execute_command::workspace::{
+        Classification, Disposition, LearnedDecision, canonical_digest, learned_key,
+    };
     use serde_json::{Value, json};
 
     use crate::error::LaneError;
@@ -986,6 +992,7 @@ mod workspace {
     pub struct WorkspaceRequest {
         envelope: execute_command::workspace::Envelope,
         grant: execute_command::workspace::Grant,
+        placement: Option<crate::placement::Placement>,
     }
 
     impl WorkspaceRequest {
@@ -999,6 +1006,12 @@ mod workspace {
         #[must_use]
         pub const fn grant(&self) -> &execute_command::workspace::Grant {
             &self.grant
+        }
+
+        /// Owner-held placement captured with this reservation, if declared.
+        #[must_use]
+        pub const fn placement(&self) -> Option<&crate::placement::Placement> {
+            self.placement.as_ref()
         }
     }
 
@@ -1049,14 +1062,14 @@ mod workspace {
                 format!("protected workspace plan differs: {}", error.line()),
             )
         })?;
-        let grant = snapshot
-            .ok_or_else(|| {
-                LaneError::input(
-                    "door-workspace-unregistered",
-                    "no protected workspace grant",
-                )
-            })?
-            .grant;
+        let snapshot = snapshot.ok_or_else(|| {
+            LaneError::input(
+                "door-workspace-unregistered",
+                "no protected workspace grant",
+            )
+        })?;
+        let placement = crate::placement::snapshot(&reservation["plan"], Some(&snapshot))?;
+        let grant = snapshot.grant;
         execute_command::workspace::admit(
             &envelope,
             Some(&grant),
@@ -1065,7 +1078,11 @@ mod workspace {
             node,
         )
         .map_err(|error| LaneError::input(error.kind, error.detail))?;
-        Ok(WorkspaceRequest { envelope, grant })
+        Ok(WorkspaceRequest {
+            envelope,
+            grant,
+            placement,
+        })
     }
 
     /// An allow bound to one exact request and to the custody that answered it.
@@ -1074,6 +1091,90 @@ mod workspace {
         context_key: Value,
         policy_revision: String,
         origin: AllowanceOrigin,
+    }
+
+    /// A store-owned learned answer, including a refusal that outranks a quick allow.
+    pub struct WorkspaceLearned {
+        context_key: Value,
+        decision: bool,
+        allowance: Option<WorkspaceAllowance>,
+    }
+
+    /// An allow-mode execution intent read from this request's protected record.
+    pub struct WorkspaceIntent {
+        record_id: String,
+        envelope_digest: String,
+        context_key: Value,
+    }
+
+    impl WorkspaceIntent {
+        /// Read the filed intent before an allow-mode miss runs beside judgement.
+        /// # Errors
+        /// Refuses a changed record, envelope, grant or policy binding.
+        #[allow(dead_code)] // The serving caller is the next W3 cut.
+        pub fn from_store(
+            store: &Store,
+            id: &str,
+            request: &WorkspaceRequest,
+        ) -> Result<Self, LaneError> {
+            let record = store.request(id)?;
+            let value = record.value();
+            let detail = &value["effect"]["workspace"];
+            if value["schema"] != 7
+                || value["class"] != "compute"
+                || value["operation"] != "compute-workspace"
+                || value["mode"] != "allow"
+                || !value["state"].is_null()
+                || value["effect"]["state"] != "pending"
+                || detail["envelope"] != json!(request.envelope)
+                || detail["grant"] != json!(request.grant)
+                || detail["policy_revision"] != request.grant.quick_policy_digest
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "allow-mode intent and exact workspace request differ",
+                ));
+            }
+            let envelope_digest = canonical_digest(&request.envelope)
+                .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let context_key = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &request.grant.quick_policy_digest,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            Ok(Self {
+                record_id: record.id().to_owned(),
+                envelope_digest,
+                context_key,
+            })
+        }
+
+        /// Check the same filed request at the adapter boundary.
+        /// # Errors
+        /// Refuses a replayed record id, envelope or context.
+        pub fn check(&self, request: &WorkspaceRequest, id: &str) -> Result<(), LaneError> {
+            let envelope_digest = canonical_digest(&request.envelope)
+                .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            let context_key = learned_key(
+                "compute",
+                &request.envelope,
+                &request.grant,
+                &request.grant.quick_policy_digest,
+            )
+            .map_err(|error| LaneError::input(error.kind, error.detail))?;
+            if self.record_id != id
+                || self.envelope_digest != envelope_digest
+                || self.context_key != context_key
+            {
+                return Err(LaneError::input(
+                    "door-workspace-context-differs",
+                    "allow-mode intent belongs to another request",
+                ));
+            }
+            Ok(())
+        }
     }
 
     enum AllowanceOrigin {
@@ -1108,7 +1209,7 @@ mod workspace {
         pub fn from_store_lookup(
             store: &Store,
             request: &WorkspaceRequest,
-        ) -> Result<(Option<Self>, Option<LaneError>), LaneError> {
+        ) -> Result<(Option<WorkspaceLearned>, Option<LaneError>), LaneError> {
             let key = learned_key(
                 "compute",
                 &request.envelope,
@@ -1131,7 +1232,7 @@ mod workspace {
                         return Ok((None, Some(error)));
                     }
                 };
-            if decision["decision"] != "allow" {
+            if !matches!(decision["decision"].as_str(), Some("allow" | "refuse")) {
                 return Ok((None, None));
             }
             if evidence["class"] != "compute"
@@ -1143,8 +1244,18 @@ mod workspace {
                     "learned allowance evidence differs",
                 ));
             }
-            Self::bind(request, AllowanceOrigin::Store(evidence))
-                .map(|allowance| (Some(allowance), None))
+            let allowed = decision["decision"] == "allow";
+            let allowance = allowed
+                .then(|| Self::bind(request, AllowanceOrigin::Store(evidence)))
+                .transpose()?;
+            Ok((
+                Some(WorkspaceLearned {
+                    context_key: key,
+                    decision: allowed,
+                    allowance,
+                }),
+                None,
+            ))
         }
 
         /// Bind an agent allowance only after a protected store read by request id.
@@ -1215,6 +1326,20 @@ mod workspace {
         }
     }
 
+    impl WorkspaceLearned {
+        /// Checked allowance, absent for a learned refusal.
+        #[must_use]
+        pub const fn allowance(&self) -> Option<&WorkspaceAllowance> {
+            self.allowance.as_ref()
+        }
+    }
+
+    #[cfg(test)]
+    pub(super) fn fixture_allowance(request: &WorkspaceRequest) -> WorkspaceAllowance {
+        WorkspaceAllowance::bind(request, AllowanceOrigin::Store(json!({"fixture":true})))
+            .expect("fictional allowance")
+    }
+
     impl WorkspaceRequest {
         /// Compose the existing door agent call with lossless workspace evidence.
         ///
@@ -1235,21 +1360,27 @@ mod workspace {
             })
         }
 
-        /// Select a miss's wait after any allowance is checked against this exact request.
+        /// Select the workspace mode after any allowance is checked against this exact request.
         ///
-        /// A miss with no learned or recorded allowance waits in allow, audit and enforce.
+        /// An allow-mode miss runs beside judgement; enforce and audit wait.
         /// # Errors
         /// Refuses an allowance replayed against another request or malformed context.
         pub fn disposition(
             &self,
             mode: DoorMode,
             classification: &Classification,
-            allowance: Option<&WorkspaceAllowance>,
+            learned: Option<&WorkspaceLearned>,
         ) -> Result<Disposition, LaneError> {
-            if let Some(allowance) = allowance {
+            if let Some(allowance) = learned.and_then(WorkspaceLearned::allowance) {
                 allowance.check(self)?;
             }
-            let learned = allowance.map(|allowance| &allowance.context_key);
+            let learned = learned.map(|answer| {
+                if answer.decision {
+                    LearnedDecision::Allow(&answer.context_key)
+                } else {
+                    LearnedDecision::Refuse(&answer.context_key)
+                }
+            });
             execute_command::workspace::disposition(
                 mode,
                 classification,
@@ -5349,6 +5480,7 @@ mod tests {
         calls: Arc<AtomicUsize>,
         seen_state: Arc<Mutex<Vec<String>>>,
         store: Store,
+        fail_after_input: bool,
     }
 
     impl Runner for CountingRunner {
@@ -5363,7 +5495,11 @@ mod tests {
                 .lock()
                 .expect("fixture states")
                 .push(state.to_owned());
-            Command::new("/usr/bin/cat")
+            let mut command = Command::new("/usr/bin/cat");
+            if self.fail_after_input {
+                command.args(["-", "/definitely-unavailable-door-fixture-source"]);
+            }
+            command
                 .stdin(Stdio::piped())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -5715,6 +5851,7 @@ mod tests {
                 calls: calls.clone(),
                 seen_state: states.clone(),
                 store: fixture.store(),
+                fail_after_input: false,
             },
             calls,
             states,
@@ -7992,10 +8129,76 @@ mod tests {
             }
             let reply = client.answer();
             server.join().expect("service").expect("incomplete reply");
-            assert_eq!(reply["status"], 125);
+            assert_eq!(reply["status"], 0);
             assert_eq!(reply["reason"], "door-record-incomplete");
             assert_eq!(reply["compute_exit_status"], 0);
             assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            assert_incomplete(&fixture, &id);
+        }
+    }
+
+    /// ´test:unit:door-stub-keeps-command-status-after-effect-record-failure´
+    #[test]
+    fn door_stub_keeps_command_status_after_effect_record_failure() {
+        for exit in [0, 1] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, crate::requests::Mode::Allow);
+            let (mut runner, calls, _) = counting_runner(&fixture);
+            runner.fail_after_input = exit != 0;
+            let (socket, server) = fixture_stub_service_with(
+                &fixture,
+                runner,
+                rubric(Some("allow")),
+                2000,
+                None,
+                Some(FixtureFault::EffectWrite),
+                true,
+            );
+            let args = [OsString::from("door-attribution-probe")];
+            let mut output = Vec::new();
+            let mut errors = Vec::new();
+            let reply = super::stub_call_stream(
+                &socket,
+                &args,
+                io::Cursor::new(b"fictional output\n"),
+                &mut output,
+                &mut errors,
+            )
+            .expect("stub final reply");
+            server
+                .join()
+                .expect("service")
+                .expect("record failure reply");
+            assert_eq!(output, b"fictional output\n");
+            if exit == 0 {
+                assert_eq!(errors, Vec::<u8>::new());
+            } else {
+                assert!(
+                    String::from_utf8_lossy(&errors)
+                        .contains("/definitely-unavailable-door-fixture-source")
+                );
+            }
+            assert_eq!(reply["status"], exit);
+            assert_eq!(reply["compute_exit_status"], exit);
+            assert_eq!(reply["reason"], "door-record-incomplete");
+            let line = super::final_line(&args, &reply).expect("visible record failure");
+            let visible: serde_json::Value =
+                serde_json::from_str(&line).expect("probe prints its final reply");
+            assert_eq!(visible["reason"], "door-record-incomplete");
+            assert_eq!(
+                visible["request_record_error"],
+                "requests-record-refusal: fixture effect write failure"
+            );
+            let command_line = super::final_line(&[OsString::from("git")], &reply)
+                .expect("ordinary command prints its final failure");
+            assert_eq!(
+                command_line,
+                "door-record-incomplete: requests-record-refusal: fixture effect write failure"
+            );
+            assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+            let id = store.list().expect("filed request").0[0].id().to_owned();
             assert_incomplete(&fixture, &id);
         }
     }
@@ -8027,7 +8230,7 @@ mod tests {
             let reply = client.answer();
             server.join().expect("service").expect("reply");
             assert_eq!(reply["reason"], "door-record-incomplete");
-            assert_eq!(reply["status"], 125);
+            assert_eq!(reply["status"], if decision == "allow" { 0 } else { 125 });
             assert_eq!(
                 calls.load(std::sync::atomic::Ordering::Relaxed),
                 usize::from(decision == "allow")

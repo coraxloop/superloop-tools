@@ -1,7 +1,8 @@
 //! Protocol-one node entry for an admitted workspace command.
 //! The door owns admission; this entry verifies the received execution context.
-use crate::workspace_executor::{ExecutionMeasurements, PreparedExecution};
+use crate::workspace_executor::{ExecutionMeasurements, PreparedExecution, StartFailure};
 use execute_command::workspace::{Envelope, Grant, Measurement, Outcome, canonical_digest};
+use nix::fcntl::{FcntlArg, OFlag, fcntl};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::fs::{File, OpenOptions};
@@ -20,6 +21,7 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 const OUTPUT_CHUNK: usize = 8192;
 const CONTROL_SILENCE: Duration = Duration::from_secs(120);
+const START_WAIT: Duration = Duration::from_secs(10);
 const OUTPUT_WRITE_BOUND: Duration = Duration::from_secs(120);
 const OUTPUT_DRAIN_BOUND: Duration = Duration::from_secs(2);
 const OUTPUT_DRAIN_TOTAL: Duration = Duration::from_secs(120);
@@ -34,12 +36,12 @@ const CAUSE_OUTPUT_LIMIT: u8 = 5;
 
 const fn end_reason(cause: u8, outcome: &Outcome, incomplete: bool) -> &'static str {
     match cause {
+        CAUSE_OUTPUT_LIMIT => "node-output-limit",
+        _ if incomplete => "node-output-incomplete",
         CAUSE_STOP => "node-stopped",
         CAUSE_INPUT_GONE => "node-input-closed",
         CAUSE_SILENCE => "node-heartbeat-silence",
         CAUSE_MALFORMED => "node-malformed-control",
-        CAUSE_OUTPUT_LIMIT => "node-output-limit",
-        _ if incomplete => "node-output-incomplete",
         _ if matches!(outcome, Outcome::TimedOut) => "node-deadline",
         _ => "node-complete",
     }
@@ -47,6 +49,7 @@ const fn end_reason(cause: u8, outcome: &Outcome, incomplete: bool) -> &'static 
 
 #[derive(Clone, Copy)]
 struct StreamBounds {
+    start_wait: Duration,
     silence: Duration,
     output_limit: usize,
     write: Duration,
@@ -56,6 +59,7 @@ struct StreamBounds {
 impl Default for StreamBounds {
     fn default() -> Self {
         Self {
+            start_wait: START_WAIT,
             silence: CONTROL_SILENCE,
             output_limit: MAX_OUTPUT_BYTES,
             write: OUTPUT_WRITE_BOUND,
@@ -124,7 +128,7 @@ pub fn write_frame<W: Write, T: Serialize>(writer: &mut W, frame: &T) -> io::Res
 }
 
 #[allow(unsafe_code)]
-fn write_frame_before<W: AsRawFd, T: Serialize>(
+pub(crate) fn write_frame_before<W: AsRawFd, T: Serialize>(
     writer: &W,
     frame: &T,
     deadline: Instant,
@@ -215,6 +219,83 @@ pub fn read_frame<R: Read>(reader: &mut R) -> io::Result<Value> {
     }
     let mut bytes = vec![0_u8; size];
     reader.read_exact(&mut bytes)?;
+    serde_json::from_slice(&bytes)
+        .map_err(|error| refusal("door-workspace-protocol-refusal", error))
+}
+
+/// Read a route frame before one outer deadline, including a trickling body.
+/// # Errors
+/// Refuses a closed, stalled, oversized or malformed frame.
+#[allow(unsafe_code)]
+pub(crate) fn read_frame_before<R: Read + AsRawFd>(
+    reader: &mut R,
+    deadline: Instant,
+    stop: &AtomicBool,
+) -> io::Result<Value> {
+    let fd = reader.as_raw_fd();
+    // SAFETY: the caller holds this descriptor through the read.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let mut exact = |bytes: &mut [u8]| -> io::Result<()> {
+        let mut offset = 0;
+        while offset < bytes.len() {
+            if stop.load(Ordering::Acquire) {
+                return Err(io::Error::new(
+                    io::ErrorKind::Interrupted,
+                    "door request stopped",
+                ));
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "node frame deadline",
+                ));
+            }
+            let mut poll = libc::pollfd {
+                fd,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            let timeout = i32::try_from(remaining.as_millis().min(200)).unwrap_or(200);
+            // SAFETY: poll observes the caller-held descriptor.
+            let ready = unsafe { libc::poll(&raw mut poll, 1, timeout) };
+            if ready < 0 {
+                let error = io::Error::last_os_error();
+                if error.kind() == io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(error);
+            }
+            if ready == 0 {
+                continue;
+            }
+            match reader.read(&mut bytes[offset..]) {
+                Ok(0) => return Err(io::Error::from(io::ErrorKind::UnexpectedEof)),
+                Ok(count) => offset += count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        io::ErrorKind::Interrupted | io::ErrorKind::WouldBlock
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    };
+    let mut length = [0_u8; 4];
+    exact(&mut length)?;
+    let size = usize::try_from(u32::from_be_bytes(length)).map_err(io::Error::other)?;
+    if size == 0 || size > MAX_FRAME_BYTES {
+        return Err(refusal(
+            "door-workspace-protocol-refusal",
+            "frame length differs",
+        ));
+    }
+    let mut bytes = vec![0_u8; size];
+    exact(&mut bytes)?;
     serde_json::from_slice(&bytes)
         .map_err(|error| refusal("door-workspace-protocol-refusal", error))
 }
@@ -417,6 +498,7 @@ enum Event {
     Done(ExecutionMeasurements, Instant),
 }
 
+#[allow(clippy::too_many_arguments)] // Each argument is one distinct terminal frame observation.
 fn terminal_frame(
     call: &NodeCall,
     result: &Measurement,
@@ -424,12 +506,16 @@ fn terminal_frame(
     output_bytes: usize,
     reason: &str,
     output_incomplete: bool,
+    child_started: bool,
+    start_failure: Option<&StartFailure>,
 ) -> Value {
     json!({
         "schema":1,"type":"terminal","request_id":call.request_id,
         "nonce":call.nonce,"result":result,"steps":steps,
         "output_bytes":output_bytes,"reason":reason,
         "output_incomplete":output_incomplete,
+        "child_started":child_started,
+        "start_failure":start_failure,
     })
 }
 
@@ -448,6 +534,8 @@ fn ended_before_spawn<W: Write>(output: &mut W, call: &NodeCall, cause: u8) -> i
             0,
             end_reason(cause, &Outcome::TimedOut, false),
             false,
+            false,
+            None,
         ),
     )
 }
@@ -554,6 +642,14 @@ fn monitor_control<R: Read + AsRawFd>(input: &mut R, state: &StreamState, silenc
     }
 }
 
+fn prestart_timeout_cause(start_bound: Instant, command_deadline: Instant) -> u8 {
+    if command_deadline <= start_bound {
+        CAUSE_NONE
+    } else {
+        CAUSE_SILENCE
+    }
+}
+
 fn drain_expired(
     command_ended: Instant,
     last_byte_read: Option<Instant>,
@@ -576,6 +672,7 @@ fn relay_events<W: AsRawFd>(
     let mut result = None;
     let mut command_ended = None;
     let mut incomplete = false;
+    let mut held_output = false;
     while streams_closed < 2 || result.is_none() {
         if let Some(ended) = command_ended {
             let last_byte = *state
@@ -585,6 +682,7 @@ fn relay_events<W: AsRawFd>(
             if drain_expired(ended, last_byte, Instant::now(), bounds.drain) {
                 state.stop_readers.store(true, Ordering::Release);
                 incomplete = streams_closed < 2;
+                held_output |= incomplete;
             }
         }
         let event = if result.is_some() {
@@ -622,11 +720,16 @@ fn relay_events<W: AsRawFd>(
         }
     }
     let measured = result.ok_or_else(|| io::Error::other("measurements absent"))?;
-    let reason = end_reason(
-        state.cause.load(Ordering::Acquire),
-        &measured.result.outcome,
-        incomplete,
-    );
+    let cause = state.cause.load(Ordering::Acquire);
+    let reason = if cause == CAUSE_OUTPUT_LIMIT {
+        "node-output-limit"
+    } else if held_output || incomplete {
+        "node-output-incomplete"
+    } else if measured.start_failure.is_some() {
+        "node-start-failed"
+    } else {
+        end_reason(cause, &measured.result.outcome, incomplete)
+    };
     write_frame_before(
         output,
         &terminal_frame(
@@ -636,9 +739,18 @@ fn relay_events<W: AsRawFd>(
             state.bytes_seen.load(Ordering::Acquire),
             reason,
             incomplete,
+            measured.child_started,
+            measured.start_failure.as_ref(),
         ),
         Instant::now() + bounds.write,
     )
+}
+
+#[allow(unsafe_code)]
+fn duplicate_read_end(descriptor: &OwnedFd) -> io::Result<OwnedFd> {
+    let raw = fcntl(descriptor, FcntlArg::F_DUPFD_CLOEXEC(0))?;
+    // SAFETY: successful F_DUPFD_CLOEXEC returns a new owned descriptor.
+    Ok(unsafe { <OwnedFd as std::os::fd::FromRawFd>::from_raw_fd(raw) })
 }
 
 fn stream_execution<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
@@ -652,8 +764,10 @@ fn stream_execution<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
     let (sender, receiver) = mpsc::sync_channel::<Event>(OUTPUT_QUEUE);
     std::thread::scope(|scope| -> io::Result<()> {
         scope.spawn(|| monitor_control(&mut input, &state, bounds.silence));
-        let (out_read, out_write) = nix::unistd::pipe()?;
-        let (err_read, err_write) = nix::unistd::pipe()?;
+        let (out_read, out_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
+        let (err_read, err_write) = nix::unistd::pipe2(OFlag::O_CLOEXEC)?;
+        let out_read_guard = duplicate_read_end(&out_read)?;
+        let err_read_guard = duplicate_read_end(&err_read)?;
         let out_writer = File::from(out_write);
         let err_writer = File::from(err_write);
         for (kind, descriptor) in [("stdout", out_read), ("stderr", err_read)] {
@@ -666,6 +780,8 @@ fn stream_execution<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
         scope.spawn(move || {
             let measured = prepared.run_admitted(&out_writer, &err_writer, &state.cancelled);
             let ended = Instant::now();
+            drop(out_read_guard);
+            drop(err_read_guard);
             drop(out_writer);
             drop(err_writer);
             let _sent = events.send(Event::Done(measured, ended));
@@ -731,8 +847,11 @@ fn serve_with_limits<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
         }),
     )?;
     let never_finished = AtomicBool::new(false);
+    let start_bound = Instant::now() + bounds.start_wait;
+    let command_deadline = prepared.deadline();
+    let start_deadline = start_bound.min(command_deadline);
     loop {
-        let control = read_control(&mut input, &never_finished, Instant::now() + bounds.silence);
+        let control = read_control(&mut input, &never_finished, start_deadline);
         match control {
             Ok(Some(Control { kind, .. })) if kind == "start" => break,
             Ok(Some(Control { kind, .. })) if kind == "stop" => {
@@ -744,7 +863,9 @@ fn serve_with_limits<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
                     Err(ref error) if error.kind() == io::ErrorKind::UnexpectedEof => {
                         CAUSE_INPUT_GONE
                     }
-                    Err(ref error) if error.kind() == io::ErrorKind::TimedOut => CAUSE_SILENCE,
+                    Err(ref error) if error.kind() == io::ErrorKind::TimedOut => {
+                        prestart_timeout_cause(start_bound, command_deadline)
+                    }
                     _ => CAUSE_MALFORMED,
                 };
                 return ended_before_spawn(&mut output, &call, cause);
@@ -756,4 +877,4 @@ fn serve_with_limits<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
 
 #[cfg(test)]
 #[path = "workspace_node_tests.rs"]
-mod tests;
+pub(crate) mod tests;

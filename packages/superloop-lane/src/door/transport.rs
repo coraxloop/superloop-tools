@@ -428,6 +428,7 @@ type Completion<'a> = dyn Fn(&Value) -> Result<(), LaneError> + 'a;
 #[derive(Clone)]
 pub(super) struct HostRunner {
     alias: String,
+    node: AuthenticatedNode,
     ssh_options: Vec<String>,
     ssh_config_sha256: String,
     mirror_root: String,
@@ -437,6 +438,21 @@ pub(super) struct HostRunner {
     compute_wrapper: Option<String>,
     compute_environment: Option<Value>,
     compute_deadlines: Vec<super::config::ComputeDeadline>,
+}
+
+/// The node name obtained only while verifying the protected route registration.
+#[derive(Clone)]
+pub(super) struct AuthenticatedNode(String);
+
+impl AuthenticatedNode {
+    pub(super) fn name(&self) -> &str {
+        &self.0
+    }
+}
+
+#[cfg(test)]
+pub(super) fn fixture_node(name: &str) -> AuthenticatedNode {
+    AuthenticatedNode(name.to_owned())
 }
 
 fn parse_compute_wrapper(value: &Value) -> Result<Option<String>, LaneError> {
@@ -517,6 +533,42 @@ fn parse_compute_environment(value: &Value) -> Result<Option<Value>, LaneError> 
 }
 
 impl HostRunner {
+    /// Execute only a request already bound to its allowance and this route.
+    /// The serving caller is added in the following W3 cut.
+    #[allow(dead_code)]
+    pub(super) fn run_workspace(
+        &self,
+        request: &super::WorkspaceRequest,
+        admission: super::workspace_adapter::WorkspaceAdmission<'_>,
+        request_id: &str,
+        sink: &mut impl super::workspace_adapter::WorkspaceOutputSink,
+        stop: super::workspace_adapter::WorkspaceStop<'_>,
+        lifetime: Instant,
+    ) -> Result<super::workspace_adapter::WorkspaceResult, LaneError> {
+        let call = super::workspace_adapter::WorkspaceCall::compose(
+            request,
+            admission,
+            self.authenticated_node(),
+            request_id,
+        )?;
+        super::workspace_adapter::run_command(&call, self.workspace_command(), sink, stop, lifetime)
+    }
+
+    /// Run the installed node entry over this verified host route. Request bytes
+    /// travel only in the framed standard input, never in the SSH command.
+    pub(super) fn workspace_command(&self) -> Command {
+        self.ssh_command(
+            Path::new("/usr/bin/ssh"),
+            "/usr/local/libexec/superloop/superloop-lane-node-exec",
+            false,
+            Some(20),
+        )
+    }
+
+    pub(super) const fn authenticated_node(&self) -> &AuthenticatedNode {
+        &self.node
+    }
+
     pub(super) fn with_compute_deadlines(
         mut self,
         forms: &[super::config::ComputeDeadline],
@@ -630,7 +682,14 @@ impl HostRunner {
             })?;
         let pin = read_owner_leaf_optional(directory, "door-ssh_config", owner)?;
         after_pin();
-        crate::door_node::verify(directory, config, loop_name, alias, pin.as_deref(), owner)?;
+        let node = AuthenticatedNode(crate::door_node::verify(
+            directory,
+            config,
+            loop_name,
+            alias,
+            pin.as_deref(),
+            owner,
+        )?);
         let pin = pin.ok_or_else(|| {
             LaneError::input("door-node-derived-drift", "door-ssh_config is absent")
         })?;
@@ -647,6 +706,7 @@ impl HostRunner {
             .ok_or_else(|| LaneError::input("door-compute-registration", "key path is invalid"))?;
         Ok(Self {
             alias: alias.to_owned(),
+            node,
             ssh_options,
             ssh_config_sha256,
             mirror_root: mirror_root.to_owned(),
@@ -1363,6 +1423,7 @@ fn input_pump(
     abort: &Arc<Abort>,
     stopped: &Arc<AtomicBool>,
     deadline: Instant,
+    hold_compute_route: bool,
 ) -> Result<(), &'static str> {
     let mut buffer = [0_u8; CHUNK];
     let mut guarded = Vec::new();
@@ -1405,6 +1466,15 @@ fn input_pump(
                 abort.stop(super::lifetime::Cause::Refusal);
                 return Err("door-git-packet-refusal");
             }
+            if hold_compute_route {
+                // Zero frame ends the command input, while SSH input stays open
+                // to report route loss even for a quiet command.
+                write_input_until(&mut destination, &0_u32.to_be_bytes(), deadline)
+                    .map_err(|_| "door-compute-io-refusal")?;
+                while !stopped.load(Ordering::Relaxed) && !abort.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
             return Ok(());
         }
         if count
@@ -1416,6 +1486,11 @@ fn input_pump(
             return Err("door-input-limit-refusal");
         }
         if checked {
+            if hold_compute_route {
+                let size = u32::try_from(read).map_err(|_| "door-input-limit-refusal")?;
+                write_input_until(&mut destination, &size.to_be_bytes(), deadline)
+                    .map_err(|_| "door-compute-io-refusal")?;
+            }
             write_input_until(&mut destination, &buffer[..read], deadline)
                 .map_err(|_| "door-compute-io-refusal")?;
         } else {
@@ -1472,6 +1547,36 @@ fn bounded_join<T>(handle: JoinHandle<T>, deadline: Instant) -> io::Result<Optio
         .join()
         .map(Some)
         .map_err(|_| io::Error::other("door pump panicked"))
+}
+
+fn stop_compute_child(
+    child: &mut Child,
+    owns_group: bool,
+    compute: bool,
+    input: &JoinHandle<Result<(), &'static str>>,
+    input_stopped: &AtomicBool,
+    stream: &UnixStream,
+) -> io::Result<std::process::ExitStatus> {
+    input_stopped.store(true, Ordering::Relaxed);
+    let _read_end = stream.shutdown(Shutdown::Read);
+    if compute && owns_group {
+        // First close SSH input: the node watches that pipe even for a silent
+        // command. Its TERM/KILL grace is ten seconds; the extra two bound the
+        // input pump and route's own exit before local cleanup takes over.
+        let input_bound = Instant::now() + Duration::from_millis(100);
+        while !input.is_finished() && Instant::now() < input_bound {
+            thread::sleep(Duration::from_millis(5));
+        }
+        let route_bound = Instant::now() + Duration::from_secs(12);
+        while Instant::now() < route_bound {
+            if let Some(status) = child.try_wait()? {
+                return Ok(status);
+            }
+            thread::sleep(Duration::from_millis(5));
+        }
+    }
+    stop_group(child, owns_group);
+    child.wait()
 }
 
 #[allow(clippy::too_many_lines, clippy::too_many_arguments)]
@@ -1611,6 +1716,7 @@ pub(super) fn serve_compute(
     let output_total = Arc::new(AtomicUsize::new(0));
     let input_socket = stream.try_clone()?;
     let evidence = Arc::new(Mutex::new(Vec::new()));
+    let hold_compute_route = operation == Operation::Compute && runner.owns_process_group();
     let input = {
         let count = Arc::clone(&stdin_count);
         let ref_check = Arc::clone(&ref_check);
@@ -1630,6 +1736,7 @@ pub(super) fn serve_compute(
                 &abort,
                 &stopped,
                 deadline,
+                hold_compute_route,
             )
         })
     };
@@ -1676,21 +1783,37 @@ pub(super) fn serve_compute(
             } else {
                 stop.reason()
             };
-            stop_group(&mut child, runner.owns_process_group());
-            let _read_end = stream.shutdown(Shutdown::Read);
-            break child.wait()?;
+            break stop_compute_child(
+                &mut child,
+                runner.owns_process_group(),
+                operation == Operation::Compute,
+                &input,
+                &input_stopped,
+                stream,
+            )?;
         }
         if abort.load(Ordering::Relaxed) {
             outcome = "door-transport-refusal";
-            stop_group(&mut child, runner.owns_process_group());
-            break child.wait()?;
+            break stop_compute_child(
+                &mut child,
+                runner.owns_process_group(),
+                operation == Operation::Compute,
+                &input,
+                &input_stopped,
+                stream,
+            )?;
         }
         if Instant::now() >= deadline {
             cause.select(super::lifetime::Cause::Deadline);
             outcome = "door-deadline-refusal";
-            stop_group(&mut child, runner.owns_process_group());
-            let _read_end = stream.shutdown(Shutdown::Read);
-            break child.wait()?;
+            break stop_compute_child(
+                &mut child,
+                runner.owns_process_group(),
+                operation == Operation::Compute,
+                &input,
+                &input_stopped,
+                stream,
+            )?;
         }
         if let Some(status) = child.try_wait()? {
             break status;
@@ -1812,7 +1935,6 @@ pub(super) fn serve_compute(
         && let Err(error) = complete(&reply)
     {
         let _logged = writeln!(io::stderr().lock(), "door effect record: {}", error.line());
-        reply["status"] = json!(125);
         reply["reason"] = json!("door-record-incomplete");
         reply["request_record_error"] = json!(error.line());
     }
@@ -2221,6 +2343,65 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    /// ´test:unit:door-compute-worker-eof-is-framed-before-route-close´
+    #[test]
+    fn door_compute_worker_eof_is_framed_before_route_close() {
+        struct FrameSink(Sender<Vec<u8>>);
+        impl io::Write for FrameSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.0.send(bytes.to_vec()).expect("frame receiver");
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+        let (mut worker, service) = UnixStream::pair().expect("worker stream");
+        let (frames, received) = mpsc::channel();
+        let count = Arc::new(AtomicUsize::new(0));
+        let ref_check = Arc::new(std::sync::atomic::AtomicU8::new(super::REF_NOT_REACHED));
+        let ref_packet = Arc::new(std::sync::Mutex::new(None));
+        let abort = Arc::new(super::Abort::new(Arc::new(
+            super::super::lifetime::FirstCause::default(),
+        )));
+        let stopped = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let pump = {
+            let count = Arc::clone(&count);
+            let ref_check = Arc::clone(&ref_check);
+            let ref_packet = Arc::clone(&ref_packet);
+            let abort = Arc::clone(&abort);
+            let stopped = Arc::clone(&stopped);
+            thread::spawn(move || {
+                super::input_pump(
+                    service,
+                    FrameSink(frames),
+                    None,
+                    &count,
+                    &ref_check,
+                    &ref_packet,
+                    &abort,
+                    &stopped,
+                    Instant::now() + FIXTURE_HANG,
+                    true,
+                )
+            })
+        };
+        io::Write::write_all(&mut worker, b"abc").expect("worker input");
+        worker.shutdown(Shutdown::Write).expect("worker EOF");
+        assert_eq!(
+            received.recv_timeout(FIXTURE_HANG).expect("size"),
+            3_u32.to_be_bytes()
+        );
+        assert_eq!(received.recv_timeout(FIXTURE_HANG).expect("data"), b"abc");
+        assert_eq!(
+            received.recv_timeout(FIXTURE_HANG).expect("EOF"),
+            0_u32.to_be_bytes()
+        );
+        stopped.store(true, Ordering::Relaxed);
+        assert!(pump.join().expect("input pump").is_ok());
+        assert_eq!(count.load(Ordering::Relaxed), 3);
+    }
+
     type DrainHook = Box<dyn FnOnce(bool) + Send>;
     pub(super) type OutputHook = Box<dyn FnOnce(usize) + Send>;
     thread_local! {
@@ -2572,6 +2753,7 @@ mod tests {
         let host = HostRunner {
             compute_deadlines: Vec::new(),
             alias: "fixture".to_owned(),
+            node: super::AuthenticatedNode("fixture-node".to_owned()),
             ssh_options: Vec::new(),
             ssh_config_sha256: String::new(),
             mirror_root: "/mirrors".to_owned(),
@@ -3156,6 +3338,13 @@ mod tests {
             nix::unistd::Uid::effective().as_raw(),
         )
         .expect("registered route");
+        assert_eq!(runner.node.name(), "fixture-node");
+        assert_eq!(
+            runner.workspace_command().get_args().last(),
+            Some(std::ffi::OsStr::new(
+                "/usr/local/libexec/superloop/superloop-lane-node-exec"
+            ))
+        );
         assert_eq!(runner.probe_route()["key_path"], route["key_path"]);
         let owner = nix::unistd::Uid::effective().as_raw();
         fs::write(
@@ -3666,6 +3855,7 @@ mod tests {
             let route = HostRunner {
                 compute_deadlines: Vec::new(),
                 alias: "fixture".to_owned(),
+                node: super::AuthenticatedNode("fixture-node".to_owned()),
                 ssh_options: Vec::new(),
                 ssh_config_sha256: String::new(),
                 mirror_root: "~/mirrors".to_owned(),
@@ -4026,5 +4216,25 @@ mod tests {
             .expect("server join")
             .expect("observed disconnect completes without a final");
         assert_eq!(ended["reason"], "door-disconnect-refusal");
+    }
+
+    /// ´test:unit:workspace-caller-final-reasons-read-before-their-writer´
+    #[test]
+    fn workspace_caller_final_reasons_read_before_their_writer() {
+        for reason in [
+            "door-workspace-not-started",
+            "door-workspace-incomplete",
+            "door-workspace-unknown",
+        ] {
+            let reply = json!({"schema":2,"type":"final","status":125,"reason":reason,
+                "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue",
+                "queue_wall_seconds":null,"mediation_wall_seconds":0.0,
+                "compute_wall_seconds":0.0});
+            super::validate_final(&reply, 0, 0).expect("new reason is readable");
+            assert_eq!(
+                super::super::final_line(&[], &reply).as_deref(),
+                Some(reason)
+            );
+        }
     }
 }
