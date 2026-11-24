@@ -143,6 +143,55 @@ fn problem(kind: &'static str, detail: impl Into<String>) -> LaneError {
     LaneError::input(kind, detail)
 }
 
+#[allow(dead_code)] // The serving caller selects the claim in the next cut.
+fn workspace_claim_ground(
+    record: &RequestRecord,
+    request: &crate::door::WorkspaceRequest,
+    immediate: bool,
+) -> Result<(), LaneError> {
+    let value = record.value();
+    let detail = &value["effect"]["workspace"];
+    if value["schema"] != 7
+        || value["operation"] != "compute-workspace"
+        || value["class"] != "compute"
+        || value["effect"]["state"] != "pending"
+        || value["state"] == "marked"
+        || value["label"]["treatment"] == "refuse"
+        || detail["envelope"] != json!(request.envelope())
+        || detail["grant"] != json!(request.grant())
+        || detail["policy_revision"] != request.grant().quick_policy_digest
+    {
+        return Err(problem(
+            "door-workspace-context-differs",
+            "workspace claim and protected request differ",
+        ));
+    }
+    let state = value["state"].as_str();
+    let label_allow = state == Some("adjudicated") && value["label"]["treatment"] == "allow";
+    let agent_allow =
+        value["would_do_source"] == "agent" && value["would_do"]["decision"] == "allow";
+    let exact_allow = value["would_do"]["decision"] == "allow"
+        && (value["would_do_source"] == "quick-rule"
+            || (value["would_do_source"] == "fast-lane" && !value["matched_rule"].is_null()));
+    let allowed = match value["mode"].as_str() {
+        Some("allow") => immediate && state.is_none(),
+        Some("enforce") => {
+            (immediate && state.is_none() && exact_allow)
+                || (!immediate && state == Some("waiting") && agent_allow)
+                || (!immediate && label_allow)
+        }
+        Some("audit") => !immediate && ((state == Some("waiting") && agent_allow) || label_allow),
+        _ => false,
+    };
+    if !allowed {
+        return Err(problem(
+            "requests-state-refusal",
+            "workspace request has no claimable mode ground",
+        ));
+    }
+    Ok(())
+}
+
 pub(crate) fn is_lock_contention(error: &LaneError) -> bool {
     error.kind == "requests-record-refusal"
         && error.detail.starts_with(&format!(
@@ -2121,6 +2170,61 @@ impl Store {
         let activity = self.publication_activity(request.id())?;
         self.file_locked(request)?;
         Ok(activity)
+    }
+
+    /// File an immediate workspace intent and take its collection claim under one store lock.
+    #[allow(dead_code)] // The serving caller selects the claim in the next cut.
+    pub(crate) fn file_active_workspace_claim(
+        &self,
+        record: RequestRecord,
+        request: &crate::door::WorkspaceRequest,
+    ) -> Result<PublicationActivity, LaneError> {
+        let _lock = self.write_lock("file_workspace_claim")?;
+        workspace_claim_ground(&record, request, true)?;
+        let id = record.id().to_owned();
+        let activity = self.publication_activity(&id)?;
+        self.file_locked(record)?;
+        if !self.claim_request_locked(&id)? {
+            return Err(problem(
+                "requests-state-refusal",
+                "workspace claim was already taken",
+            ));
+        }
+        Ok(activity)
+    }
+
+    /// Re-read one waiting or labelled workspace request and claim it before execution.
+    #[allow(dead_code)] // The serving caller selects the claim in the next cut.
+    pub(crate) fn claim_workspace(
+        &self,
+        id: &str,
+        request: &crate::door::WorkspaceRequest,
+    ) -> Result<RequestRecord, LaneError> {
+        let _lock = self.write_lock("claim_workspace")?;
+        hold::request(id);
+        let (run, _) = publication_identity(id)?;
+        let (old, revision, mut records) = self.read_run(run)?;
+        let record = records
+            .iter_mut()
+            .find(|record| record.id() == id)
+            .ok_or_else(|| problem("requests-request-refusal", "request is absent"))?;
+        workspace_claim_ground(record, request, false)?;
+        if !self.claim_request_locked(id)? {
+            return Err(problem(
+                "requests-state-refusal",
+                "workspace claim was already taken",
+            ));
+        }
+        if record.value()["state"] == "waiting" {
+            let mut value = record.value().clone();
+            value["state"] = Value::Null;
+            *record = RequestRecord::decode(value)?;
+            let claimed = record.clone();
+            self.commit_run(run, old.as_deref(), revision + 1, &records)?;
+            Ok(claimed)
+        } else {
+            Ok(record.clone())
+        }
     }
 
     fn file_locked(&self, request: RequestRecord) -> Result<(), LaneError> {

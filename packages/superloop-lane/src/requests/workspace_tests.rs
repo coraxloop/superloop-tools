@@ -1328,3 +1328,115 @@ fn workspace_preflight_reader_bounds_truncated_evidence() {
     let too_long = json!({"schema":3,"wire_bytes":vec![255;maximum+1],"truncated":false});
     assert!(RequestRecord::decode(preflight("door-workspace-protocol-refusal", too_long)).is_err());
 }
+
+/// ´test:unit:workspace-claim-checks-own-mode-ground-before-start´
+#[test]
+fn workspace_claim_checks_own_mode_ground_before_start() {
+    use crate::requests::modes::ModeTarget;
+    let fixture = prepared_fixture();
+    fixture.set_floor("allow");
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let registration = crate::door::Registration {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        worker_uid: 3000,
+        loop_uid: 41001,
+        scope: crate::door::Scope::Work,
+        mirror_ref: "refs/heads/lane/R".into(),
+    };
+    store
+        .set_mode(&ModeTarget::Loop, Mode::Allow, "owner", "fixture", "1", &[])
+        .unwrap();
+    store
+        .set_mode(
+            &ModeTarget::class("compute").unwrap(),
+            Mode::Allow,
+            "owner",
+            "fixture",
+            "1",
+            &[],
+        )
+        .unwrap();
+    let setting = store.effective_mode("compute").unwrap();
+    let mut row = crate::door::workspace_record(
+        &registration,
+        &setting,
+        &request,
+        &json!({"decision":"undecided","reason":"fixture miss"}),
+        Value::Null,
+    )
+    .unwrap()
+    .into_value();
+    row["state"] = Value::Null;
+    let id = row["id"].as_str().unwrap().to_owned();
+    let _lease = store
+        .file_active_workspace_claim(RequestRecord::decode(row).unwrap(), &request)
+        .expect("allow-mode filed claim");
+    assert!(store.request(&id).unwrap().value()["state"].is_null());
+    assert_eq!(
+        store.claim_workspace(&id, &request).unwrap_err().kind,
+        "requests-state-refusal"
+    );
+}
+
+/// ´test:unit:workspace-waiting-claim-moves-state-once-under-the-store-lock´
+#[test]
+fn workspace_waiting_claim_moves_state_once_under_the_store_lock() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1a", &envelope);
+    let claimed = store
+        .claim_workspace("R:1a", &request)
+        .expect("agent claim");
+    assert!(claimed.value()["state"].is_null());
+    assert_eq!(
+        store.claim_workspace("R:1a", &request).unwrap_err().kind,
+        "requests-state-refusal"
+    );
+}
+
+/// ´test:unit:workspace-claim-reads-owner-label-under-the-lock´
+#[test]
+fn workspace_claim_reads_owner_label_under_the_lock() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1a", &envelope);
+    store
+        .triage(
+            "R",
+            &[
+                json!({"id":"R:1a","action":"adjudicate", "treatment":"allow",
+                "reason":"fictional owner allow"}),
+            ],
+            "superloop",
+            "2",
+        )
+        .unwrap();
+    let claimed = store
+        .claim_workspace("R:1a", &request)
+        .expect("owner allow");
+    assert_eq!(claimed.value()["state"], "adjudicated");
+
+    approved_record(&store, "R:2b", &envelope);
+    store
+        .triage(
+            "R",
+            &[
+                json!({"id":"R:2b","action":"adjudicate", "treatment":"refuse",
+                "reason":"fictional owner refusal"}),
+            ],
+            "superloop",
+            "3",
+        )
+        .unwrap();
+    assert_eq!(
+        store.claim_workspace("R:2b", &request).unwrap_err().kind,
+        "door-workspace-context-differs"
+    );
+}
