@@ -132,6 +132,22 @@ fn validate_tables(
     policy: &QuickPolicy,
     blacklist: &Blacklist,
 ) -> Result<(), Refusal> {
+    for rule in &policy.rules {
+        if rule.id.len() > 160 {
+            return Err(protocol(format!(
+                "quick rule {} exceeds the 160-byte identifier bound",
+                rule.id
+            )));
+        }
+    }
+    for entry in &blacklist.entries {
+        if entry.id.len() > 160 {
+            return Err(protocol(format!(
+                "blacklist entry {} exceeds the 160-byte identifier bound",
+                entry.id
+            )));
+        }
+    }
     if canonical_digest(policy)? != grant.quick_policy_digest
         || canonical_digest(blacklist)? != grant.blacklist_digest
     {

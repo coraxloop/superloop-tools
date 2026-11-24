@@ -58,6 +58,33 @@ fn is_miss(e: &Envelope, g: &Grant, p: &QuickPolicy, b: &Blacklist) {
     ));
 }
 
+/// ´test:unit:workspace-table-identifiers-fit-record-citations´
+#[test]
+fn workspace_table_identifiers_fit_record_citations() {
+    let (mut envelope, mut grant, mut policy, mut blacklist) = fixture();
+    policy.rules[0].id = "q".repeat(161);
+    rebind(&mut envelope, &mut grant, &policy, &blacklist);
+    let error = classify(&envelope, &grant, &policy, &blacklist).unwrap_err();
+    assert!(error.detail.contains("quick rule"));
+    assert!(error.detail.contains("160-byte"));
+    policy.rules[0].id = "q".repeat(160);
+    blacklist.entries.push(BlacklistEntry {
+        id: "b".repeat(161),
+        execution_digest: canonical_digest(&envelope.execution).unwrap(),
+        reason: "owner policy".into(),
+    });
+    rebind(&mut envelope, &mut grant, &policy, &blacklist);
+    let error = classify(&envelope, &grant, &policy, &blacklist).unwrap_err();
+    assert!(error.detail.contains("blacklist entry"));
+    assert!(error.detail.contains("160-byte"));
+    blacklist.entries[0].id = "b".repeat(160);
+    rebind(&mut envelope, &mut grant, &policy, &blacklist);
+    assert!(matches!(
+        classify(&envelope, &grant, &policy, &blacklist).unwrap(),
+        Classification::Deny(_)
+    ));
+}
+
 /// ´test:unit:workspace-envelope-exact-bounds-and-encoding´
 #[test]
 fn workspace_envelope_exact_bounds_and_encoding() {
@@ -844,6 +871,24 @@ fn workspace_sequence_evidence_stops_and_keeps_unknown_explicit() {
         steps: vec![],
     };
     WorkspaceEffect::decode(json!(effect), "compute", "example", "R").unwrap();
+    let mut other_binding = effect.clone();
+    other_binding.policy_revision = "another-table".into();
+    other_binding.context_digest = learned_key(
+        "compute",
+        &other_binding.envelope,
+        &other_binding.grant,
+        &other_binding.policy_revision,
+    )
+    .unwrap()[2]
+        .as_str()
+        .unwrap()
+        .into();
+    assert_eq!(
+        WorkspaceEffect::decode(json!(other_binding), "compute", "example", "R")
+            .unwrap_err()
+            .kind,
+        "door-workspace-context-differs"
+    );
     let failed = Measurement {
         outcome: Outcome::Exited { code: 2 },
         wall_seconds: Some(0.2),

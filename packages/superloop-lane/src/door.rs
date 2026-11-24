@@ -1944,6 +1944,7 @@ pub(crate) fn workspace_record(
     registration: &Registration,
     setting: &Value,
     request: &WorkspaceRequest,
+    disposition: execute_command::workspace::Disposition,
     would_do: &Value,
     matched_rule: Value,
 ) -> io::Result<RequestRecord> {
@@ -1953,7 +1954,7 @@ pub(crate) fn workspace_record(
         "compute-workspace",
         setting,
         would_do,
-        true,
+        disposition == execute_command::workspace::Disposition::WaitForJudgement,
     );
     let envelope = request.envelope();
     let grant = request.grant();

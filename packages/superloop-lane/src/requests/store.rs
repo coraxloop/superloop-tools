@@ -2197,9 +2197,16 @@ impl Store {
     #[allow(dead_code)] // The serving caller selects the claim in the next cut.
     pub(crate) fn claim_workspace(
         &self,
-        id: &str,
+        activity: &PublicationActivity,
         request: &crate::door::WorkspaceRequest,
     ) -> Result<RequestRecord, LaneError> {
+        if activity.lock.is_none() {
+            return Err(problem(
+                "requests-record-refusal",
+                "workspace publication lease is absent",
+            ));
+        }
+        let id = activity.id.as_str();
         let _lock = self.write_lock("claim_workspace")?;
         hold::request(id);
         let (run, _) = publication_identity(id)?;
@@ -3144,7 +3151,8 @@ impl Store {
 // Missing activity files belong to older records and mean no current lease.
 // A lease is never unlinked: all contenders keep using the same inode.
 pub(crate) struct PublicationActivity {
-    _lock: Option<nix::fcntl::Flock<File>>,
+    id: String,
+    lock: Option<nix::fcntl::Flock<File>>,
 }
 
 fn publication_identity(id: &str) -> Result<(&str, &str), LaneError> {
@@ -3212,7 +3220,12 @@ impl Store {
             }
             Err(Errno::EEXIST) if create => open(false)
                 .map_err(|error| problem("requests-record-refusal", error.to_string()))?,
-            Err(Errno::ENOENT) if !create => return Ok(Some(PublicationActivity { _lock: None })),
+            Err(Errno::ENOENT) if !create => {
+                return Ok(Some(PublicationActivity {
+                    id: id.into(),
+                    lock: None,
+                }));
+            }
             Err(error) => return Err(problem("requests-record-refusal", error.to_string())),
         };
         let stat =
@@ -3234,7 +3247,10 @@ impl Store {
             nix::fcntl::FlockArg::LockSharedNonblock
         };
         match nix::fcntl::Flock::lock(File::from(fd), operation) {
-            Ok(lock) => Ok(Some(PublicationActivity { _lock: Some(lock) })),
+            Ok(lock) => Ok(Some(PublicationActivity {
+                id: id.into(),
+                lock: Some(lock),
+            })),
             Err((_, Errno::EWOULDBLOCK)) => Ok(None),
             Err((_, error)) => Err(problem("requests-record-refusal", error.to_string())),
         }

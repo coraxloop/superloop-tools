@@ -9,7 +9,8 @@ use std::os::unix::fs::PermissionsExt as _;
 fn detail() -> Value {
     let grant=Grant::decode(json!({"schema":1,"loop":"alpha","run":"R","node":"fixture-node","workspace":"/work/R","baseline_env":[["PATH","/usr/bin"]],"resources":{},"shells":["/bin/sh"],"quick_policy_digest":"a".repeat(64),"blacklist_digest":"b".repeat(64),"executor_protocol":1})).unwrap();
     let envelope=Envelope::decode(json!({"schema":3,"grant_digest":grant.digest().unwrap(),"cwd":["checkout"],"execution":{"kind":"Argv","words":[b"custom".to_vec(),vec![255]]},"env_additions":[],"deadline_ms":1000})).unwrap();
-    json!({"execution_digest":canonical_digest(&envelope.execution).unwrap(),"context_digest":learned_key("compute",&envelope,&grant,"quick-1").unwrap()[2],"envelope":envelope,"grant":grant,"policy_revision":"quick-1","blacklist_revision":"black-1","result":{"outcome":{"kind":"Unknown"},"wall_seconds":null,"user_cpu_seconds":null,"system_cpu_seconds":null},"admission_wall_seconds":null,"steps":[]})
+    let policy_digest = grant.quick_policy_digest.clone();
+    json!({"execution_digest":canonical_digest(&envelope.execution).unwrap(),"context_digest":learned_key("compute",&envelope,&grant,&policy_digest).unwrap()[2],"envelope":envelope,"grant":grant,"policy_revision":policy_digest,"blacklist_revision":"black-1","result":{"outcome":{"kind":"Unknown"},"wall_seconds":null,"user_cpu_seconds":null,"system_cpu_seconds":null},"admission_wall_seconds":null,"steps":[]})
 }
 fn record() -> Value {
     let mut record = waiting("R", "1a", 3000, Mode::Audit).into_value();
@@ -343,7 +344,7 @@ fn failed_sequence_fixture() -> (Value, Value) {
     let detail = &mut row["effect"]["workspace"];
     detail["execution_digest"] = json!(canonical_digest(&envelope.execution).unwrap());
     detail["context_digest"] =
-        json!(learned_key("compute", &envelope, &grant, "quick-1").unwrap()[2]);
+        json!(learned_key("compute", &envelope, &grant, &grant.quick_policy_digest).unwrap()[2]);
     detail["envelope"] = json!(envelope);
     row["shape_key"] = detail["context_digest"].clone();
     let successful = json!({"outcome":{"kind":"Exited","code":0},
@@ -611,6 +612,7 @@ fn workspace_caller_files_exact_pending_schema_seven_intent() {
         &registration,
         &setting,
         &request,
+        execute_command::workspace::Disposition::WaitForJudgement,
         &json!({"decision":"undecided","reason":"workspace miss"}),
         Value::Null,
     )
@@ -1360,23 +1362,24 @@ fn workspace_claim_checks_own_mode_ground_before_start() {
         )
         .unwrap();
     let setting = store.effective_mode("compute").unwrap();
-    let mut row = crate::door::workspace_record(
+    let row = crate::door::workspace_record(
         &registration,
         &setting,
         &request,
+        execute_command::workspace::Disposition::ImmediateJudgeAlongside,
         &json!({"decision":"undecided","reason":"fixture miss"}),
         Value::Null,
     )
     .unwrap()
     .into_value();
-    row["state"] = Value::Null;
+    assert!(row["state"].is_null());
     let id = row["id"].as_str().unwrap().to_owned();
-    let _lease = store
+    let lease = store
         .file_active_workspace_claim(RequestRecord::decode(row).unwrap(), &request)
         .expect("allow-mode filed claim");
     assert!(store.request(&id).unwrap().value()["state"].is_null());
     assert_eq!(
-        store.claim_workspace(&id, &request).unwrap_err().kind,
+        store.claim_workspace(&lease, &request).unwrap_err().kind,
         "requests-state-refusal"
     );
 }
@@ -1389,12 +1392,13 @@ fn workspace_waiting_claim_moves_state_once_under_the_store_lock() {
     let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
     let request = custodied_request(&fixture, &envelope);
     approved_record(&store, "R:1a", &envelope);
+    let lease = store.publication_activity("R:1a").unwrap();
     let claimed = store
-        .claim_workspace("R:1a", &request)
+        .claim_workspace(&lease, &request)
         .expect("agent claim");
     assert!(claimed.value()["state"].is_null());
     assert_eq!(
-        store.claim_workspace("R:1a", &request).unwrap_err().kind,
+        store.claim_workspace(&lease, &request).unwrap_err().kind,
         "requests-state-refusal"
     );
 }
@@ -1418,8 +1422,9 @@ fn workspace_claim_reads_owner_label_under_the_lock() {
             "2",
         )
         .unwrap();
+    let lease = store.publication_activity("R:1a").unwrap();
     let claimed = store
-        .claim_workspace("R:1a", &request)
+        .claim_workspace(&lease, &request)
         .expect("owner allow");
     assert_eq!(claimed.value()["state"], "adjudicated");
 
@@ -1435,8 +1440,12 @@ fn workspace_claim_reads_owner_label_under_the_lock() {
             "3",
         )
         .unwrap();
+    let refused_lease = store.publication_activity("R:2b").unwrap();
     assert_eq!(
-        store.claim_workspace("R:2b", &request).unwrap_err().kind,
+        store
+            .claim_workspace(&refused_lease, &request)
+            .unwrap_err()
+            .kind,
         "door-workspace-context-differs"
     );
 }

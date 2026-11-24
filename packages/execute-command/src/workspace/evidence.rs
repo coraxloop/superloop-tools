@@ -324,6 +324,7 @@ impl WorkspaceEffect {
         if effect.execution_digest != canonical_digest(&effect.envelope.execution)?
             || key[2] != effect.context_digest
             || !text(&effect.policy_revision)
+            || effect.policy_revision != effect.grant.quick_policy_digest
             || !text(&effect.blacklist_revision)
             || !effect.result.valid()
             || effect
