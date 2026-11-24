@@ -796,6 +796,8 @@ impl Store {
         next.validate(&kinds()).map_err(core)?;
         input["expected"] = preview["before"].clone();
         input["publication"] = serde_json::to_value(&next).map_err(core)?;
+        #[cfg(test)]
+        view_tests::capture_service_before(&preview, &next, &input);
         if let Some(key) = self.channel_view_key() {
             super::view::replace(key, None);
         }
@@ -804,6 +806,8 @@ impl Store {
         let mut committed = committed;
         #[cfg(test)]
         view_tests::after_reply(&mut committed);
+        #[cfg(test)]
+        view_tests::capture_service_boundaries(&preview, &next, &input, &committed);
         if decode(committed["collection"].clone())? != next {
             return Err(core("service publication reply differs"));
         }

@@ -9,6 +9,36 @@ type ReadHook = Box<dyn FnOnce(&Client)>;
 type ReplyHook = Box<dyn FnOnce(&mut Value)>;
 thread_local! { static READ: RefCell<Option<ReadHook>> = const { RefCell::new(None) }; }
 thread_local! { static REPLY: RefCell<Option<ReplyHook>> = const { RefCell::new(None) }; }
+thread_local! { static SERVICE_BOUNDARIES: RefCell<Option<[Value; 4]>> = const { RefCell::new(None) }; }
+pub(super) fn capture_service_before(preview: &Value, candidate: &Collection, input: &Value) {
+    SERVICE_BOUNDARIES.with(|slot| {
+        if slot.borrow().is_some() {
+            slot.replace(Some([
+                preview["collection"].clone(),
+                serde_json::to_value(candidate).expect("candidate value"),
+                input["publication"].clone(),
+                Value::Null,
+            ]));
+        }
+    });
+}
+pub(super) fn capture_service_boundaries(
+    preview: &Value,
+    candidate: &Collection,
+    input: &Value,
+    reply: &Value,
+) {
+    SERVICE_BOUNDARIES.with(|slot| {
+        if slot.borrow().is_some() {
+            slot.replace(Some([
+                preview["collection"].clone(),
+                serde_json::to_value(candidate).expect("candidate value"),
+                input["publication"].clone(),
+                reply["collection"].clone(),
+            ]));
+        }
+    });
+}
 pub(super) fn after_reply(reply: &mut Value) {
     let hook = REPLY.with(|slot| slot.borrow_mut().take());
     if let Some(hook) = hook {
@@ -34,6 +64,7 @@ impl Drop for Reset {
         COMMITTED.with(|slot| slot.replace(None));
         READ.with(|slot| slot.replace(None));
         REPLY.with(|slot| slot.replace(None));
+        SERVICE_BOUNDARIES.with(|slot| slot.replace(None));
     }
 }
 
@@ -58,6 +89,281 @@ fn seed() -> (Fixture, Store, Client) {
         .expect("bind real owner helper");
     let client = store.bound_client().unwrap().unwrap();
     (fixture, store, client)
+}
+
+fn seed_compute(reason: &str) -> (Fixture, Store, Client) {
+    let fixture = Fixture::new();
+    let store = publication_tests::provision(&fixture);
+    let mut value =
+        crate::requests::tests::waiting("R", "aa", 3000, crate::requests::Mode::Audit).into_value();
+    let words = vec![
+        "./tools/check".to_owned(),
+        "--root".to_owned(),
+        ".".to_owned(),
+    ];
+    value["class"] = json!("compute");
+    value["operation"] = json!("compute");
+    value["shape_key"] = json!(execute_command::checks::compute::shape(&words));
+    value["would_do"]["reason"] = json!(reason);
+    value["effect"]
+        .as_object_mut()
+        .expect("effect")
+        .remove("bound");
+    value["effect"]
+        .as_object_mut()
+        .expect("effect")
+        .remove("output_bytes");
+    value["effect"]["compute"] = json!({"words":words,"checkout_path":null,
+        "checkout_ref":null,"checkout_commit":null,"wrapper_exit_status":null,
+        "wrapper_wall_seconds":null,"wrapper_user_cpu_seconds":null,
+        "wrapper_system_cpu_seconds":null,"preparation_wall_seconds":null,
+        "tree_clean":null,"tree_change_count":null,"discarded":null});
+    let record = crate::requests::RequestRecord::decode(value).expect("compute intent");
+    store.file(record).expect("seed compute custody");
+    store
+        .file(crate::requests::tests::waiting(
+            "R",
+            "bb",
+            3000,
+            crate::requests::Mode::Audit,
+        ))
+        .expect("seed second request");
+    fixture
+        .command(
+            &["triage", "alpha", "R"],
+            br#"[{"id":"R:bb","action":"mark","reason":"fixture"}]"#,
+        )
+        .expect("bind owner helper");
+    let client = store.bound_client().unwrap().unwrap();
+    (fixture, store, client)
+}
+
+fn first_value_difference(path: &str, left: &Value, right: &Value) -> Option<String> {
+    match (left, right) {
+        (Value::Object(a), Value::Object(b)) => {
+            let keys = a
+                .keys()
+                .chain(b.keys())
+                .collect::<std::collections::BTreeSet<_>>();
+            for key in keys {
+                if !a.contains_key(key) || !b.contains_key(key) {
+                    return Some(format!(
+                        "{path}.{key}: {:?} -> {:?}",
+                        a.get(key),
+                        b.get(key)
+                    ));
+                }
+                if let Some(diff) =
+                    first_value_difference(&format!("{path}.{key}"), &a[key], &b[key])
+                {
+                    return Some(diff);
+                }
+            }
+            None
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            if a.len() != b.len() {
+                return Some(format!("{path}.len: {} -> {}", a.len(), b.len()));
+            }
+            a.iter().zip(b).enumerate().find_map(|(index, (a, b))| {
+                first_value_difference(&format!("{path}[{index}]"), a, b)
+            })
+        }
+        (Value::Number(a), Value::Number(b)) if a.is_f64() && b.is_f64() => {
+            let a = a.as_f64().expect("left float").to_bits();
+            let b = b.as_f64().expect("right float").to_bits();
+            (a != b).then(|| format!("{path}: {a:016x} -> {b:016x}"))
+        }
+        _ => (left != right).then(|| format!("{path}: {left:?} -> {right:?}")),
+    }
+}
+
+fn collection_row<'a>(collection: &'a Value, id: &str) -> &'a Value {
+    collection["requests"]
+        .as_array()
+        .expect("collection rows")
+        .iter()
+        .find(|row| row["id"] == id)
+        .expect("compute request")
+}
+
+fn same_value(path: &str, left: &Value, right: &Value) {
+    assert!(
+        first_value_difference(path, left, right).is_none(),
+        "{}",
+        first_value_difference(path, left, right).unwrap_or_default()
+    );
+}
+
+struct ComputeCase {
+    wall_ns: u64,
+    cpu_ns: u64,
+    output_bytes: u64,
+    queue_ns: Option<u64>,
+    reason: &'static str,
+    path: &'static str,
+}
+
+fn finished_compute_effect(record: &crate::requests::RequestRecord, case: &ComputeCase) -> Value {
+    let wall = std::time::Duration::from_nanos(case.wall_ns).as_secs_f64();
+    let cpu = std::time::Duration::from_nanos(case.cpu_ns).as_secs_f64();
+    let mut detail = record.value()["effect"]["compute"].clone();
+    detail["checkout_path"] = json!(case.path);
+    detail["checkout_ref"] = record.value()["mirror_ref"].clone();
+    detail["checkout_commit"] = json!("a".repeat(40));
+    detail["wrapper_exit_status"] = json!(0);
+    detail["wrapper_wall_seconds"] = json!(wall + 0.25);
+    detail["wrapper_user_cpu_seconds"] = json!(cpu);
+    detail["wrapper_system_cpu_seconds"] = json!(cpu / 3.0);
+    detail["preparation_wall_seconds"] = json!(wall / 7.0);
+    detail["tree_clean"] = json!(true);
+    detail["tree_change_count"] = json!(0);
+    detail["discarded"] = json!({"tracked":0,"untracked":0});
+    let reply = json!({"reason":"door-complete","status":0,"ref_check":"not-applicable",
+        "stdin_bytes":0,"stdout_bytes":case.output_bytes,"stderr_bytes":0,
+        "queue_wall_seconds":case.queue_ns.map(|ns| std::time::Duration::from_nanos(ns).as_secs_f64()),
+        "mediation_wall_seconds":cpu,"compute_wall_seconds":wall,"compute":detail});
+    crate::door::effect_from_final(&reply)
+}
+
+fn measure_compute_case(case: &ComputeCase) {
+    let (_fixture, store, client) = seed_compute(case.reason);
+    let id = common_id("alpha", "R:aa");
+    store
+        .collection_command(
+            "triage",
+            Some(&json!({"schema":1,"items":[{"id":id,
+        "decision":{"answer":{"outcome":"allow"},"reason":"fixture"}}]})),
+            None,
+            false,
+        )
+        .expect("triage through owner");
+    store
+        .channel_service_locked(
+            &client,
+            "claim",
+            &json!({"schema":1,"id":id,"claim":"fixture-compute"}),
+            None,
+        )
+        .expect("claim through owner");
+    let mut record = store.request("R:aa").expect("local compute record");
+    let effect = finished_compute_effect(&record, case);
+    record
+        .record_effect(effect.clone())
+        .expect("door effect record");
+    let document = json!({"schema":1,"id":id,"claim":"fixture-compute","result":effect});
+    SERVICE_BOUNDARIES.with(|slot| slot.replace(Some(std::array::from_fn(|_| Value::Null))));
+    let _reset = Reset;
+    let completion = store.channel_service_locked(&client, "complete", &document, Some(&record));
+    let [preview, candidate, submitted, reply] =
+        SERVICE_BOUNDARIES.with(|slot| slot.borrow_mut().take().expect("service boundaries"));
+    let encoded = serde_json::to_vec(&submitted).expect("client publication encoding");
+    let decoded: Value = serde_json::from_slice(&encoded).expect("helper publication decoding");
+    let boundary_diff = first_value_difference("candidate -> submitted", &candidate, &submitted)
+        .or_else(|| first_value_difference("submitted -> helper parse", &submitted, &decoded));
+    assert!(
+        completion.is_ok(),
+        "completion={completion:?}; boundary={boundary_diff:?}"
+    );
+    let stored = client
+        .call("--owner-read", "", "alpha", None)
+        .expect("stored collection");
+    let preview_row = collection_row(&preview, &id);
+    let candidate_row = collection_row(&candidate, &id);
+    same_value(
+        "record.effect -> preview.service_result",
+        &effect,
+        &preview_row["service_result"],
+    );
+    same_value(
+        "record -> candidate.body.record",
+        record.value(),
+        &candidate_row["body"]["record"],
+    );
+    same_value(
+        "preview.service_result -> candidate.service_result",
+        &preview_row["service_result"],
+        &candidate_row["service_result"],
+    );
+    same_value("candidate -> submitted", &candidate, &submitted);
+    same_value("submitted -> reply", &submitted, &reply);
+    same_value("reply -> stored", &reply, &stored);
+}
+
+/// ´test:unit:compute-record-survives-owner-service-publication´
+#[test]
+fn compute_record_survives_owner_service_publication() {
+    if !publication_tests::in_namespace() {
+        return;
+    }
+    for case in [
+        ComputeCase {
+            wall_ns: 1,
+            cpu_ns: 2,
+            output_bytes: 0,
+            queue_ns: None,
+            reason: "learned: ./tools/check --root .",
+            path: "/work/checkout",
+        },
+        ComputeCase {
+            wall_ns: 123_456,
+            cpu_ns: 789,
+            output_bytes: 1,
+            queue_ns: Some(0),
+            reason: "agent: allowed ~ ^ @ % #",
+            path: "/work/space #1",
+        },
+        ComputeCase {
+            wall_ns: 1_234_567_890,
+            cpu_ns: 987_654_321,
+            output_bytes: 65_536,
+            queue_ns: Some(12_345),
+            reason: r#"agent: path with "quote" and backslash \"#,
+            path: "/work/%23@^",
+        },
+        ComputeCase {
+            wall_ns: 86_400_000_000_000,
+            cpu_ns: 3_600_000_000_000,
+            output_bytes: 16_777_216,
+            queue_ns: None,
+            reason: "agent: accented café",
+            path: "/work/checkout with space",
+        },
+    ] {
+        measure_compute_case(&case);
+    }
+}
+
+/// ´test:unit:compute-record-measurements-survive-owner-service-sweep´
+#[test]
+fn compute_record_measurements_survive_owner_service_sweep() {
+    if !publication_tests::in_namespace() {
+        return;
+    }
+    let mut state = 0x243f_6a88_85a3_08d3_u64;
+    for scale in [
+        10,
+        1_000,
+        1_000_000,
+        1_000_000_000,
+        60_000_000_000,
+        86_400_000_000_000,
+    ] {
+        for index in 0..16 {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            let case = ComputeCase {
+                wall_ns: 1 + state % scale,
+                cpu_ns: 1 + state.rotate_left(19) % scale,
+                output_bytes: [0, 1, 65_536, 16_777_216][index % 4],
+                queue_ns: (index % 2 == 0).then_some(state % 1_000_000),
+                reason: "agent: command path ./tools/check @%#",
+                path: "/work/checkout with space",
+            };
+            measure_compute_case(&case);
+        }
+    }
 }
 
 fn duration_measurements() -> Vec<f64> {
