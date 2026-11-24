@@ -1889,6 +1889,29 @@ fn request_record(
     waiting: bool,
     words: &[String],
 ) -> io::Result<RequestRecord> {
+    let mut value = request_record_value(
+        registration,
+        class,
+        operation.name(),
+        setting,
+        would_do,
+        waiting,
+    );
+    if operation == transport::Operation::Compute {
+        value["shape_key"] = json!(compute::shape(words));
+        value["effect"]["compute"] = compute::pending(words);
+    }
+    RequestRecord::decode(value).map_err(io::Error::other)
+}
+
+fn request_record_value(
+    registration: &Registration,
+    class: &str,
+    operation: &str,
+    setting: &Value,
+    would_do: &Value,
+    waiting: bool,
+) -> Value {
     let at = now_nanos();
     let id = format!(
         "{}:{:x}{:x}",
@@ -1899,7 +1922,7 @@ fn request_record(
     let mut value = json!({
         "schema":3,"id":id,"loop":registration.loop_name,"run":registration.run,
         "worker_uid":registration.worker_uid,"class":class,
-        "shape_key":format!("{class}:{}", operation.name()),"operation":operation.name(),
+        "shape_key":format!("{class}:{operation}"),"operation":operation,
         "mirror_ref":registration.mirror_ref,"mode":setting["mode"],"floor":setting["floor"],
         "class_setting":setting["class"],"loop_setting":setting["loop"],
         "would_do":would_do,"effect":{"state":"pending","reason":null,"ref_check":null,
@@ -1909,11 +1932,56 @@ fn request_record(
         // filed_at is decimal Unix epoch nanoseconds since 1970-01-01T00:00:00Z.
         "mark_reason":null,"review":null,"label":null,"filed_at":at.to_string()
     });
-    if operation == transport::Operation::Compute {
-        value["shape_key"] = json!(compute::shape(words));
-        value["effect"]["compute"] = compute::pending(words);
-    }
     crate::requests::judgement::initialize(&mut value);
+    value
+}
+
+/// File the exact workspace intent in the schema-seven form its reader owns.
+/// The serving caller supplies the effective mode and the classified answer;
+/// no request text is interpreted here.
+#[allow(dead_code)] // The serving caller follows this record boundary.
+pub(crate) fn workspace_record(
+    registration: &Registration,
+    setting: &Value,
+    request: &WorkspaceRequest,
+    would_do: &Value,
+    matched_rule: Value,
+) -> io::Result<RequestRecord> {
+    let mut value = request_record_value(
+        registration,
+        "compute",
+        "compute-workspace",
+        setting,
+        would_do,
+        true,
+    );
+    let envelope = request.envelope();
+    let grant = request.grant();
+    let key = execute_command::workspace::learned_key(
+        "compute",
+        envelope,
+        grant,
+        &grant.quick_policy_digest,
+    )
+    .map_err(io::Error::other)?;
+    let execution_digest = execute_command::workspace::canonical_digest(&envelope.execution)
+        .map_err(io::Error::other)?;
+    value["schema"] = json!(7);
+    value["operation"] = json!("compute-workspace");
+    value["shape_key"] = key[2].clone();
+    value["matched_rule"] = matched_rule;
+    value["effect"]["workspace"] = json!({
+        "envelope":envelope,
+        "grant":grant,
+        "policy_revision":grant.quick_policy_digest,
+        "blacklist_revision":grant.blacklist_digest,
+        "execution_digest":execution_digest,
+        "context_digest":key[2],
+        "result":{"outcome":{"kind":"Unknown"},"wall_seconds":null,
+            "user_cpu_seconds":null,"system_cpu_seconds":null},
+        "admission_wall_seconds":null,
+        "steps":[]
+    });
     RequestRecord::decode(value).map_err(io::Error::other)
 }
 

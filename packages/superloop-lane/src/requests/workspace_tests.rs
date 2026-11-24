@@ -559,6 +559,47 @@ fn custodied_request(fixture: &Fixture, envelope: &Envelope) -> crate::door::Wor
     .expect("custodied request")
 }
 
+/// ´test:unit:workspace-caller-files-exact-pending-schema-seven-intent´
+#[test]
+fn workspace_caller_files_exact_pending_schema_seven_intent() {
+    let fixture = prepared_fixture();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let registration = crate::door::Registration {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        worker_uid: 3000,
+        loop_uid: 41001,
+        scope: crate::door::Scope::Work,
+        mirror_ref: "refs/heads/lane/R".into(),
+    };
+    let seed = waiting("R", "1a", 3000, Mode::Audit).into_value();
+    let setting = json!({"mode":seed["mode"],"floor":seed["floor"],
+        "class":seed["class_setting"],"loop":seed["loop_setting"]});
+    let row = crate::door::workspace_record(
+        &registration,
+        &setting,
+        &request,
+        &json!({"decision":"undecided","reason":"workspace miss"}),
+        Value::Null,
+    )
+    .expect("schema-seven intent");
+    let value = row.value();
+    assert_eq!(value["schema"], 7);
+    assert_eq!(value["state"], "waiting");
+    assert_eq!(value["effect"]["state"], "pending");
+    assert_eq!(value["effect"]["workspace"]["envelope"], json!(envelope));
+    assert_eq!(
+        value["effect"]["workspace"]["grant"],
+        json!(request.grant())
+    );
+    assert_eq!(
+        value["effect"]["workspace"]["policy_revision"],
+        request.grant().quick_policy_digest
+    );
+    assert_eq!(RequestRecord::decode(value.clone()).unwrap().value(), value);
+}
+
 fn approved_record(
     store: &crate::requests::store::Store,
     id: &str,
