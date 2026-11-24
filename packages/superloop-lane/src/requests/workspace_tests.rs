@@ -59,6 +59,23 @@ fn workspace_quick_rule_citation_reads_only_for_its_grant_table() {
     assert!(RequestRecord::decode(changed).is_err());
 }
 
+/// ´test:unit:workspace-unserved-executor-refusal-records-its-effect´
+#[test]
+fn workspace_unserved_executor_refusal_records_its_effect() {
+    let mut row = record();
+    let digest = row["effect"]["workspace"]["grant"]["quick_policy_digest"].clone();
+    row["state"] = Value::Null;
+    row["would_do_source"] = json!("quick-rule");
+    row["decision_tier"] = json!("quick-rule");
+    row["would_do"] = json!({"decision":"allow","reason":"fixture-rule"});
+    row["matched_rule"] = json!({"rule":"fixture-rule","policy_digest":digest});
+    row["effect"]["state"] = json!("refused");
+    row["effect"]["reason"] = json!("door-workspace-protocol-refusal");
+    row["effect"]["ref_check"] = json!("not-applicable");
+    row["effect"]["ending"] = crate::requests::unobserved_ending();
+    RequestRecord::decode(row).expect("unserved executor refusal remains readable");
+}
+
 fn finished_row(
     ending: &str,
     reason: &str,

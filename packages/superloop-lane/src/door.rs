@@ -2846,6 +2846,68 @@ fn serve_request_with_agent_at_context(
             let mode = execute_command::policy::DoorMode::from_record(setting["mode"].as_str())
                 .map_err(|error| LaneError::input(error.0, "workspace mode differs"))?;
             let disposition = request.disposition(mode, &classification, learned.as_ref())?;
+            if matches!(
+                disposition,
+                execute_command::workspace::Disposition::Immediate
+                    | execute_command::workspace::Disposition::Block
+            ) {
+                let (would_do, quick_rule) = match &classification {
+                    execute_command::workspace::Classification::QuickAllow(allow) => {
+                        let evidence = allow.evidence();
+                        (
+                            json!({"decision":"allow","reason":evidence["rule"]}),
+                            Some(evidence),
+                        )
+                    }
+                    execute_command::workspace::Classification::Deny(denial) => {
+                        let evidence = denial.evidence();
+                        (
+                            json!({"decision":"refuse","reason":format!("blacklist {}", evidence["blacklist_rule"])}),
+                            None,
+                        )
+                    }
+                    execute_command::workspace::Classification::Miss { .. } => (
+                        json!({"decision":"allow","reason":"learned allowance"}),
+                        None,
+                    ),
+                };
+                let mut record = workspace_record(
+                    registration,
+                    &setting,
+                    &request,
+                    disposition,
+                    &would_do,
+                    Value::Null,
+                )
+                .map_err(|error| {
+                    LaneError::input("door-workspace-context-differs", error.to_string())
+                })?;
+                if let Some(evidence) = quick_rule {
+                    let mut value = record.into_value();
+                    value["decision_tier"] = json!("quick-rule");
+                    value["would_do_source"] = json!("quick-rule");
+                    value["matched_rule"] = json!({"rule":evidence["rule"],
+                        "policy_digest":request.grant().quick_policy_digest});
+                    record = RequestRecord::decode(value)?;
+                }
+                let id = record.id().to_owned();
+                let mut effect = record.value()["effect"].clone();
+                effect["state"] = json!("refused");
+                effect["reason"] = json!("door-workspace-protocol-refusal");
+                effect["ref_check"] = json!("not-applicable");
+                let ending = crate::requests::unobserved_ending();
+                effect["ending"] = ending.clone();
+                let mut check = record.value().clone();
+                check["effect"] = effect.clone();
+                RequestRecord::decode(check)?;
+                let lease = store.file_active_workspace_claim(record, &request)?;
+                let finished = store.finish_request(&id, Some(effect), &ending);
+                drop(lease);
+                finished?;
+                return Ok(format!(
+                    "{disposition:?}: refused before its effect; the executor is not yet served; nothing was run"
+                ));
+            }
             Ok(format!(
                 "{disposition:?}: this door does not yet run a workspace command without an exact rule; nothing was run"
             ))
