@@ -26,6 +26,269 @@ fn record() -> Value {
         .remove("output_bytes");
     record
 }
+
+fn finished_row(
+    ending: &str,
+    reason: &str,
+    cause: &str,
+    outcome: Value,
+    output_bytes: u64,
+) -> Value {
+    let mut row = record();
+    row["state"] = json!("observed");
+    row["effect"]["state"] = json!(ending);
+    row["effect"]["reason"] = json!(reason);
+    row["effect"]["ref_check"] = json!("not-applicable");
+    row["effect"]["workspace"]["result"]["outcome"] = outcome;
+    if row["effect"]["workspace"]["result"]["outcome"]["kind"] != "Unknown" {
+        row["effect"]["workspace"]["result"]["wall_seconds"] = json!(0.0);
+    }
+    row["effect"]["exit_status"] = row["effect"]["workspace"]["result"]["outcome"]["code"].clone();
+    row["effect"]["workspace_node"] = json!({
+        "node_reason":cause,"entry_version":"0.11.0",
+        "entry_version_differs":false,
+        "output_incomplete":matches!(ending, "incomplete" | "unknown"),
+        "child_started":if cause == "unobserved" { Value::Null } else { json!(ending != "not-started") },
+        "output_bytes":output_bytes,
+        "result":row["effect"]["workspace"]["result"],
+        "steps":row["effect"]["workspace"]["steps"],
+        "ending":ending,
+        "cause":match ending {
+            "not-started" | "interrupted" => Some("input-closed"),
+            "refused" => Some("output-limit"),
+            "incomplete" => Some("held-output"),
+            "unknown" => Some("route-incomplete"),
+            _ => None,
+        },
+        "door_cause":null});
+    row
+}
+
+/// ´test:unit:workspace-caller-endings-read-before-their-writer´
+#[test]
+fn workspace_caller_endings_read_before_their_writer() {
+    for (ending, reason, node_reason, outcome, output_bytes) in [
+        (
+            "completed",
+            "door-complete",
+            "node-complete",
+            json!({"kind":"Exited","code":0}),
+            0,
+        ),
+        (
+            "interrupted",
+            "door-disconnect-refusal",
+            "node-input-closed",
+            json!({"kind":"Signalled","signal":15}),
+            1,
+        ),
+        (
+            "not-started",
+            "door-workspace-not-started",
+            "node-input-closed",
+            json!({"kind":"TimedOut"}),
+            0,
+        ),
+        (
+            "refused",
+            "door-output-limit-refusal",
+            "node-output-limit",
+            json!({"kind":"Signalled","signal":15}),
+            1,
+        ),
+        (
+            "incomplete",
+            "door-workspace-incomplete",
+            "node-output-incomplete",
+            json!({"kind":"Exited","code":0}),
+            1,
+        ),
+        (
+            "unknown",
+            "door-workspace-unknown",
+            "unobserved",
+            json!({"kind":"Unknown"}),
+            1,
+        ),
+    ] {
+        let row = finished_row(ending, reason, node_reason, outcome, output_bytes);
+        assert_eq!(RequestRecord::decode(row.clone()).unwrap().value(), &row);
+        let mut bad = row;
+        bad["effect"]["workspace_node"]["entry_version"] = json!("bad version with space");
+        assert_eq!(
+            RequestRecord::decode(bad).unwrap_err().kind,
+            "requests-record-refusal"
+        );
+    }
+    for (field, value) in [
+        ("node_reason", json!("node-input-closed")),
+        (
+            "result",
+            json!({"outcome":{"kind":"Unknown"},"wall_seconds":null,"user_cpu_seconds":null,"system_cpu_seconds":null}),
+        ),
+        ("cause", json!("stop")),
+    ] {
+        let mut bad = finished_row(
+            "completed",
+            "door-complete",
+            "node-complete",
+            json!({"kind":"Exited","code":0}),
+            0,
+        );
+        bad["effect"]["workspace_node"][field] = value.clone();
+        if field == "result" {
+            bad["effect"]["workspace"]["result"] = value;
+            bad["effect"]["exit_status"] = Value::Null;
+        }
+        assert_eq!(
+            RequestRecord::decode(bad).unwrap_err().kind,
+            "requests-record-refusal"
+        );
+    }
+    let mut legacy = waiting("R", "2a", 3000, Mode::Audit).into_value();
+    legacy["effect"]["state"] = json!("not-started");
+    legacy["effect"]["reason"] = json!("door-workspace-not-started");
+    legacy["effect"]["ref_check"] = json!("not-applicable");
+    assert_eq!(
+        RequestRecord::decode(legacy).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+}
+
+/// ´test:unit:workspace-terminal-shapes-are-not-pending´
+#[test]
+fn workspace_terminal_shapes_are_not_pending() {
+    let rows = ["not-started", "incomplete", "unknown"]
+        .into_iter()
+        .enumerate()
+        .map(|(index, ending)| {
+            let (reason, node_reason, outcome, bytes) = match ending {
+                "not-started" => (
+                    "door-workspace-not-started",
+                    "node-input-closed",
+                    json!({"kind":"TimedOut"}),
+                    0,
+                ),
+                "incomplete" => (
+                    "door-workspace-incomplete",
+                    "node-output-incomplete",
+                    json!({"kind":"Exited","code":0}),
+                    1,
+                ),
+                _ => (
+                    "door-workspace-unknown",
+                    "unobserved",
+                    json!({"kind":"Unknown"}),
+                    1,
+                ),
+            };
+            let mut row = finished_row(ending, reason, node_reason, outcome, bytes);
+            row["id"] = json!(format!("R:{index:02x}"));
+            RequestRecord::decode(row).unwrap()
+        })
+        .collect::<Vec<_>>();
+    let groups = super::Store::shapes(&[("R".to_owned(), 1, rows)]).unwrap();
+    let group = &groups["groups"][0];
+    assert_eq!(group["effect_pending"], 0);
+    for name in ["effect_not_started", "effect_incomplete", "effect_unknown"] {
+        assert_eq!(group[name], 1, "{name}");
+    }
+}
+
+/// ´test:unit:workspace-record-reader-agrees-with-adapter-terminal-mapping´
+#[test]
+fn workspace_record_reader_agrees_with_adapter_terminal_mapping() {
+    use crate::door::workspace_adapter::fixture_terminal_evidence;
+    let cases = [
+        ("node-complete", "Exited", true, false),
+        ("node-complete", "Signalled", true, false),
+        ("node-complete", "Unknown", false, false),
+        ("node-deadline", "TimedOut", false, false),
+        ("node-deadline", "TimedOut", true, false),
+        ("node-stopped", "TimedOut", false, false),
+        ("node-stopped", "Exited", false, false),
+        ("node-stopped", "Exited", true, false),
+        ("node-stopped", "Signalled", true, false),
+        ("node-input-closed", "TimedOut", false, false),
+        ("node-input-closed", "Exited", true, false),
+        ("node-heartbeat-silence", "TimedOut", true, false),
+        ("node-malformed-control", "TimedOut", false, false),
+        ("node-output-limit", "TimedOut", true, false),
+        ("node-output-limit", "Signalled", true, false),
+        ("node-output-incomplete", "Exited", true, true),
+        ("node-output-incomplete", "Unknown", true, true),
+    ];
+    for (reason, outcome, started, held) in cases {
+        for bytes in [0, 1] {
+            let result = match outcome {
+                "Exited" => {
+                    json!({"outcome":{"kind":"Exited","code":0},"wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null})
+                }
+                "Signalled" => {
+                    json!({"outcome":{"kind":"Signalled","signal":15},"wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null})
+                }
+                "Unknown" => {
+                    json!({"outcome":{"kind":"Unknown"},"wall_seconds":null,"user_cpu_seconds":null,"system_cpu_seconds":null})
+                }
+                _ => {
+                    json!({"outcome":{"kind":"TimedOut"},"wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null})
+                }
+            };
+            let frame = json!({"schema":1,"type":"terminal","request_id":"R:1a",
+                "nonce":"fixture","result":result,"steps":[],"output_bytes":bytes,
+                "reason":reason,"output_incomplete":held,"child_started":started});
+            match fixture_terminal_evidence(frame) {
+                Ok(evidence) => {
+                    let ending = evidence["ending"].as_str().unwrap();
+                    let record_reason = match ending {
+                        "completed" => "door-complete",
+                        "not-started" => "door-workspace-not-started",
+                        "interrupted" => "door-disconnect-refusal",
+                        "refused" => "door-output-limit-refusal",
+                        "incomplete" => "door-workspace-incomplete",
+                        _ => panic!("unexpected adapter ending"),
+                    };
+                    let mut row = finished_row(
+                        ending,
+                        record_reason,
+                        reason,
+                        evidence["result"]["outcome"].clone(),
+                        bytes,
+                    );
+                    row["effect"]["workspace_node"] = evidence.clone();
+                    row["effect"]["workspace"]["result"] = evidence["result"].clone();
+                    row["effect"]["exit_status"] = evidence["result"]["outcome"]["code"].clone();
+                    assert!(
+                        RequestRecord::decode(row).is_ok(),
+                        "{reason} {outcome} {started} {bytes}"
+                    );
+                }
+                Err(error) => assert_eq!(error.kind, "door-workspace-protocol-refusal"),
+            }
+        }
+    }
+    let mut no_evidence = finished_row(
+        "not-started",
+        "door-workspace-not-started",
+        "node-input-closed",
+        json!({"kind":"TimedOut"}),
+        0,
+    );
+    no_evidence["effect"]["workspace_node"]["child_started"] = Value::Null;
+    assert_eq!(
+        RequestRecord::decode(no_evidence).unwrap_err().kind,
+        "requests-record-refusal"
+    );
+    let mut older_entry = finished_row(
+        "interrupted",
+        "door-disconnect-refusal",
+        "node-input-closed",
+        json!({"kind":"Exited","code":0}),
+        0,
+    );
+    older_entry["effect"]["workspace_node"]["child_started"] = Value::Null;
+    assert!(RequestRecord::decode(older_entry).is_ok());
+}
 /// ´test:unit:workspace-record-seven-is-strict-and-six-is-unchanged´
 #[test]
 fn workspace_record_seven_is_strict_and_six_is_unchanged() {
@@ -504,12 +767,101 @@ fn workspace_learned_allowance_comes_from_the_store_lookup() {
             "2",
         )
         .expect("protected label");
-    let allowance = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
+    let learned = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
         .expect("label lookup")
         .0
         .expect("learned allow");
+    let allowance = learned.allowance().expect("positive label");
     assert_eq!(allowance.evidence()["source"], "learned");
     allowance.check(&request).expect("exact context");
+    assert_eq!(
+        request
+            .disposition(
+                execute_command::policy::DoorMode::Enforce,
+                &execute_command::workspace::Classification::Miss {
+                    reasons: vec!["fictional miss".into()],
+                },
+                Some(&learned),
+            )
+            .unwrap(),
+        execute_command::workspace::Disposition::Immediate,
+    );
+}
+
+/// ´test:unit:workspace-learned-refusal-reaches-door-disposition´
+#[test]
+fn workspace_learned_refusal_reaches_door_disposition() {
+    use execute_command::policy::DoorMode;
+    use execute_command::workspace::{Classification, Disposition};
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1a", &envelope);
+    store
+        .triage(
+            "R",
+            &[json!({"id":"R:1a","action":"adjudicate",
+                "treatment":"refuse","reason":"fictional reviewed refusal"})],
+            "superloop",
+            "2",
+        )
+        .expect("protected refusal");
+    let learned = crate::door::WorkspaceAllowance::from_store_lookup(&store, &request)
+        .expect("label lookup")
+        .0
+        .expect("learned refusal");
+    assert!(learned.allowance().is_none());
+    let miss = Classification::Miss {
+        reasons: vec!["fictional miss".into()],
+    };
+    for (mode, expected) in [
+        (DoorMode::Allow, Disposition::ImmediateRecordRefusal),
+        (DoorMode::Enforce, Disposition::Block),
+        (DoorMode::Audit, Disposition::WaitForJudgement),
+    ] {
+        assert_eq!(
+            request.disposition(mode, &miss, Some(&learned)).unwrap(),
+            expected
+        );
+    }
+}
+
+/// ´test:unit:workspace-allow-intent-reads-unpublished-request-state´
+#[test]
+fn workspace_allow_intent_reads_unpublished_request_state() {
+    let fixture = prepared_fixture();
+    fixture.set_floor("allow");
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let mut row = record();
+    let mode = crate::requests::ModeSetting::first(
+        Mode::Allow,
+        Mode::Allow,
+        "owner",
+        "fictional allow mode",
+        "1",
+    )
+    .unwrap();
+    row["mode"] = json!("allow");
+    row["floor"] = json!("allow");
+    row["class_setting"] = mode.value().clone();
+    row["loop_setting"] = mode.value().clone();
+    row["state"] = Value::Null;
+    let grant = request.grant();
+    let key = learned_key("compute", &envelope, grant, &grant.quick_policy_digest).unwrap();
+    row["shape_key"] = key[2].clone();
+    row["effect"]["workspace"]["policy_revision"] = json!(grant.quick_policy_digest);
+    row["effect"]["workspace"]["context_digest"] = key[2].clone();
+    store.file(RequestRecord::decode(row).unwrap()).unwrap();
+    let intent = crate::door::WorkspaceIntent::from_store(&store, "R:1a", &request)
+        .expect("filed but unpublished allow intent");
+    intent.check(&request, "R:1a").unwrap();
+    assert_eq!(
+        intent.check(&request, "R:9f").unwrap_err().kind,
+        "door-workspace-context-differs"
+    );
 }
 /// ´test:unit:workspace-schema-seven-survives-rewrite-and-index-rebuild´
 #[test]

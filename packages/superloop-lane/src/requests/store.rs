@@ -1764,7 +1764,7 @@ impl Store {
                     json!({
                         "class":key.0,"shape_key":key.1,"requests":0,"would_allow":0,
                         "would_refuse":0,"would_undecided":0,"would_refer":0,"labels_allow":0,"labels_refuse":0,
-                        "agreements":0,"corrections":0,"labels_after_undecided":0,"labels_after_refer":0,"effect_completed":0,"effect_refused":0,"effect_interrupted":0,"effect_pending":0,
+                        "agreements":0,"corrections":0,"labels_after_undecided":0,"labels_after_refer":0,"effect_completed":0,"effect_refused":0,"effect_interrupted":0,"effect_not_started":0,"effect_incomplete":0,"effect_unknown":0,"effect_pending":0,
                         "request_ids":[],"settings":[]
                     })
                 });
@@ -1794,6 +1794,9 @@ impl Store {
                     Some("completed") => "effect_completed",
                     Some("refused") => "effect_refused",
                     Some("interrupted") => "effect_interrupted",
+                    Some("not-started") => "effect_not_started",
+                    Some("incomplete") => "effect_incomplete",
+                    Some("unknown") => "effect_unknown",
                     _ => "effect_pending",
                 };
                 group[effect_group] = json!(group[effect_group].as_u64().unwrap_or(0) + 1);

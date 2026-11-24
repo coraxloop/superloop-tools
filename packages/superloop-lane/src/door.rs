@@ -24,8 +24,10 @@ pub mod config;
 mod lifetime;
 pub mod metadata;
 #[allow(dead_code)] // The serving caller is the next W3 cut.
-mod workspace_adapter;
-pub use workspace::{WorkspaceAllowance, WorkspaceRequest, workspace_request};
+pub(crate) mod workspace_adapter;
+pub use workspace::{
+    WorkspaceAllowance, WorkspaceIntent, WorkspaceLearned, WorkspaceRequest, workspace_request,
+};
 
 /// Format the final door reply for the SSH command boundary.
 #[must_use]
@@ -1091,6 +1093,13 @@ mod workspace {
         origin: AllowanceOrigin,
     }
 
+    /// A store-owned learned answer, including a refusal that outranks a quick allow.
+    pub struct WorkspaceLearned {
+        context_key: Value,
+        decision: bool,
+        allowance: Option<WorkspaceAllowance>,
+    }
+
     /// An allow-mode execution intent read from this request's protected record.
     pub struct WorkspaceIntent {
         record_id: String,
@@ -1115,7 +1124,7 @@ mod workspace {
                 || value["class"] != "compute"
                 || value["operation"] != "compute-workspace"
                 || value["mode"] != "allow"
-                || value["state"] != "waiting"
+                || !value["state"].is_null()
                 || value["effect"]["state"] != "pending"
                 || detail["envelope"] != json!(request.envelope)
                 || detail["grant"] != json!(request.grant)
@@ -1200,7 +1209,7 @@ mod workspace {
         pub fn from_store_lookup(
             store: &Store,
             request: &WorkspaceRequest,
-        ) -> Result<(Option<Self>, Option<LaneError>), LaneError> {
+        ) -> Result<(Option<WorkspaceLearned>, Option<LaneError>), LaneError> {
             let key = learned_key(
                 "compute",
                 &request.envelope,
@@ -1223,7 +1232,7 @@ mod workspace {
                         return Ok((None, Some(error)));
                     }
                 };
-            if decision["decision"] != "allow" {
+            if !matches!(decision["decision"].as_str(), Some("allow" | "refuse")) {
                 return Ok((None, None));
             }
             if evidence["class"] != "compute"
@@ -1235,8 +1244,18 @@ mod workspace {
                     "learned allowance evidence differs",
                 ));
             }
-            Self::bind(request, AllowanceOrigin::Store(evidence))
-                .map(|allowance| (Some(allowance), None))
+            let allowed = decision["decision"] == "allow";
+            let allowance = allowed
+                .then(|| Self::bind(request, AllowanceOrigin::Store(evidence)))
+                .transpose()?;
+            Ok((
+                Some(WorkspaceLearned {
+                    context_key: key,
+                    decision: allowed,
+                    allowance,
+                }),
+                None,
+            ))
         }
 
         /// Bind an agent allowance only after a protected store read by request id.
@@ -1307,6 +1326,14 @@ mod workspace {
         }
     }
 
+    impl WorkspaceLearned {
+        /// Checked allowance, absent for a learned refusal.
+        #[must_use]
+        pub const fn allowance(&self) -> Option<&WorkspaceAllowance> {
+            self.allowance.as_ref()
+        }
+    }
+
     #[cfg(test)]
     pub(super) fn fixture_allowance(request: &WorkspaceRequest) -> WorkspaceAllowance {
         WorkspaceAllowance::bind(request, AllowanceOrigin::Store(json!({"fixture":true})))
@@ -1342,12 +1369,18 @@ mod workspace {
             &self,
             mode: DoorMode,
             classification: &Classification,
-            allowance: Option<&WorkspaceAllowance>,
+            learned: Option<&WorkspaceLearned>,
         ) -> Result<Disposition, LaneError> {
-            if let Some(allowance) = allowance {
+            if let Some(allowance) = learned.and_then(WorkspaceLearned::allowance) {
                 allowance.check(self)?;
             }
-            let learned = allowance.map(|allowance| LearnedDecision::Allow(&allowance.context_key));
+            let learned = learned.map(|answer| {
+                if answer.decision {
+                    LearnedDecision::Allow(&answer.context_key)
+                } else {
+                    LearnedDecision::Refuse(&answer.context_key)
+                }
+            });
             execute_command::workspace::disposition(
                 mode,
                 classification,

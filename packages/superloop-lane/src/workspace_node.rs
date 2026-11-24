@@ -504,12 +504,14 @@ fn terminal_frame(
     output_bytes: usize,
     reason: &str,
     output_incomplete: bool,
+    child_started: bool,
 ) -> Value {
     json!({
         "schema":1,"type":"terminal","request_id":call.request_id,
         "nonce":call.nonce,"result":result,"steps":steps,
         "output_bytes":output_bytes,"reason":reason,
         "output_incomplete":output_incomplete,
+        "child_started":child_started,
     })
 }
 
@@ -527,6 +529,7 @@ fn ended_before_spawn<W: Write>(output: &mut W, call: &NodeCall, cause: u8) -> i
             &[],
             0,
             end_reason(cause, &Outcome::TimedOut, false),
+            false,
             false,
         ),
     )
@@ -724,6 +727,7 @@ fn relay_events<W: AsRawFd>(
             state.bytes_seen.load(Ordering::Acquire),
             reason,
             incomplete,
+            measured.child_started,
         ),
         Instant::now() + bounds.write,
     )

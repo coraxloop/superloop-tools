@@ -146,13 +146,18 @@ fn workspace_node_process_entry_fixture() {
         .expect("fixture silence bound")
         .parse::<u64>()
         .expect("fixture silence milliseconds");
+    let start_ms = std::env::var("SUPERLOOP_NODE_PROCESS_START_MS")
+        .ok()
+        .map_or(10_000, |value| {
+            value.parse::<u64>().expect("fixture start milliseconds")
+        });
     serve_with_limits(
         input,
         output,
         &identity,
         Fixture::owner(),
         StreamBounds {
-            start_wait: Duration::from_millis(silence_ms),
+            start_wait: Duration::from_millis(start_ms),
             silence: Duration::from_millis(silence_ms),
             output_limit: MAX_OUTPUT_BYTES,
             write: Duration::from_secs(2),
@@ -174,11 +179,19 @@ fn workspace_node_prestart_bound_is_not_renewed_by_heartbeat() {
     let (mut input, node_input) = UnixStream::pair().unwrap();
     let (node_output, mut output) = UnixStream::pair().unwrap();
     output
-        .set_read_timeout(Some(Duration::from_secs(15)))
+        .set_read_timeout(Some(Duration::from_secs(4)))
         .unwrap();
     write_frame(&mut input, &call).unwrap();
-    control(&mut input, "heartbeat");
-    control(&mut input, "start");
+    let sent = std::sync::Arc::new(AtomicBool::new(false));
+    let stop_sending = std::sync::Arc::clone(&sent);
+    let heartbeats = std::thread::spawn(move || {
+        while !stop_sending.load(Ordering::Acquire) {
+            if write_frame(&mut input, &json!({"schema":1,"type":"heartbeat"})).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    });
     let identity = fixture.identity;
     let thread = std::thread::spawn(move || {
         serve_with_limits(
@@ -187,7 +200,7 @@ fn workspace_node_prestart_bound_is_not_renewed_by_heartbeat() {
             &identity,
             Fixture::owner(),
             StreamBounds {
-                start_wait: Duration::ZERO,
+                start_wait: Duration::from_secs(1),
                 silence: Duration::from_secs(10),
                 output_limit: MAX_OUTPUT_BYTES,
                 write: OUTPUT_WRITE_BOUND,
@@ -196,7 +209,10 @@ fn workspace_node_prestart_bound_is_not_renewed_by_heartbeat() {
         )
     });
     assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
-    let terminal = read_frame(&mut output).unwrap();
+    let terminal_read = read_frame(&mut output);
+    sent.store(true, Ordering::Release);
+    heartbeats.join().unwrap();
+    let terminal = terminal_read.unwrap();
     assert_eq!(terminal["reason"], "node-heartbeat-silence");
     assert_eq!(terminal["steps"], json!([]));
     assert!(!marker.exists());
@@ -387,6 +403,7 @@ fn workspace_node_entry_stop_and_eof_before_spawn() {
     let terminal = read_frame(&mut output).unwrap();
     assert_eq!(terminal["type"], "terminal");
     assert_eq!(terminal["reason"], "node-stopped");
+    assert_eq!(terminal["child_started"], false);
     assert_eq!(terminal["result"]["outcome"], json!(Outcome::TimedOut));
     thread.join().unwrap().unwrap();
     assert!(!marker.exists());
@@ -501,6 +518,7 @@ fn workspace_node_entry_cancels_on_stop_eof_and_silence() {
             json!(Outcome::TimedOut)
         );
         assert_eq!(frames.last().unwrap()["reason"], reason);
+        assert_eq!(frames.last().unwrap()["child_started"], true);
         thread.join().unwrap().unwrap();
     }
     let (_input, mut output, thread) = fixture.start(&waiting, Duration::ZERO, MAX_OUTPUT_BYTES);

@@ -1002,6 +1002,33 @@ fn workspace_quick_evidence_cannot_be_replayed_for_another_context() {
         );
     }
 }
+
+/// ´test:unit:workspace-learned-refusal-overrides-quick-allow-in-each-mode´
+#[test]
+fn workspace_learned_refusal_overrides_quick_allow_in_each_mode() {
+    let (envelope, grant, policy, blacklist) = fixture();
+    let quick = classify(&envelope, &grant, &policy, &blacklist).unwrap();
+    assert!(matches!(quick, Classification::QuickAllow(_)));
+    let key = learned_key("compute", &envelope, &grant, &policy.revision).unwrap();
+    for (mode, expected) in [
+        (DoorMode::Allow, Disposition::ImmediateRecordRefusal),
+        (DoorMode::Enforce, Disposition::Block),
+        (DoorMode::Audit, Disposition::WaitForJudgement),
+    ] {
+        assert_eq!(
+            disposition(
+                mode,
+                &quick,
+                &envelope,
+                &grant,
+                &policy.revision,
+                Some(LearnedDecision::Refuse(&key)),
+            )
+            .unwrap(),
+            expected,
+        );
+    }
+}
 /// ´test:unit:workspace-canonical-digest-has-a-known-answer´
 #[test]
 fn workspace_canonical_digest_has_a_known_answer() {

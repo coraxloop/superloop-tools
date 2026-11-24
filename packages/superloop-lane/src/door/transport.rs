@@ -4095,4 +4095,24 @@ mod tests {
             .expect("observed disconnect completes without a final");
         assert_eq!(ended["reason"], "door-disconnect-refusal");
     }
+
+    /// ´test:unit:workspace-caller-final-reasons-read-before-their-writer´
+    #[test]
+    fn workspace_caller_final_reasons_read_before_their_writer() {
+        for reason in [
+            "door-workspace-not-started",
+            "door-workspace-incomplete",
+            "door-workspace-unknown",
+        ] {
+            let reply = json!({"schema":2,"type":"final","status":125,"reason":reason,
+                "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue",
+                "queue_wall_seconds":null,"mediation_wall_seconds":0.0,
+                "compute_wall_seconds":0.0});
+            super::validate_final(&reply, 0, 0).expect("new reason is readable");
+            assert_eq!(
+                super::super::final_line(&[], &reply).as_deref(),
+                Some(reason)
+            );
+        }
+    }
 }

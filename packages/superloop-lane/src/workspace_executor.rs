@@ -21,6 +21,8 @@ use std::time::{Duration, Instant};
 pub struct ExecutionMeasurements {
     pub result: Measurement,
     pub steps: Vec<Measurement>,
+    /// Set immediately after any child is spawned, including a quiet child.
+    pub child_started: bool,
 }
 
 /// Retained cwd and exact execution context. Preparing this value is not admission.
@@ -139,11 +141,13 @@ impl PreparedExecution {
             ]],
         };
         let mut measurements = Vec::new();
+        let mut child_started = false;
         let mut outcome = Outcome::TimedOut;
         for words in &vectors {
-            let Some(measured) = self.step(words, stdout, stderr, cancel) else {
+            let Some((measured, started)) = self.step(words, stdout, stderr, cancel) else {
                 break;
             };
+            child_started |= started;
             outcome = measured.outcome.clone();
             let successful = outcome == (Outcome::Exited { code: 0 });
             measurements.push(measured);
@@ -166,6 +170,7 @@ impl PreparedExecution {
         };
         ExecutionMeasurements {
             result,
+            child_started,
             steps: if matches!(self.envelope.execution, Execution::Sequence { .. }) {
                 measurements
             } else {
@@ -180,7 +185,7 @@ impl PreparedExecution {
         stdout: &File,
         stderr: &File,
         cancel: &AtomicBool,
-    ) -> Option<Measurement> {
+    ) -> Option<(Measurement, bool)> {
         if self.expired(cancel) {
             return None;
         }
@@ -189,9 +194,11 @@ impl PreparedExecution {
         if self.expired(cancel) {
             return None;
         }
+        let mut child_started = false;
         let result = command
             .and_then(|mut command| command.spawn())
             .and_then(|child| {
+                child_started = true;
                 let mut child = Running {
                     child,
                     reaped: false,
@@ -227,7 +234,7 @@ impl PreparedExecution {
             system_cpu_seconds: None,
         });
         measured.wall_seconds = Some(began.elapsed().as_secs_f64());
-        Some(measured)
+        Some((measured, child_started))
     }
 
     fn expired(&self, cancel: &AtomicBool) -> bool {

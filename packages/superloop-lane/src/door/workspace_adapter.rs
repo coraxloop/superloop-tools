@@ -187,6 +187,7 @@ pub(super) struct WorkspaceResult {
     pub(crate) steps: Vec<Measurement>,
     pub(crate) output_bytes: usize,
     pub(crate) output_incomplete: bool,
+    pub(crate) child_started: Option<bool>,
     pub(crate) build: BuildEvidence,
     pub(crate) door_cause: Option<&'static str>,
 }
@@ -224,6 +225,8 @@ struct Terminal {
     output_bytes: usize,
     reason: String,
     output_incomplete: bool,
+    #[serde(default)]
+    child_started: Option<bool>,
 }
 
 impl WorkspaceResult {
@@ -263,7 +266,15 @@ impl WorkspaceResult {
                 ));
             }
         };
-        let ending = if terminal.steps.is_empty() && terminal.output_bytes == 0 {
+        if terminal.child_started == Some(false)
+            && (!terminal.steps.is_empty() || terminal.output_bytes != 0)
+        {
+            return Err(refusal(
+                "door-workspace-protocol-refusal",
+                "node reports output or steps without a started child",
+            ));
+        }
+        let ending = if terminal.child_started == Some(false) {
             match ending {
                 Ending::Interrupted(cause) => Ending::NothingRan(cause),
                 Ending::NodeDeadline => Ending::NothingRan("node-command-deadline"),
@@ -272,22 +283,42 @@ impl WorkspaceResult {
         } else {
             ending
         };
+        if terminal.child_started == Some(false)
+            && matches!(
+                ending,
+                Ending::Complete | Ending::OutputLimit | Ending::OutputIncomplete
+            )
+        {
+            return Err(refusal(
+                "door-workspace-protocol-refusal",
+                "node ending differs from observed child start",
+            ));
+        }
         if matches!(ending, Ending::Complete) && terminal.result.outcome == Outcome::Unknown {
             return Err(refusal(
                 "door-workspace-protocol-refusal",
                 "completed node call has no outcome",
             ));
         }
-        Ok(Self {
+        let result = Self {
             ending,
             node_reason: terminal.reason,
             result: terminal.result,
             steps: terminal.steps,
             output_bytes: terminal.output_bytes,
             output_incomplete: terminal.output_incomplete,
+            child_started: terminal.child_started,
             build,
             door_cause: None,
-        })
+        };
+        let evidence = result.evidence();
+        if !crate::requests::workspace_node_result_matches(&evidence, &evidence["ending"]) {
+            return Err(refusal(
+                "door-workspace-protocol-refusal",
+                "node terminal differs from record-readable result",
+            ));
+        }
+        Ok(result)
     }
 
     pub(crate) fn evidence(&self) -> Value {
@@ -303,8 +334,55 @@ impl WorkspaceResult {
         json!({"node_reason":self.node_reason,"entry_version":self.build.entry_version,
             "entry_version_differs":self.build.differs,"output_incomplete":self.output_incomplete,
             "output_bytes":self.output_bytes,"result":self.result,"steps":self.steps,
+            "child_started":self.child_started,
             "ending":state,"cause":cause,"door_cause":self.door_cause})
     }
+}
+
+/// Exercise the real adapter mapping from the record reader's fixture table.
+#[cfg(test)]
+pub fn fixture_terminal_evidence(frame: Value) -> Result<Value, LaneError> {
+    let call = WorkspaceCall {
+        frame: NodeCall {
+            protocol: 1,
+            request_id: "R:1a".to_owned(),
+            nonce: "fixture".to_owned(),
+            node: "fixture-node".to_owned(),
+            grant: Value::Null,
+            placement: Value::Null,
+            envelope: Value::Null,
+        },
+        handle: String::new(),
+    };
+    let build = BuildEvidence {
+        entry_version: "0.11.0".to_owned(),
+        differs: false,
+    };
+    WorkspaceResult::from_terminal(&call, frame, build).map(|result| result.evidence())
+}
+
+/// ´test:unit:workspace-quiet-stop-needs-positive-no-start-evidence´
+#[cfg(test)]
+#[test]
+fn workspace_quiet_stop_needs_positive_no_start_evidence() {
+    let frame = json!({"schema":1,"type":"terminal","request_id":"R:1a",
+        "nonce":"fixture","result":{"outcome":{"kind":"Exited","code":0},
+            "wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null},
+        "steps":[],"output_bytes":0,"reason":"node-stopped",
+        "output_incomplete":false,"child_started":true});
+    let running = fixture_terminal_evidence(frame.clone()).unwrap();
+    assert_eq!(running["ending"], "interrupted");
+    let mut old = frame.clone();
+    old.as_object_mut().unwrap().remove("child_started");
+    let unknown_start = fixture_terminal_evidence(old).unwrap();
+    assert_eq!(unknown_start["ending"], "interrupted");
+    assert!(unknown_start["child_started"].is_null());
+    let mut before_start = frame;
+    before_start["child_started"] = json!(false);
+    assert_eq!(
+        fixture_terminal_evidence(before_start).unwrap()["ending"],
+        "not-started"
+    );
 }
 
 fn io_refusal(error: &io::Error) -> LaneError {
@@ -313,6 +391,8 @@ fn io_refusal(error: &io::Error) -> LaneError {
 
 const START_BOUND: Duration = Duration::from_secs(5);
 const ACK_BOUND: Duration = Duration::from_secs(30);
+const FIRST_FRAME_EXIT_BOUND: Duration = Duration::from_secs(5);
+const STOP_TERMINAL_BOUND: Duration = Duration::from_secs(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const NODE_DRAIN_AND_WRITE: Duration = Duration::from_secs(240);
 const FINAL_BOUND: Duration = Duration::from_secs(5);
@@ -327,11 +407,16 @@ pub(super) struct WorkspaceStop<'a> {
 #[derive(Clone, Copy)]
 struct DriverBounds {
     lifetime: Instant,
+    acknowledgement: Duration,
     heartbeat_interval: Duration,
     output_limit: usize,
 }
 
 struct ChildGuard(Child);
+
+fn first_frame_exit_deadline(lifetime: Instant, now: Instant) -> Instant {
+    lifetime.min(now + FIRST_FRAME_EXIT_BOUND)
+}
 
 #[cfg(test)]
 thread_local! {
@@ -467,12 +552,14 @@ pub(super) fn run_command(
         stop,
         DriverBounds {
             lifetime,
+            acknowledgement: ACK_BOUND,
             heartbeat_interval: HEARTBEAT_INTERVAL,
             output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
         },
         &mut first_frame_seen,
     );
     if answer.is_err() && !first_frame_seen {
+        let exit_bound = first_frame_exit_deadline(lifetime, Instant::now());
         loop {
             if let Ok(Some(status)) = child.0.try_wait() {
                 if matches!(status.code(), Some(126 | 127)) {
@@ -483,7 +570,7 @@ pub(super) fn run_command(
                 }
                 break;
             }
-            if Instant::now() >= lifetime {
+            if Instant::now() >= exit_bound {
                 break;
             }
             thread::sleep(Duration::from_millis(5));
@@ -510,7 +597,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
         .map_err(|error| io_refusal(&error))?;
     let first = read_frame_before(
         output,
-        bounds.lifetime.min(Instant::now() + ACK_BOUND),
+        bounds.lifetime.min(Instant::now() + bounds.acknowledgement),
         stop.flag,
     )
     .map_err(|error| io_refusal(&error))?;
@@ -582,10 +669,10 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             }
         }
     });
-    let writer = WriterGuard {
+    let mut writer = Some(WriterGuard {
         control: control_tx,
         thread: Some(writer),
-    };
+    });
     let started = started_rx.recv_timeout(START_BOUND).map_err(|error| {
         refusal(
             "door-workspace-protocol-refusal",
@@ -612,15 +699,24 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
     );
     let mut forwarded = 0_usize;
     let mut sent_stop = false;
+    let mut stop_deadline = None;
     let mut frame_fault = None;
     let never_stop = AtomicBool::new(false);
     let terminal = loop {
         let check_stop = if sent_stop { &never_stop } else { stop.flag };
-        let frame = match read_frame_before(output, terminal_deadline, check_stop) {
+        let frame = match read_frame_before(
+            output,
+            stop_deadline.unwrap_or(terminal_deadline),
+            check_stop,
+        ) {
             Ok(frame) => frame,
             Err(error) if error.kind() == io::ErrorKind::Interrupted && !sent_stop => {
-                writer.stop();
+                if let Some(writer) = writer.take() {
+                    writer.stop();
+                    drop(writer);
+                }
                 sent_stop = true;
+                stop_deadline = Some(terminal_deadline.min(Instant::now() + STOP_TERMINAL_BOUND));
                 continue;
             }
             Err(error) if error.kind() == io::ErrorKind::InvalidData => {
@@ -628,7 +724,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
                 break None;
             }
             Err(_) => {
-                if !sent_stop {
+                if !sent_stop && let Some(writer) = &writer {
                     writer.stop();
                 }
                 break None;
@@ -699,6 +795,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             steps: Vec::new(),
             output_bytes: forwarded,
             output_incomplete: true,
+            child_started: None,
             build,
             door_cause: sent_stop.then_some(stop.cause),
         });
@@ -783,7 +880,7 @@ mod tests {
                     "result":{"outcome":{"kind":"TimedOut"},"wall_seconds":0.0,
                         "user_cpu_seconds":null,"system_cpu_seconds":null},
                     "steps":[],"output_bytes":0,"reason":"node-stopped",
-                    "output_incomplete":false});
+                    "output_incomplete":false,"child_started":false});
                 crate::workspace_node::write_frame(&mut node_output, &terminal).unwrap();
                 return;
             }
@@ -814,6 +911,7 @@ mod tests {
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(5),
+                acknowledgement: ACK_BOUND,
                 heartbeat_interval: Duration::from_secs(1),
                 output_limit: 4,
             },
@@ -848,10 +946,18 @@ mod tests {
         assert_eq!(collected.stdout, [] as [u8; 0]);
     }
 
-    #[allow(unsafe_code)]
     fn process_fixture(
         identity: &std::path::Path,
         silence: Duration,
+    ) -> (UnixStream, UnixStream, ChildGuard) {
+        process_fixture_with_start(identity, silence, Duration::from_secs(10))
+    }
+
+    #[allow(unsafe_code)]
+    fn process_fixture_with_start(
+        identity: &std::path::Path,
+        silence: Duration,
+        start_wait: Duration,
     ) -> (UnixStream, UnixStream, ChildGuard) {
         let (door_input, node_input) = UnixStream::pair().expect("call pipe");
         let (node_output, door_output) = UnixStream::pair().expect("reply pipe");
@@ -872,6 +978,10 @@ mod tests {
             .env(
                 "SUPERLOOP_NODE_PROCESS_SILENCE_MS",
                 silence.as_millis().to_string(),
+            )
+            .env(
+                "SUPERLOOP_NODE_PROCESS_START_MS",
+                start_wait.as_millis().to_string(),
             )
             .stdin(Stdio::null())
             .stdout(Stdio::null())
@@ -959,6 +1069,7 @@ mod tests {
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(15),
+                acknowledgement: ACK_BOUND,
                 heartbeat_interval: Duration::from_millis(100),
                 output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
             },
@@ -1019,6 +1130,7 @@ mod tests {
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(15),
+                acknowledgement: ACK_BOUND,
                 heartbeat_interval: Duration::from_millis(100),
                 output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
             },
@@ -1030,6 +1142,108 @@ mod tests {
         assert_eq!(result.door_cause, Some("worker-disconnected"));
         assert_eq!(result.evidence()["door_cause"], "worker-disconnected");
         assert!(child.0.wait().unwrap().success());
+    }
+
+    /// ´test:unit:workspace-adapter-acknowledged-stop-closes-input-before-terminal´
+    #[test]
+    fn workspace_adapter_acknowledged_stop_closes_input_before_terminal() {
+        struct StopOnChunk(Arc<AtomicBool>);
+        impl WorkspaceOutputSink for StopOnChunk {
+            fn forward(
+                &mut self,
+                _channel: OutputChannel,
+                _bytes: &[u8],
+                _deadline: Instant,
+            ) -> Result<(), LaneError> {
+                self.0.store(true, Ordering::Release);
+                Ok(())
+            }
+        }
+        let fixture = crate::workspace_node::tests::Fixture::new();
+        let frame = fixture.call(Execution::Argv {
+            words: vec![b"/bin/true".to_vec()],
+        });
+        let digest = canonical_digest(&frame).unwrap();
+        let call = WorkspaceCall {
+            frame,
+            handle: digest[..16].to_owned(),
+        };
+        let (door_input, mut node_input) = UnixStream::pair().unwrap();
+        let (mut node_output, mut door_output) = UnixStream::pair().unwrap();
+        node_input
+            .set_read_timeout(Some(Duration::from_secs(30)))
+            .unwrap();
+        let ack = json!({"schema":1,"type":"ack","request_id":call.frame.request_id,
+            "nonce":call.frame.nonce,"frame_handle":call.handle,
+            "entry_version":env!("CARGO_PKG_VERSION")});
+        let node = thread::spawn(move || {
+            let _call = crate::workspace_node::read_frame(&mut node_input).unwrap();
+            crate::workspace_node::write_frame(&mut node_output, &ack).unwrap();
+            assert_eq!(
+                crate::workspace_node::read_frame(&mut node_input).unwrap()["type"],
+                "start"
+            );
+            crate::workspace_node::write_frame(
+                &mut node_output,
+                &json!({"schema":1,"type":"stdout","bytes":[1]}),
+            )
+            .unwrap();
+            assert_eq!(
+                crate::workspace_node::read_frame(&mut node_input).unwrap()["type"],
+                "stop"
+            );
+            let mut byte = [0_u8; 1];
+            assert_eq!(
+                node_input.read(&mut byte).unwrap(),
+                0,
+                "input closes after stop"
+            );
+            crate::workspace_node::write_frame(
+                &mut node_output,
+                &json!({"schema":1,"type":"terminal","request_id":ack["request_id"],
+                    "nonce":ack["nonce"],"result":{"outcome":{"kind":"Signalled","signal":15},
+                    "wall_seconds":0.0,"user_cpu_seconds":null,"system_cpu_seconds":null},
+                    "steps":[],"output_bytes":1,"reason":"node-stopped",
+                    "output_incomplete":false}),
+            )
+            .unwrap();
+        });
+        let stop = Arc::new(AtomicBool::new(false));
+        let result = run_stream(
+            &call,
+            door_input,
+            &mut door_output,
+            &mut StopOnChunk(Arc::clone(&stop)),
+            WorkspaceStop {
+                flag: &stop,
+                cause: "worker-disconnected",
+            },
+            DriverBounds {
+                lifetime: Instant::now() + Duration::from_secs(60),
+                acknowledgement: ACK_BOUND,
+                heartbeat_interval: Duration::from_secs(30),
+                output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
+            },
+            &mut false,
+        )
+        .unwrap();
+        node.join().unwrap();
+        assert_eq!(result.ending, Ending::Interrupted("stop"));
+        assert_eq!(result.door_cause, Some("worker-disconnected"));
+    }
+
+    /// ´test:unit:workspace-adapter-first-frame-exit-wait-is-five-seconds´
+    #[test]
+    fn workspace_adapter_first_frame_exit_wait_is_five_seconds() {
+        let now = Instant::now();
+        assert_eq!(
+            first_frame_exit_deadline(now + Duration::from_secs(60), now),
+            now + Duration::from_secs(5)
+        );
+        assert_eq!(
+            first_frame_exit_deadline(now + Duration::from_secs(2), now),
+            now + Duration::from_secs(2)
+        );
     }
 
     /// ´test:unit:workspace-adapter-refuses-node-mismatch-before-route-spawn´
@@ -1129,8 +1343,11 @@ mod tests {
                 frame,
                 handle: digest[..16].to_owned(),
             };
-            let (mut input, mut output, mut child) =
-                process_fixture(&fixture.identity, Duration::from_secs(2));
+            let (mut input, mut output, mut child) = process_fixture_with_start(
+                &fixture.identity,
+                Duration::from_secs(2),
+                Duration::from_secs(1),
+            );
             crate::workspace_node::write_frame(&mut input, call.frame()).unwrap();
             match control {
                 "eof" => input.shutdown(Shutdown::Write).unwrap(),
@@ -1323,6 +1540,52 @@ mod tests {
         assert_eq!(error.kind, "door-compute-tool-refusal");
     }
 
+    /// ´test:unit:workspace-adapter-acknowledgement-has-a-driver-bound´
+    #[test]
+    fn workspace_adapter_acknowledgement_has_a_driver_bound() {
+        let fixture = crate::workspace_node::tests::Fixture::new();
+        let frame = fixture.call(Execution::Argv {
+            words: vec![b"/bin/true".to_vec()],
+        });
+        let digest = canonical_digest(&frame).unwrap();
+        let call = WorkspaceCall {
+            frame,
+            handle: digest[..16].to_owned(),
+        };
+        let (door_input, _node_input) = UnixStream::pair().unwrap();
+        let (node_output, mut door_output) = UnixStream::pair().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let worker = thread::spawn(move || {
+            let result = run_stream(
+                &call,
+                door_input,
+                &mut door_output,
+                &mut Collected::default(),
+                WorkspaceStop {
+                    flag: &AtomicBool::new(false),
+                    cause: "fixture-stop",
+                },
+                DriverBounds {
+                    lifetime: Instant::now() + Duration::from_secs(60),
+                    acknowledgement: Duration::from_millis(100),
+                    heartbeat_interval: Duration::from_secs(30),
+                    output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
+                },
+                &mut false,
+            );
+            sender.send(result.err().map(|error| error.kind)).unwrap();
+        });
+        let completed = receiver.recv_timeout(Duration::from_secs(5));
+        if completed.is_err() {
+            node_output.shutdown(std::net::Shutdown::Both).unwrap();
+        }
+        worker.join().unwrap();
+        assert_eq!(
+            completed.expect("driver bound ended stalled route"),
+            Some("door-workspace-protocol-refusal")
+        );
+    }
+
     /// ´test:unit:workspace-adapter-stalled-route-cannot-outlive-its-call´
     #[test]
     fn workspace_adapter_stalled_route_cannot_outlive_its_call() {
@@ -1377,7 +1640,11 @@ mod tests {
         };
         for (reason, incomplete, ending) in [
             ("node-deadline", false, Ending::NodeDeadline),
-            ("node-deadline", true, Ending::NodeDeadline),
+            (
+                "node-input-closed",
+                true,
+                Ending::Interrupted("input-closed"),
+            ),
             ("node-stopped", true, Ending::Interrupted("stop")),
             ("node-output-limit", false, Ending::OutputLimit),
             ("node-output-incomplete", true, Ending::OutputIncomplete),
