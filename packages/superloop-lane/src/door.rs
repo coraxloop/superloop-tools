@@ -3281,8 +3281,12 @@ fn serve_request_with_agent_at_context(
             let store = fixture_store.or(opened.as_ref()).ok_or_else(|| {
                 LaneError::input("door-workspace-unregistered", "request store is absent")
             })?;
+            let store = store
+                .for_request(admission_deadline)?
+                .with_wait_credit(std::sync::Arc::clone(&wait));
+            let store = &store;
+            let setting = store.ensure_first_mode("compute")?;
             let (learned, _fault) = WorkspaceAllowance::from_store_lookup(store, &request)?;
-            let setting = store.effective_mode("compute")?;
             let mode = execute_command::policy::DoorMode::from_record(setting["mode"].as_str())
                 .map_err(|error| LaneError::input(error.0, "workspace mode differs"))?;
             let disposition = request.disposition(mode, &classification, learned.as_ref())?;
@@ -6781,13 +6785,15 @@ mod tests {
         use execute_command::workspace::{Blacklist, QuickPolicy, canonical_digest};
         use std::fmt::Write as _;
 
-        for (mode, agent_enabled, stop_after_claim, retake_blocked, slot_after_claim) in [
-            (Mode::Allow, true, false, false, false),
-            (Mode::Enforce, true, false, false, false),
-            (Mode::Enforce, false, false, false, false),
-            (Mode::Enforce, true, true, false, false),
-            (Mode::Enforce, true, false, true, false),
-            (Mode::Enforce, true, false, false, true),
+        for (mode, agent_enabled, stop_after_claim, retake_blocked, slot_after_claim, settings) in [
+            (Mode::Allow, true, false, false, false, 1),
+            (Mode::Allow, true, false, false, false, 0),
+            (Mode::Allow, true, false, false, false, 2),
+            (Mode::Enforce, true, false, false, false, 2),
+            (Mode::Enforce, false, false, false, false, 2),
+            (Mode::Enforce, true, true, false, false, 2),
+            (Mode::Enforce, true, false, true, false, 2),
+            (Mode::Enforce, true, false, false, true, 2),
         ] {
             struct Allows {
                 release: Mutex<std::sync::mpsc::Receiver<()>>,
@@ -6903,7 +6909,10 @@ mod tests {
             for target in [
                 crate::requests::modes::ModeTarget::Loop,
                 crate::requests::modes::ModeTarget::class("compute").expect("class"),
-            ] {
+            ]
+            .into_iter()
+            .take(usize::try_from(settings).expect("setting count"))
+            {
                 store
                     .set_mode(&target, mode, "fixture owner", "fixture mode", "1", &[])
                     .expect("allow compute mode");
