@@ -2727,6 +2727,14 @@ struct WorkspaceWorkerSink<'a> {
     stderr: usize,
 }
 
+struct WorkspaceWatcherDone(Arc<AtomicBool>);
+
+impl Drop for WorkspaceWatcherDone {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
 impl workspace_adapter::WorkspaceOutputSink for WorkspaceWorkerSink<'_> {
     fn forward(
         &mut self,
@@ -2827,6 +2835,7 @@ fn run_claimed_workspace(
     }
     let stop_flag = Arc::new(AtomicBool::new(false));
     let done = Arc::new(AtomicBool::new(false));
+    let _done_on_unwind = WorkspaceWatcherDone(Arc::clone(&done));
     let watched_wait = Arc::clone(wait);
     let watched_flag = Arc::clone(&stop_flag);
     let watched_done = Arc::clone(&done);
