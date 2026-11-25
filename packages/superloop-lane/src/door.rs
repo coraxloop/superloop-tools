@@ -153,6 +153,9 @@ static REQUEST_SEQUENCE: AtomicU64 = AtomicU64::new(0);
 // extra window per request. The shared writer keeps progress frames whole even
 // when an allow-mode agent publishes beside effect output.
 #[cfg(test)]
+type WaitingClaimHook = Box<dyn FnOnce(&Arc<RequestWait>)>;
+
+#[cfg(test)]
 thread_local! {
     static WAIT_CREDIT_OBSERVED: std::cell::RefCell<Option<std::sync::mpsc::Sender<()>>> = const { std::cell::RefCell::new(None) };
     static BEFORE_TERMINAL_WRITE: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
@@ -775,6 +778,7 @@ thread_local! {
     static ADMISSION_LAST_POLL: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static FIXTURE_ADMISSION_CLOCK: std::cell::RefCell<Option<Arc<FixtureAdmissionClock>>> = const { std::cell::RefCell::new(None) };
+    static AFTER_WAITING_CLAIM: std::cell::RefCell<Option<WaitingClaimHook>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -3246,12 +3250,17 @@ fn serve_request_with_agent_at_context(
                             "two workspace requests of this box are already waiting; nothing was run",
                         )
                     })?;
+                let waiting_reason = if agent.is_some() {
+                    "workspace miss awaits judgement"
+                } else {
+                    "door-agent-unconfigured"
+                };
                 let record = workspace_record(
                     registration,
                     &setting,
                     &request,
                     disposition,
-                    &json!({"decision":"undecided","reason":"workspace miss awaits judgement"}),
+                    &json!({"decision":"undecided","reason":waiting_reason}),
                     Value::Null,
                 )
                 .map_err(|error| {
@@ -3503,6 +3512,17 @@ fn serve_request_with_agent_at_context(
                         return Ok(String::new());
                     }
                 };
+                #[cfg(test)]
+                AFTER_WAITING_CLAIM.with(|slot| {
+                    if let Some(hook) = slot.borrow_mut().take() {
+                        hook(&wait);
+                    }
+                });
+                let mut run_effect = claimed.value()["effect"].clone();
+                run_effect["state"] = json!("refused");
+                run_effect["reason"] = json!("door-workspace-protocol-refusal");
+                run_effect["ref_check"] = json!("not-applicable");
+                run_effect["ending"] = ending.clone();
                 completed_reply = Some(run_claimed_workspace(
                     stream,
                     registration,
@@ -3513,7 +3533,7 @@ fn serve_request_with_agent_at_context(
                     store,
                     &wait,
                     &id,
-                    claimed.value()["effect"].clone(),
+                    run_effect,
                     ending,
                     started,
                     admission_deadline,
@@ -6554,7 +6574,7 @@ mod tests {
         assert_eq!(referred.value()["would_do_source"], "superloop");
         assert_eq!(
             referred.value()["would_do"]["reason"],
-            "workspace miss awaits judgement"
+            "door-agent-unconfigured"
         );
         assert!(referred.value()["workspace_agent_input"].is_null());
         assert_eq!(referred.value()["effect"]["state"], "refused");
@@ -6621,10 +6641,11 @@ mod tests {
         use execute_command::workspace::{Blacklist, QuickPolicy, canonical_digest};
         use std::fmt::Write as _;
 
-        for (mode, agent_enabled) in [
-            (Mode::Allow, true),
-            (Mode::Enforce, true),
-            (Mode::Enforce, false),
+        for (mode, agent_enabled, stop_after_claim) in [
+            (Mode::Allow, true, false),
+            (Mode::Enforce, true, false),
+            (Mode::Enforce, false, false),
+            (Mode::Enforce, true, true),
         ] {
             struct Allows {
                 release: Mutex<std::sync::mpsc::Receiver<()>>,
@@ -6808,6 +6829,13 @@ mod tests {
                     registration: registration.clone(),
                     wire: (mode == Mode::Enforce).then(|| wire.clone()),
                 };
+                if stop_after_claim {
+                    super::AFTER_WAITING_CLAIM.with(|slot| {
+                        *slot.borrow_mut() = Some(Box::new(|wait| {
+                            wait.cause.select(super::lifetime::Cause::Deadline);
+                        }));
+                    });
+                }
                 let started = Instant::now();
                 super::serve_request_with_agent_at_context(
                     &mut peer,
@@ -6861,7 +6889,9 @@ mod tests {
             assert_eq!(server.join().expect("service thread"), reply);
             assert_eq!(
                 reply["reason"],
-                if agent_enabled {
+                if stop_after_claim {
+                    "door-request-deadline"
+                } else if agent_enabled {
                     "door-complete"
                 } else {
                     "door-workspace-referred"
@@ -6870,7 +6900,7 @@ mod tests {
             );
             assert_eq!(
                 stdout,
-                if agent_enabled {
+                if agent_enabled && !stop_after_claim {
                     b"other".as_slice()
                 } else {
                     b"".as_slice()
@@ -6890,20 +6920,24 @@ mod tests {
                 .expect("workspace record");
             assert_eq!(
                 workspace.value()["effect"]["state"],
-                if agent_enabled {
+                if agent_enabled && !stop_after_claim {
                     "completed"
                 } else {
                     "refused"
                 }
             );
-            assert_eq!(
-                workspace.value()["state"],
-                if mode == Mode::Allow || !agent_enabled {
-                    "waiting"
-                } else {
-                    "observed"
-                }
-            );
+            if stop_after_claim {
+                assert!(workspace.value()["state"].is_null());
+            } else {
+                assert_eq!(
+                    workspace.value()["state"],
+                    if mode == Mode::Allow || !agent_enabled {
+                        "waiting"
+                    } else {
+                        "observed"
+                    }
+                );
+            }
             assert_eq!(
                 workspace.value()["would_do_source"],
                 if agent_enabled { "agent" } else { "superloop" }
@@ -6912,7 +6946,18 @@ mod tests {
                 assert_eq!(workspace.value()["agent_verdict"], "allow");
             } else {
                 assert_eq!(workspace.value()["would_do"]["decision"], "undecided");
+                assert_eq!(
+                    workspace.value()["would_do"]["reason"],
+                    "door-agent-unconfigured"
+                );
                 assert!(workspace.value()["workspace_agent_input"].is_null());
+            }
+            if stop_after_claim {
+                assert_eq!(
+                    workspace.value()["effect"]["reason"],
+                    "door-request-deadline"
+                );
+                assert_eq!(workspace.value()["effect"]["ending"]["cause"], "deadline");
             }
         }
     }
