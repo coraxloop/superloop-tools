@@ -240,7 +240,11 @@ fn request_owner_input_cap_has_one_source() {
     let packages = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .expect("workspace packages");
-    assert_eq!(request_core::OWNER_INPUT_CAP, 67_108_864);
+    assert_eq!(request_core::COLLECTION_STORAGE_CAP, 67_108_864);
+    assert_eq!(
+        request_core::OWNER_INPUT_CAP,
+        2 * request_core::COLLECTION_STORAGE_CAP + request_core::OWNER_INPUT_ENVELOPE_ALLOWANCE
+    );
     for path in [
         "permission-triage/src/bin/requests-helper.rs",
         "lane-gateway/src/channel.rs",

@@ -100,7 +100,10 @@ impl RequestChannel {
             .map_err(|error| failure(error.to_string()))?
             .unwrap_or_default();
         if bytes.len() as u64 > CAP {
-            return Err(failure("owner input exceeds cap"));
+            return Err(failure(format!(
+                "owner input bytes={} exceeds cap={CAP}",
+                bytes.len()
+            )));
         }
         let mut child = command
             .spawn()

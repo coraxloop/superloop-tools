@@ -54,12 +54,10 @@ fn judgement_response(store: &Store, row: &super::RequestRecord) -> Value {
     let (calls, source) = value["agent_observations"]["agent_calls"]
         .as_u64()
         .map_or_else(
-            || {
-                if value["would_do_source"] == "fast-lane" {
-                    (json!(0), "fast-lane-provenance")
-                } else {
-                    (Value::Null, "unmeasured")
-                }
+            || match value["would_do_source"].as_str() {
+                Some("fast-lane") => (json!(0), "fast-lane-provenance"),
+                Some("quick-rule") => (json!(0), "quick-rule-provenance"),
+                _ => (Value::Null, "unmeasured"),
             },
             |calls| (json!(calls), "runner-observation"),
         );

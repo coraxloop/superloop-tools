@@ -65,6 +65,19 @@ impl QuickAllowance {
     pub fn evidence(&self) -> Value {
         json!({"rule":self.rule,"revision":self.revision,"bindings":self.bindings})
     }
+
+    /// Recheck the exact request context before an executor uses this table answer.
+    /// # Errors
+    /// Refuses an allowance carried to another envelope or protected grant.
+    pub fn check_context(&self, envelope: &Envelope, grant: &Grant) -> Result<(), Refusal> {
+        if self.context_key != learned_key("compute", envelope, grant, &grant.quick_policy_digest)?
+        {
+            return Err(context(
+                "quick allowance belongs to another workspace request",
+            ));
+        }
+        Ok(())
+    }
 }
 /// Neither caller nor quick table can manufacture the other's policy evidence.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -132,6 +145,22 @@ fn validate_tables(
     policy: &QuickPolicy,
     blacklist: &Blacklist,
 ) -> Result<(), Refusal> {
+    for rule in &policy.rules {
+        if rule.id.len() > 160 {
+            return Err(protocol(format!(
+                "quick rule {} exceeds the 160-byte identifier bound",
+                rule.id
+            )));
+        }
+    }
+    for entry in &blacklist.entries {
+        if entry.id.len() > 160 {
+            return Err(protocol(format!(
+                "blacklist entry {} exceeds the 160-byte identifier bound",
+                entry.id
+            )));
+        }
+    }
     if canonical_digest(policy)? != grant.quick_policy_digest
         || canonical_digest(blacklist)? != grant.blacklist_digest
     {
@@ -250,7 +279,7 @@ pub fn classify(
             ));
         }
         return Ok(Classification::QuickAllow(QuickAllowance {
-            context_key: learned_key("compute", envelope, grant, &policy.revision)?,
+            context_key: learned_key("compute", envelope, grant, &grant.quick_policy_digest)?,
             rule: rule.id.clone(),
             revision: policy.revision.clone(),
             bindings: json!({"workspace":grant.workspace,"cwd":envelope.cwd,"PATH":rule.path,"programs":rule.programs,"env_additions":envelope.env_additions,"workspace_operands":rule.workspace_operands}),

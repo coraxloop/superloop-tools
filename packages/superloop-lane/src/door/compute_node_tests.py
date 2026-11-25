@@ -419,12 +419,17 @@ route_mirror = route_root / "mirrors" / "R.git"
 route_mirror.parent.mkdir()
 git("clone", "--bare", str(mirror), str(route_mirror))
 wrapper = route_root / "wrapper"
-wrapper.write_text("#!/bin/sh\nprintf '%s\\n' \"$$\" > \"$1\"\nshift\nexec \"$@\"\n")
+wrapper.write_text("#!/bin/sh\nmarker=$1\nprintf '%s\\n' \"$$\" > \"$marker\"\n"
+                   "if [ -e \"${marker}.pause\" ]; then\n"
+                   "  until [ -e \"${marker}.held\" ]; do sleep 0.01; done\nfi\n"
+                   "shift\nexec \"$@\"\n")
 wrapper.chmod(0o700)
 lock_path = route_root / "lanes/R.lock"
 
 
-def route_call(marker, seconds, command, payload=source, outer=False):
+def route_call(marker, seconds, command, payload=source, outer=False, hold_marker=False):
+    if hold_marker:
+        marker.with_name(marker.name + ".pause").touch()
     route = [sys.executable, "-c", payload, str(route_mirror), "R", str(route_root),
              str(seconds), json.dumps([str(wrapper), str(marker), *command]),
              "/usr/bin/env", json.dumps(compute_environment)]
@@ -438,22 +443,25 @@ def route_call(marker, seconds, command, payload=source, outer=False):
         start_new_session=True)
 
 
-def wait_for(observation):
-    until = time.monotonic() + 20
+def wait_for(observation, producer=None):
+    # A busy node can delay preparation well past twenty seconds. The route's
+    # exit, rather than that short wall, proves its readiness event is lost.
+    until = time.monotonic() + 120
     while not observation():
+        if producer is not None and producer.poll() is not None:
+            raise AssertionError(f"fixture producer exited {producer.returncode} before its event")
         if time.monotonic() >= until:
-            raise AssertionError("fixture event was not reached")
+            raise AssertionError("fixture event was not reached before the hang bound")
         time.sleep(0.02)
 
 
-def hold_process(marker):
-    # Hold a kernel process identity before the fixture can reap its parent.
-    # Cleanup sends through this descriptor, never through the marker's PID.
-    wait_for(marker.exists)
-    try:
-        return os.pidfd_open(int(marker.read_text()))
-    except ProcessLookupError:
-        return None
+def hold_process(marker, producer):
+    # The child waits for this acknowledgement after writing its PID, so it
+    # cannot exit and let the number be reused before pidfd_open succeeds.
+    wait_for(marker.exists, producer)
+    descriptor = os.pidfd_open(int(marker.read_text()))
+    marker.with_name(marker.name + ".held").touch()
+    return descriptor
 
 
 def stop_held(descriptor):
@@ -491,10 +499,10 @@ def has_lock_open(child):
 # The wrapper is silent after announcing readiness. Route EOF kills its group
 # and frees the run lock, even though no child output can reveal the close.
 marker = route_root / "silent.pid"
-child = route_call(marker, 40, ["/usr/bin/sleep", "30"])
+child = route_call(marker, 40, ["/usr/bin/sleep", "30"], hold_marker=True)
 wrapper_handle = None
 try:
-    wrapper_handle = hold_process(marker)
+    wrapper_handle = hold_process(marker, child)
     wrapper_pid = int(marker.read_text())
     child.stdin.close()
     code, errors = finish_route(child)
@@ -519,7 +527,7 @@ with lock_path.open("a") as held:
         marker = route_root / (ending + ".pid")
         child = route_call(marker, seconds, ["/usr/bin/true"])
         try:
-            wait_for(lambda: has_lock_open(child))
+            wait_for(lambda: has_lock_open(child), child)
             if ending == "door-disconnect-refusal":
                 child.stdin.close()
             code, errors = finish_route(child)
@@ -547,10 +555,10 @@ print("node route cases=4: silent disconnect, queued disconnect, queued deadline
 # A worker killed by a signal is reported as the command's completion. GNU
 # timeout propagates the signal to itself, so the node observes its signal.
 marker = route_root / "signal-worker.pid"
-child = route_call(marker, 40, ["/usr/bin/sleep", "30"])
+child = route_call(marker, 40, ["/usr/bin/sleep", "30"], hold_marker=True)
 worker_handle = None
 try:
-    worker_handle = hold_process(marker)
+    worker_handle = hold_process(marker, child)
     signal.pidfd_send_signal(worker_handle, signal.SIGKILL)
     code, errors = finish_route(child)
     result = json.loads(errors.decode().split("DOOR-COMPUTE ")[-1])
@@ -585,6 +593,7 @@ stall = route_root / "git-stall"
 fetch_pid = route_root / "fetch.pid"
 stall.write_text("#!/bin/sh\nif [ \"$1\" = fetch ]; then\n"
                  + f"printf '%s\\n' \"$$\" > '{fetch_pid}'\n"
+                 + f"until [ -e '{fetch_pid}.held' ]; do sleep 0.01; done\n"
                  + "exec /usr/bin/sleep 30\nfi\nexec /usr/bin/git \"$@\"\n")
 stall.chmod(0o700)
 stall_payload = source.replace('["/usr/bin/git", *args]', '["' + str(stall) + '", *args]')
@@ -592,7 +601,7 @@ marker = route_root / "stalled.pid"
 child = route_call(marker, 40, ["/usr/bin/true"], stall_payload)
 fetch_handle = None
 try:
-    fetch_handle = hold_process(fetch_pid)
+    fetch_handle = hold_process(fetch_pid, child)
     child.stdin.close()
     code, errors = finish_route(child)
     assert code == 125, errors
@@ -614,8 +623,10 @@ print("node route repair cases=2: command input EOF, interrupted fetch")
 ignore = route_root / "git-ignore-term"
 ignored_pid = route_root / "ignored-fetch.pid"
 ignore.write_text("#!/bin/sh\nif [ \"$1\" = fetch ]; then\n"
+                  + "trap '' TERM\n"
                   + f"printf '%s\\n' \"$$\" > '{ignored_pid}'\n"
-                  + "trap '' TERM\nexec /usr/bin/sleep 30\nfi\n"
+                  + f"until [ -e '{ignored_pid}.held' ]; do sleep 0.01; done\n"
+                  + "exec /usr/bin/sleep 30\nfi\n"
                   + "exec /usr/bin/git \"$@\"\n")
 ignore.chmod(0o700)
 ignore_payload = source.replace('["/usr/bin/git", *args]',
@@ -624,7 +635,7 @@ child = route_call(route_root / "never-wrapper.pid", 40, ["/usr/bin/true"],
                    ignore_payload)
 ignored_handle = None
 try:
-    ignored_handle = hold_process(ignored_pid)
+    ignored_handle = hold_process(ignored_pid, child)
     os.kill(child.pid, signal.SIGKILL)
     child.wait(timeout=5)
     process = Path(f"/proc/{int(ignored_pid.read_text())}/stat")
@@ -672,9 +683,11 @@ survivor = route_root / "git-survivor"
 survivor_pid = route_root / "survivor.pid"
 supervisor_pid = route_root / "supervisor.pid"
 survivor.write_text("#!/bin/sh\nif [ \"$1\" = fetch ]; then\n"
+                    + "trap '' TERM\n"
                     + f"printf '%s\\n' \"$$\" > '{survivor_pid}'\n"
                     + f"printf '%s\\n' \"$PPID\" > '{supervisor_pid}'\n"
-                    + "trap '' TERM\nexec /usr/bin/sleep 30\nfi\n"
+                    + f"until [ -e '{survivor_pid}.held' ] && [ -e '{supervisor_pid}.held' ]; do sleep 0.01; done\n"
+                    + "exec /usr/bin/sleep 30\nfi\n"
                     + "exec /usr/bin/git \"$@\"\n")
 survivor.chmod(0o700)
 survivor_payload = source.replace('["/usr/bin/git", *args]',
@@ -684,8 +697,8 @@ child = route_call(route_root / "survivor-wrapper.pid", 40,
 writer_handle = None
 supervisor_handle = None
 try:
-    writer_handle = hold_process(survivor_pid)
-    supervisor_handle = hold_process(supervisor_pid)
+    writer_handle = hold_process(survivor_pid, child)
+    supervisor_handle = hold_process(supervisor_pid, child)
     stop_held(supervisor_handle)
     supervisor_handle = None
     code, errors = finish_route(child)
@@ -723,17 +736,20 @@ removal_ready = route_root / "removal.ready"
 remover_code = ("import os,pathlib,sys,time; p=pathlib.Path(sys.argv[1]); "
                 "(p/'.git/HEAD').unlink(missing_ok=True); "
                 + f"pathlib.Path({str(removal_ready)!r}).write_text(str(os.getpid())); "
+                + f"ack=pathlib.Path({str(removal_ready) + '.held'!r}); "
+                + "\nwhile not ack.exists(): time.sleep(0.01)\n"
                 + "time.sleep(30)")
 remove_payload = source.replace(
     'remover = "import shutil,sys; shutil.rmtree(sys.argv[1])"',
     'remover = ' + repr(remover_code))
 for attempt in range(2):
     removal_ready.unlink(missing_ok=True)
+    removal_ready.with_name(removal_ready.name + ".held").unlink(missing_ok=True)
     child = route_call(route_root / f"removal-{attempt}.pid", 40,
                        ["/usr/bin/true"], remove_payload)
     remover_handle = None
     try:
-        remover_handle = hold_process(removal_ready)
+        remover_handle = hold_process(removal_ready, child)
         os.kill(child.pid, signal.SIGKILL)
         child.wait(timeout=5)
         wait_for(stopped_and_unlocked)

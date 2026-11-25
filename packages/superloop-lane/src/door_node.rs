@@ -305,6 +305,29 @@ fn registration(bytes: &[u8], loop_name: &str) -> Result<Value, LaneError> {
     Ok(value)
 }
 
+/// Read the loop's registered route for a launch context, without treating a
+/// workspace declaration's node name as authentication of the route.
+pub(crate) fn workspace_alias(
+    owner_home: &Path,
+    loop_name: &str,
+    node: &str,
+    owner: u32,
+) -> Result<String, LaneError> {
+    let config = owner_home.join(".config/loops").join(loop_name);
+    let directory = crate::pinned::open_protected(owner_home, &config, owner)?;
+    let bytes = crate::door::read_owner_leaf_optional(&directory, RECORD, owner)?
+        .ok_or_else(|| invalid(format!("{RECORD}: re-register the door node")))?;
+    let value = registration(&bytes, loop_name)?;
+    check_alias_bytes(
+        crate::door::read_owner_leaf_optional(&directory, "door-compute-registration.json", owner)?,
+        &value,
+    )?;
+    if value["node"] != node {
+        return Err(invalid("registered node differs from workspace grant"));
+    }
+    Ok(word(&value, "alias")?.to_owned())
+}
+
 /// Measure the registration and derivatives beneath the installer's held directory.
 pub(crate) fn plan(
     directory: &impl AsFd,

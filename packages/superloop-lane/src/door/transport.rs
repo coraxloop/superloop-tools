@@ -18,6 +18,7 @@ use std::time::{Duration, Instant};
 
 use nix::fcntl::{OFlag, OpenHow, ResolveFlag, openat2};
 use nix::sys::stat::{SFlag, fstat};
+use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::{Registration, Scope, frame_read_until, frame_write_until};
@@ -25,6 +26,11 @@ use crate::error::LaneError;
 
 #[cfg(test)]
 thread_local! { pub(super) static STUB_TEST_BUDGET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static WORKSPACE_FIXTURE_IDENTITY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
 
 const CHUNK: usize = 8192;
 #[cfg(test)]
@@ -36,8 +42,776 @@ thread_local! {
     pub(super) static CHECK_DEADLINE: std::cell::RefCell<Option<FixtureDeadline>> = const { std::cell::RefCell::new(None) };
 }
 
+#[cfg(test)]
+mod workspace_stub_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::os::unix::net::UnixListener;
+
+    fn context_with_shell(path: &Path, shell: &str) {
+        let value = json!({"schema":1,"run":"fixture","worker_uid":nix::unistd::Uid::effective().as_raw(),
+            "node_alias":"fixture-node","grant_digest":"a".repeat(64),"checkout":"/tmp/checkout","cwd":[],"shell":shell});
+        std::fs::write(path, serde_json::to_vec(&value).expect("context encoding"))
+            .expect("context fixture");
+        STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(path.to_path_buf()));
+    }
+
+    fn context(path: &Path) {
+        context_with_shell(path, "/bin/sh");
+    }
+
+    fn clear_context() {
+        STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    fn socket(temp: &tempfile::TempDir) -> (PathBuf, UnixListener) {
+        let path = crate::fixture_exec::fixture_socket_path(temp.path().join("door.sock"));
+        let listener = UnixListener::bind(&path).expect("socket fixture");
+        (path, listener)
+    }
+
+    fn capture_workspace_text(command: &str, shell: &str) -> Value {
+        let temp = tempfile::tempdir().expect("fixture");
+        context_with_shell(&temp.path().join("context.json"), shell);
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub connect");
+            let request =
+                super::super::frame_read_until(&mut peer, Instant::now() + Duration::from_secs(5))
+                    .expect("request");
+            super::super::frame_write_until(&mut peer,
+                &json!({"schema":3,"type":"final","status":125,"reason":"door-request-refusal",
+                    "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue","queue_wall_seconds":null,
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
+                Instant::now() + Duration::from_secs(5)).expect("reply");
+            request
+        });
+        let args = [OsString::from("fixture-node"), OsString::from(command)];
+        stub_call(&path, &args, &[]).expect("schema-three request");
+        let request = server.join().expect("fixture server");
+        clear_context();
+        request
+    }
+
+    /// # Panics
+    /// Panics only if the fictional socket fixture fails.
+    /// ´test:unit:undeclared-stub-keeps-schema-two-bytes´
+    #[test]
+    fn undeclared_stub_keeps_schema_two_bytes() {
+        let temp = tempfile::tempdir().expect("fixture");
+        STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(temp.path().join("absent.json")));
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub connect");
+            let request =
+                super::super::frame_read_until(&mut peer, Instant::now() + Duration::from_secs(5))
+                    .expect("request");
+            super::super::frame_write_until(&mut peer,
+                &json!({"schema":2,"type":"final","status":125,"reason":"door-compute-words-refusal",
+                    "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue","queue_wall_seconds":null,
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
+                Instant::now() + Duration::from_secs(5)).expect("reply");
+            request
+        });
+        let args = [OsString::from("fixture-node"), OsString::from("cargo test")];
+        stub_call(&path, &args, &[]).expect("legacy reply");
+        let request = server.join().expect("fixture server");
+        assert_eq!(
+            request,
+            json!({"schema":2,"argv":[[102,105,120,116,117,114,101,45,110,111,100,101],
+            [99,97,114,103,111,32,116,101,115,116]],"deadline_ms":super::super::compute::MAX_DEADLINE_MS})
+        );
+        clear_context();
+    }
+
+    /// # Panics
+    /// Panics only if the fictional socket or context fixture fails.
+    /// ´test:unit:workspace-stub-maps-plain-words-into-argv´
+    #[test]
+    fn workspace_stub_maps_plain_words_into_argv() {
+        let temp = tempfile::tempdir().expect("fixture");
+        context(&temp.path().join("context.json"));
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub connect");
+            let request =
+                super::super::frame_read_until(&mut peer, Instant::now() + Duration::from_secs(5))
+                    .expect("request");
+            super::super::frame_write_until(&mut peer,
+                &json!({"schema":3,"type":"final","status":125,"reason":"door-request-refusal",
+                    "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue","queue_wall_seconds":null,
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
+                Instant::now() + Duration::from_secs(5)).expect("reply");
+            request
+        });
+        let args = [OsString::from("fixture-node"), OsString::from("cargo test")];
+        let reply = stub_call(&path, &args, &[]).expect("schema three final");
+        assert_eq!(reply["status"], 125);
+        let request = server.join().expect("fixture server");
+        assert_eq!(request["schema"], 3);
+        assert_eq!(request["execution"]["kind"], "Argv");
+        assert_eq!(
+            request["execution"]["words"],
+            json!([[99, 97, 114, 103, 111], [116, 101, 115, 116]])
+        );
+        clear_context();
+    }
+
+    /// # Panics
+    /// Panics only if the fictional socket or context fixture fails.
+    /// ´test:unit:workspace-stub-explicit-request-and-waiting-frame´
+    #[test]
+    fn workspace_stub_explicit_request_and_waiting_frame() {
+        let temp = tempfile::tempdir().expect("fixture");
+        context(&temp.path().join("context.json"));
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub connect");
+            let request =
+                super::super::frame_read_until(&mut peer, Instant::now() + Duration::from_secs(5))
+                    .expect("request");
+            let until = Instant::now() + Duration::from_secs(5);
+            super::super::frame_write_until(
+                &mut peer,
+                &json!({"schema":3,"type":"compute-deadline","registered_deadline_ms":60000,
+                    "request_deadline_ms":10000,"remaining_ms":10000,"judgement_wait_ms":5000}),
+                until,
+            )
+            .expect("deadline");
+            for _ in 0..2 {
+                super::super::frame_write_until(
+                    &mut peer,
+                    &json!({"schema":3,"type":"waiting","request_id":"req-1","reason":"judgement"}),
+                    until,
+                )
+                .expect("waiting");
+            }
+            super::super::frame_write_until(&mut peer,
+                &json!({"schema":3,"type":"final","status":0,"reason":"door-complete",
+                    "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue","queue_wall_seconds":null,
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}), until)
+                .expect("final");
+            request
+        });
+        let explicit = json!({"cwd":["subdir"],"env_additions":[["COLOR","blue"]],
+            "execution":{"kind":"Shell","shell":"/bin/sh","text":"printf hi"},"deadline_ms":10000});
+        let args = [
+            OsString::from("--workspace-json"),
+            OsString::from(explicit.to_string()),
+        ];
+        let mut errors = Vec::new();
+        let mut output = Vec::new();
+        let reply = stub_call_stream(&path, &args, io::empty(), &mut output, &mut errors)
+            .expect("workspace call");
+        assert_eq!(reply["status"], 0);
+        assert_eq!(errors, b"door-waiting request_id=req-1 reason=judgement\n");
+        let request = server.join().expect("fixture server");
+        assert_eq!(request["cwd"], json!(["subdir"]));
+        assert_eq!(request["execution"]["kind"], "Shell");
+        clear_context();
+    }
+
+    /// # Panics
+    /// Panics only if the fictional socket or context fixture fails.
+    /// ´test:unit:workspace-stub-names-an-old-door´
+    #[test]
+    fn workspace_stub_names_an_old_door() {
+        let temp = tempfile::tempdir().expect("fixture");
+        context(&temp.path().join("context.json"));
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub connect");
+            let _request =
+                super::super::frame_read_until(&mut peer, Instant::now() + Duration::from_secs(5))
+                    .expect("request");
+            super::super::frame_write_until(&mut peer,
+                &json!({"schema":2,"type":"final","status":125,"reason":"door-frame-refusal",
+                    "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue","queue_wall_seconds":null,
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
+                Instant::now() + Duration::from_secs(5)).expect("old door reply");
+        });
+        let args = [OsString::from("fixture-node"), OsString::from("cargo test")];
+        let error = stub_call(&path, &args, &[]).expect_err("old door does not read schema three");
+        assert_eq!(
+            error.to_string(),
+            "door-workspace-unavailable: installed door does not serve schema three; refresh its pinned copy"
+        );
+        server.join().expect("fixture server");
+        clear_context();
+    }
+
+    /// # Panics
+    /// Panics only if the fictional socket or context fixture fails.
+    /// ´test:unit:workspace-stub-reads-replaced-context-on-next-request´
+    #[test]
+    fn workspace_stub_reads_replaced_context_on_next_request() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let context_path = temp.path().join("context.json");
+        context(&context_path);
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let mut digests = Vec::new();
+            for _ in 0..2 {
+                let (mut peer, _) = listener.accept().expect("stub connect");
+                let request = super::super::frame_read_until(
+                    &mut peer,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .expect("request");
+                digests.push(request["grant_digest"].as_str().expect("digest").to_owned());
+                super::super::frame_write_until(&mut peer,
+                    &json!({"schema":3,"type":"final","status":125,"reason":"door-workspace-context-differs",
+                        "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue","queue_wall_seconds":null,
+                        "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
+                    Instant::now() + Duration::from_secs(5)).expect("reply");
+            }
+            digests
+        });
+        let args = [OsString::from("fixture-node"), OsString::from("cargo test")];
+        stub_call(&path, &args, &[]).expect("first reply");
+        let replacement = temp.path().join("replacement.json");
+        let value = json!({"schema":1,"run":"fixture","worker_uid":nix::unistd::Uid::effective().as_raw(),
+            "node_alias":"fixture-node","grant_digest":"b".repeat(64),"checkout":"/tmp/checkout","cwd":[],"shell":"/bin/sh"});
+        std::fs::write(&replacement, serde_json::to_vec(&value).expect("encoding"))
+            .expect("replacement");
+        std::fs::rename(&replacement, &context_path).expect("atomic publication");
+        stub_call(&path, &args, &[]).expect("second reply");
+        assert_eq!(
+            server.join().expect("fixture server"),
+            vec!["a".repeat(64), "b".repeat(64)]
+        );
+        clear_context();
+    }
+
+    /// # Panics
+    /// Panics only if the fictional socket fixture fails.
+    /// ´test:unit:git-stub-ignores-unrelated-workspace-context´
+    #[test]
+    fn git_stub_ignores_unrelated_workspace_context() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let context_path = temp.path().join("context.json");
+        std::fs::write(&context_path, b"not workspace JSON").expect("bad context fixture");
+        STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(context_path));
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub connect");
+            let request =
+                super::super::frame_read_until(&mut peer, Instant::now() + Duration::from_secs(5))
+                    .expect("request");
+            super::super::frame_write_until(&mut peer,
+                &json!({"schema":2,"type":"final","status":125,"reason":"door-request-refusal",
+                    "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue","queue_wall_seconds":null,
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
+                Instant::now() + Duration::from_secs(5)).expect("reply");
+            request
+        });
+        let args = [
+            OsString::from("fixture-node"),
+            OsString::from("git-receive-pack '/mirror'"),
+        ];
+        let reply = stub_call(&path, &args, &[]).expect("git reply ignores workspace context");
+        assert_eq!(reply["status"], 125);
+        assert_eq!(server.join().expect("fixture server")["schema"], 2);
+        clear_context();
+    }
+
+    /// # Panics
+    /// Panics only if the fictional socket fixture fails.
+    /// ´test:unit:shape-probe-keeps-schema-two-with-workspace-context´
+    #[test]
+    fn shape_probe_keeps_schema_two_with_workspace_context() {
+        let temp = tempfile::tempdir().expect("fixture");
+        let context_path = temp.path().join("context.json");
+        std::fs::write(&context_path, b"not workspace JSON").expect("bad context fixture");
+        STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(context_path));
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub connect");
+            let request =
+                super::super::frame_read_until(&mut peer, Instant::now() + Duration::from_secs(5))
+                    .expect("request");
+            super::super::frame_write_until(&mut peer,
+                &json!({"schema":2,"type":"final","status":125,"reason":"door-request-refusal",
+                    "stdout_bytes":0,"stderr_bytes":0,"queue_state":"no-queue","queue_wall_seconds":null,
+                    "mediation_wall_seconds":0.0,"compute_wall_seconds":0.0}),
+                Instant::now() + Duration::from_secs(5)).expect("reply");
+            request
+        });
+        let args = [OsString::from("door-shape-probe"), OsString::from("R_2.3")];
+        let reply = stub_call(&path, &args, &[]).expect("probe ignores workspace context");
+        assert_eq!(reply["status"], 125);
+        assert_eq!(server.join().expect("fixture server")["schema"], 2);
+        clear_context();
+        assert_eq!(
+            capture_workspace_text("door-shape-probe R_2.3", "/bin/sh")["schema"],
+            3
+        );
+    }
+
+    /// # Panics
+    /// Panics only if a fictional socket fixture fails or the emitted execution differs.
+    /// ´test:unit:workspace-stub-spelling-preserves-shell-semantics´
+    #[test]
+    fn workspace_stub_spelling_preserves_shell_semantics() {
+        for (command, kind) in [
+            ("cargo test", "Argv"),
+            ("make", "Argv"),
+            ("cargo test -- 'a b'", "Shell"),
+            ("cd sub && COLOR=blue cargo test", "Shell"),
+            ("cd sub", "Shell"),
+            ("FOO=1 cargo test", "Argv"),
+            ("cargo test && cargo fmt", "Shell"),
+            ("cargo test | cat", "Shell"),
+            ("~worker/bin/tool", "Shell"),
+            ("# comment", "Shell"),
+            ("cargo foo#bar", "Argv"),
+            ("echo hi", "Shell"),
+            ("FOO=~worker cargo test", "Shell"),
+            ("make PREFIX=~/x install", "Shell"),
+            ("make PREFIX=/tmp:~/x install", "Shell"),
+            ("FOO+=1 cargo test", "Shell"),
+            ("ulimit -a", "Shell"),
+            ("else x", "Shell"),
+            ("FOO=1", "Shell"),
+        ] {
+            let request = capture_workspace_text(command, "/bin/sh");
+            assert_eq!(request["execution"]["kind"], kind, "{command}");
+            if kind == "Shell" {
+                assert_eq!(request["execution"]["text"], command, "{command}");
+            }
+        }
+        let assignment = capture_workspace_text("FOO=1 cargo test", "/bin/sh");
+        assert_eq!(assignment["env_additions"], json!([["FOO", "1"]]));
+        assert_eq!(
+            assignment["execution"]["words"],
+            json!([[99, 97, 114, 103, 111], [116, 101, 115, 116]])
+        );
+    }
+
+    /// # Panics
+    /// Panics only if a fictional socket fixture fails or the shell choice differs.
+    /// ´test:unit:workspace-stub-uses-declared-or-marked-shell´
+    #[test]
+    fn workspace_stub_uses_declared_or_marked_shell() {
+        let command = "printf '%s' hello";
+        assert_eq!(
+            capture_workspace_text(command, "/usr/bin/bash")["execution"]["shell"],
+            "/usr/bin/bash"
+        );
+        assert_eq!(
+            capture_workspace_text(command, "")["execution"]["shell"],
+            "/bin/sh"
+        );
+    }
+
+    /// # Panics
+    /// Panics only if the fixed shell oracle and the emitted argv disagree.
+    /// ´test:unit:workspace-stub-simple-assignment-matches-shell´
+    #[test]
+    fn workspace_stub_simple_assignment_matches_shell() {
+        use std::os::unix::ffi::OsStringExt as _;
+        let temp = tempfile::tempdir().expect("oracle fixture");
+        let script = temp.path().join("show");
+        crate::fixture_exec::write_executable(
+            &script,
+            b"#!/bin/sh\nprintf '<%s>|<%s>\\n' \"$FOO\" \"$1\"\n",
+        )
+        .expect("oracle program");
+        let command = format!("FOO=1 {} alpha", script.display());
+        let request = capture_workspace_text(&command, "/bin/sh");
+        assert_eq!(request["execution"]["kind"], "Argv");
+        let words = request["execution"]["words"]
+            .as_array()
+            .expect("argv words");
+        let decoded = words
+            .iter()
+            .map(|word| {
+                OsString::from_vec(
+                    word.as_array()
+                        .expect("word bytes")
+                        .iter()
+                        .map(|byte| u8::try_from(byte.as_u64().expect("byte")).expect("byte bound"))
+                        .collect(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let direct = crate::fixture_exec::output(
+            std::process::Command::new(&decoded[0])
+                .args(&decoded[1..])
+                .env("FOO", "1"),
+        )
+        .expect("direct oracle");
+        let shell = crate::fixture_exec::output(
+            std::process::Command::new("/bin/sh").args(["-c", &command]),
+        )
+        .expect("shell oracle");
+        assert_eq!(direct.status, shell.status);
+        assert_eq!(direct.stdout, shell.stdout);
+        assert_eq!(direct.stderr, shell.stderr);
+    }
+}
+
 const POST_FINAL_STDIN_WAIT: Duration = Duration::from_millis(500);
 const OUTPUT_LIMIT: usize = 16 * 1024 * 1024;
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WorkspaceContext {
+    schema: u8,
+    run: String,
+    worker_uid: u32,
+    node_alias: String,
+    grant_digest: String,
+    checkout: String,
+    cwd: Vec<String>,
+    shell: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExplicitWorkspace {
+    cwd: Vec<String>,
+    env_additions: Vec<(String, String)>,
+    execution: execute_command::workspace::Execution,
+    deadline_ms: u64,
+}
+
+#[cfg(test)]
+thread_local! {
+    pub(super) static STUB_CONTEXT_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
+fn workspace_context_path() -> PathBuf {
+    #[cfg(test)]
+    if let Some(path) = STUB_CONTEXT_PATH.with(|slot| slot.borrow().clone()) {
+        return path;
+    }
+    PathBuf::from(format!(
+        "/home/worker/.local/door/workspace-{}.json",
+        nix::unistd::Uid::effective().as_raw()
+    ))
+}
+
+fn workspace_context() -> io::Result<Option<WorkspaceContext>> {
+    let path = workspace_context_path();
+    let file = match File::open(&path) {
+        Ok(file) => file,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let mut bytes = Vec::new();
+    file.take(4097).read_to_end(&mut bytes)?;
+    if bytes.len() > 4096 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door-workspace-context: context exceeds 4096 bytes; ask the loop to republish it",
+        ));
+    }
+    let context: WorkspaceContext = serde_json::from_slice(&bytes).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door-workspace-context: context differs; ask the loop to republish it",
+        )
+    })?;
+    if context.schema != 1
+        || context.worker_uid != nix::unistd::Uid::effective().as_raw()
+        || !crate::valid_run_name(&context.run)
+        || context.node_alias.is_empty()
+        || context.node_alias.len() > 80
+        || !context
+            .node_alias
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        || context.grant_digest.len() != 64
+        || !context
+            .grant_digest
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        || !Path::new(&context.checkout).is_absolute()
+        || !context.cwd.is_empty()
+        || !(context.shell.is_empty()
+            || Path::new(&context.shell).is_absolute() && !context.shell.contains('\0'))
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door-workspace-context: context binding differs; ask the loop to republish it",
+        ));
+    }
+    Ok(Some(context))
+}
+
+#[cfg(test)]
+pub fn fixture_workspace_context_run(path: &Path) -> io::Result<Option<String>> {
+    STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(path.to_path_buf()));
+    let result = workspace_context().map(|context| context.map(|context| context.run));
+    STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
+    result
+}
+
+fn workspace_envelope(
+    args: &[OsString],
+    context: &WorkspaceContext,
+) -> io::Result<execute_command::workspace::Envelope> {
+    use execute_command::workspace::Envelope;
+    let explicit = args.first().is_some_and(|word| word == "--workspace-json");
+    let (cwd, env_additions, execution, deadline_ms) = if explicit {
+        if args.len() != 2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "door-workspace-explicit: use --workspace-json with one JSON object",
+            ));
+        }
+        let request: ExplicitWorkspace = serde_json::from_slice(args[1].as_bytes())
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidInput, "door-workspace-explicit: expected cwd, env_additions, execution and deadline_ms JSON"))?;
+        (
+            request.cwd,
+            request.env_additions,
+            request.execution,
+            request.deadline_ms,
+        )
+    } else {
+        if args.len() != 2 || args[0].as_bytes() != context.node_alias.as_bytes() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "door-workspace-alias: command must name this run's registered node alias",
+            ));
+        }
+        let command = std::str::from_utf8(args[1].as_bytes()).map_err(|_| {
+            io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "door-workspace-text: command text must be UTF-8",
+            )
+        })?;
+        let (env_additions, execution) = workspace_execution(command, &context.shell);
+        (
+            context.cwd.clone(),
+            env_additions,
+            execution,
+            super::compute::MAX_DEADLINE_MS,
+        )
+    };
+    Envelope::decode(json!({"schema":3,"grant_digest":context.grant_digest,
+        "cwd":cwd,"execution":execution,"env_additions":env_additions,"deadline_ms":deadline_ms}))
+    .map_err(|error| {
+        io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("door-workspace-envelope: {error}; correct the request"),
+        )
+    })
+}
+
+fn simple_assignment(word: &str) -> Result<Option<(String, String)>, ()> {
+    let Some((name, value)) = word.split_once('=') else {
+        return Ok(None);
+    };
+    if name.strip_suffix('+').is_some_and(valid_assignment_name) {
+        return Err(());
+    }
+    if !valid_assignment_name(name) {
+        return Ok(None);
+    }
+    if value.contains('~') {
+        return Err(());
+    }
+    Ok(Some((name.to_owned(), value.to_owned())))
+}
+
+fn valid_assignment_name(name: &str) -> bool {
+    let mut letters = name.bytes();
+    letters
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphabetic() || byte == b'_')
+        && letters.all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+}
+
+fn shell_builtin_or_keyword(word: &str) -> bool {
+    matches!(
+        word,
+        "." | ":"
+            | "alias"
+            | "break"
+            | "bg"
+            | "builtin"
+            | "case"
+            | "cd"
+            | "command"
+            | "continue"
+            | "coproc"
+            | "declare"
+            | "do"
+            | "done"
+            | "echo"
+            | "elif"
+            | "else"
+            | "esac"
+            | "eval"
+            | "exec"
+            | "exit"
+            | "export"
+            | "false"
+            | "fi"
+            | "for"
+            | "fg"
+            | "function"
+            | "getopts"
+            | "hash"
+            | "if"
+            | "in"
+            | "local"
+            | "jobs"
+            | "kill"
+            | "let"
+            | "printf"
+            | "pwd"
+            | "read"
+            | "readonly"
+            | "return"
+            | "select"
+            | "set"
+            | "shift"
+            | "shopt"
+            | "source"
+            | "test"
+            | "then"
+            | "time"
+            | "times"
+            | "trap"
+            | "true"
+            | "type"
+            | "typeset"
+            | "ulimit"
+            | "umask"
+            | "unalias"
+            | "unset"
+            | "until"
+            | "wait"
+            | "while"
+    )
+}
+
+fn workspace_execution(
+    command: &str,
+    declared_shell: &str,
+) -> (Vec<(String, String)>, execute_command::workspace::Execution) {
+    use execute_command::workspace::Execution;
+    let words = command.split(' ').collect::<Vec<_>>();
+    let simple = !command.is_empty()
+        && words.len() <= 65
+        && words.iter().all(|word| {
+            !word.is_empty()
+                && word.len() <= 256
+                && !word.starts_with(['~', '#'])
+                && word
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"_./:=+,-~^@%#".contains(&byte))
+        })
+        && !words.iter().any(|word| simple_assignment(word).is_err());
+    if simple {
+        let mut env_additions = Vec::new();
+        let mut command_start = 0;
+        let mut safe_assignments = true;
+        for word in &words {
+            match simple_assignment(word) {
+                Ok(Some((name, value))) => {
+                    if env_additions.iter().any(|(existing, _)| existing == &name) {
+                        safe_assignments = false;
+                        break;
+                    }
+                    env_additions.push((name, value));
+                    command_start += 1;
+                }
+                Ok(None) => break,
+                Err(()) => {
+                    safe_assignments = false;
+                    break;
+                }
+            }
+        }
+        if safe_assignments
+            && command_start < words.len()
+            && !shell_builtin_or_keyword(words[command_start])
+        {
+            return (
+                env_additions,
+                Execution::Argv {
+                    words: words[command_start..]
+                        .iter()
+                        .map(|word| word.as_bytes().to_vec())
+                        .collect(),
+                },
+            );
+        }
+    }
+    (
+        Vec::new(),
+        Execution::Shell {
+            shell: if declared_shell.is_empty() {
+                "/bin/sh"
+            } else {
+                declared_shell
+            }
+            .to_owned(),
+            text: command.to_owned(),
+        },
+    )
+}
+
+fn workspace_waiting(
+    frame: &Value,
+    stderr: &mut impl Write,
+    seen: &mut Option<String>,
+) -> io::Result<()> {
+    let id = frame["request_id"].as_str().filter(|id| {
+        !id.is_empty()
+            && id.len() <= 160
+            && id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b":-_".contains(&byte))
+    });
+    if frame.as_object().is_none_or(|row| row.len() != 4)
+        || frame["schema"] != 3
+        || frame["type"] != "waiting"
+        || frame["reason"] != "judgement"
+        || id.is_none()
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door workspace waiting frame differs",
+        ));
+    }
+    if seen.as_deref() != id {
+        writeln!(
+            stderr,
+            "door-waiting request_id={} reason=judgement",
+            id.unwrap_or_default()
+        )?;
+        stderr.flush()?;
+        *seen = id.map(str::to_owned);
+    }
+    Ok(())
+}
+
+fn workspace_client_deadline(frame: &Value) -> io::Result<Instant> {
+    let registered = frame["registered_deadline_ms"].as_u64();
+    let requested = frame["request_deadline_ms"].as_u64();
+    let remaining = frame["remaining_ms"].as_u64();
+    let judgement = frame["judgement_wait_ms"].as_u64();
+    if frame.as_object().is_none_or(|row| row.len() != 6)
+        || frame["schema"] != 3
+        || frame["type"] != "compute-deadline"
+        || !matches!((registered, requested, remaining, judgement),
+            (Some(bound), Some(request), Some(left), Some(wait))
+            if bound > 0 && request > 0 && left <= request.min(bound)
+                && wait > 0 && wait <= 86_400_000)
+    {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "door workspace deadline announcement differs",
+        ));
+    }
+    Ok(Instant::now()
+        + Duration::from_millis(remaining.unwrap_or(0) + judgement.unwrap_or(0) + 500))
+}
 pub const MAX_UPLOAD_OUTPUT_LIMIT: usize = 1024 * 1024 * 1024;
 const ROUTE_KEYS: [&str; 6] = [
     "schema",
@@ -551,6 +1325,12 @@ impl HostRunner {
             self.authenticated_node(),
             request_id,
         )?;
+        #[cfg(test)]
+        if let Some(identity) = WORKSPACE_FIXTURE_IDENTITY.with(|slot| slot.borrow().clone()) {
+            return super::workspace_adapter::tests::run_fixture_command(
+                &call, &identity, sink, stop, lifetime,
+            );
+        }
         super::workspace_adapter::run_command(&call, self.workspace_command(), sink, stop, lifetime)
     }
 
@@ -2037,22 +2817,44 @@ where
     O: Write,
     E: Write,
 {
-    if args.len() > 128 || args.iter().any(|arg| arg.as_bytes().len() > 4096) {
+    let explicit = args.first().is_some_and(|word| word == "--workspace-json");
+    let compute = args.len() == 2
+        && !args[1].as_encoded_bytes().starts_with(b"git-")
+        && args[0] != "door-shape-probe";
+    let context = if explicit || compute {
+        workspace_context()?
+    } else {
+        None
+    };
+    let explicit = context.is_some() && explicit;
+    let argument_limit = if explicit { 65_536 } else { 4096 };
+    if args.len() > 128 || args.iter().any(|arg| arg.as_bytes().len() > argument_limit) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "door arguments exceed limit",
         ));
     }
+    let workspace = context
+        .as_ref()
+        .filter(|_| explicit || compute)
+        .map(|context| workspace_envelope(args, context))
+        .transpose()?;
     let mut stream = UnixStream::connect(socket)?;
     let started = Instant::now();
-    let compute_request = args.len() == 2 && !args[1].as_encoded_bytes().starts_with(b"git-");
-    let deadline_ms = if args.len() == 1 && args[0] == "door-attribution-deadline" {
-        100
-    } else if args.len() == 2 && !args[1].as_encoded_bytes().starts_with(b"git-") {
-        super::compute::MAX_DEADLINE_MS
-    } else {
-        120_000
-    };
+    let compute_request =
+        workspace.is_some() || args.len() == 2 && !args[1].as_encoded_bytes().starts_with(b"git-");
+    let deadline_ms = workspace.as_ref().map_or_else(
+        || {
+            if args.len() == 1 && args[0] == "door-attribution-deadline" {
+                100
+            } else if args.len() == 2 && !args[1].as_encoded_bytes().starts_with(b"git-") {
+                super::compute::MAX_DEADLINE_MS
+            } else {
+                120_000
+            }
+        },
+        |envelope| envelope.deadline_ms,
+    );
     #[cfg(test)]
     let deadline_ms = STUB_TEST_BUDGET
         .with(std::cell::Cell::take)
@@ -2063,20 +2865,29 @@ where
         .iter()
         .map(|arg| arg.as_bytes().to_vec())
         .collect::<Vec<_>>();
-    frame_write_until(
-        &mut stream,
-        &json!({"schema":2,"argv":words,"deadline_ms":deadline_ms}),
-        deadline,
-    )?;
+    let request = workspace.as_ref().map_or_else(
+        || json!({"schema":2,"argv":words,"deadline_ms":deadline_ms}),
+        |envelope| json!(envelope),
+    );
+    frame_write_until(&mut stream, &request, deadline)?;
     let mut preflight_stderr = 0_usize;
     if compute_request {
         loop {
-            let frame = frame_read_until(&mut stream, started + super::PEER_DEADLINE)?;
-            if frame["schema"] == 2 && frame["type"] == "final" && frame["status"] == 125 {
+            let frame = frame_read_until(&mut stream, started + super::PEER_DEADLINE)
+                .map_err(|error| if workspace.is_some() {
+                    io::Error::new(error.kind(), "door-workspace-unavailable: installed door does not serve schema three; refresh its pinned copy")
+                } else { error })?;
+            if workspace.is_some() && frame["schema"] != 3 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "door-workspace-unavailable: installed door does not serve schema three; refresh its pinned copy",
+                ));
+            }
+            if frame["type"] == "final" && frame["status"] == 125 {
                 validate_final(&frame, 0, preflight_stderr)?;
                 return Ok(frame);
             }
-            if frame["schema"] == 2 && frame["type"] == "stderr" {
+            if frame["type"] == "stderr" {
                 let bytes = frame["bytes"]
                     .as_array()
                     .filter(|bytes| bytes.len() <= CHUNK)
@@ -2095,7 +2906,11 @@ where
                 stderr.flush()?;
                 continue;
             }
-            deadline = compute_client_deadline(&frame)?;
+            deadline = if workspace.is_some() {
+                workspace_client_deadline(&frame)?
+            } else {
+                compute_client_deadline(&frame)?
+            };
             break;
         }
     }
@@ -2174,6 +2989,7 @@ where
         .last()
         .is_some_and(|arg| arg.as_bytes().starts_with(b"git-upload-pack '"));
     let mut registered = if upload { "absent" } else { "not-applicable" };
+    let mut waiting_id = None::<String>;
     let final_reply = loop {
         let frame = frame_read_until(
             &mut stream,
@@ -2181,13 +2997,16 @@ where
                 + Duration::from_millis(wait_credit.load(Ordering::Relaxed))
                 + Duration::from_secs(2),
         )?;
-        if frame["schema"] != 2 {
+        if frame["schema"] != if workspace.is_some() { 3 } else { 2 } {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidData,
                 "door response schema differs",
             ));
         }
         match frame["type"].as_str() {
+            Some("waiting") if workspace.is_some() => {
+                workspace_waiting(&frame, &mut stderr, &mut waiting_id)?;
+            }
             Some("request-lock-wait") => {
                 update_wait_credit(&frame, &wait_credit)?;
             }

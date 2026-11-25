@@ -1826,6 +1826,9 @@ pattern = "packages/superloop-lane/src/door/transport.rs"
 pattern = "packages/superloop-lane/src/door/workspace_adapter.rs"
 
 [[include.rows]]
+pattern = "packages/superloop-lane/src/door/workspace_tables.rs"
+
+[[include.rows]]
 pattern = "packages/superloop-lane/src/door_node.rs"
 
 [[include.rows]]

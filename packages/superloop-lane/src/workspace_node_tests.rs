@@ -6,6 +6,7 @@ use std::os::fd::FromRawFd as _;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::process::{Child, Command, Stdio};
 
 pub struct Fixture {
     pub(crate) root: tempfile::TempDir,
@@ -309,8 +310,14 @@ fn workspace_node_entry_names_failed_start_and_prior_step() {
         ),
     ] {
         let call = fixture.call(execution);
-        let (mut input, mut output, thread) =
-            fixture.start(&call, CONTROL_SILENCE, MAX_OUTPUT_BYTES);
+        let (mut input, mut output, thread) = fixture.start_with_bounds(
+            &call,
+            CONTROL_SILENCE,
+            CONTROL_SILENCE,
+            MAX_OUTPUT_BYTES,
+            OUTPUT_WRITE_BOUND,
+            Duration::from_secs(30),
+        );
         assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
         control(&mut input, "start");
         let frames = frames_until_terminal(&mut output);
@@ -349,6 +356,50 @@ fn workspace_node_closed_standard_streams_do_not_hold_output() {
     );
     assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
     control(&mut input, "start");
+    let terminal = frames_until_terminal(&mut output).pop().unwrap();
+    assert_eq!(terminal["reason"], "node-complete");
+    assert_eq!(terminal["output_incomplete"], false);
+    thread.join().unwrap().unwrap();
+}
+
+/// ´test:unit:workspace-node-sibling-exec-does-not-hold-output´
+#[test]
+fn workspace_node_sibling_exec_does_not_hold_output() {
+    struct Sibling(Child);
+    impl Drop for Sibling {
+        fn drop(&mut self) {
+            let _killed = self.0.kill();
+            let _waited = self.0.wait();
+        }
+    }
+
+    let fixture = Fixture::new();
+    let release = fixture.root.path().join("work/sub/release");
+    let call = fixture.call(Execution::Shell {
+        shell: "/bin/sh".into(),
+        text: "printf ready; while [ ! -e release ]; do sleep 0.01; done".into(),
+    });
+    let (mut input, mut output, thread) = fixture.start_with_bounds(
+        &call,
+        CONTROL_SILENCE,
+        CONTROL_SILENCE,
+        MAX_OUTPUT_BYTES,
+        OUTPUT_WRITE_BOUND,
+        Duration::from_secs(5),
+    );
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "ack");
+    control(&mut input, "start");
+    assert_eq!(read_frame(&mut output).unwrap()["type"], "stdout");
+    let _sibling = Sibling(
+        Command::new("/usr/bin/sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap(),
+    );
+    fs::write(release, b"go").unwrap();
     let terminal = frames_until_terminal(&mut output).pop().unwrap();
     assert_eq!(terminal["reason"], "node-complete");
     assert_eq!(terminal["output_incomplete"], false);
@@ -724,7 +775,7 @@ fn workspace_node_output_limit_precedes_a_later_failed_start() {
             vec![
                 b"/bin/sh".to_vec(),
                 b"-c".to_vec(),
-                br"setsid /bin/sh -c 'while [ ! -e release ]; do /usr/bin/sleep 0.01; done; /usr/bin/head -c 4096 /dev/zero' & echo $! > escaped.pid; printf ready".to_vec(),
+                br"setsid /bin/sh -c 'echo $$ > escaped.pid; while [ ! -e release ]; do /usr/bin/sleep 0.01; done; /usr/bin/head -c 4096 /dev/zero' & while [ ! -s escaped.pid ]; do /usr/bin/sleep 0.01; done; printf ready".to_vec(),
             ],
             vec![b"/no-such-workspace-program".to_vec()],
         ],

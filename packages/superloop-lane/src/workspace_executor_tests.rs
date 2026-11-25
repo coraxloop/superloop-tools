@@ -70,9 +70,15 @@ impl Fixture {
         (result, fs::read(out).unwrap(), fs::read(err).unwrap())
     }
     fn reader(&self, envelope: &Envelope, measured: &ExecutionMeasurements) {
-        let key = learned_key("compute", envelope, &self.grant, "fixture-policy").unwrap();
+        let key = learned_key(
+            "compute",
+            envelope,
+            &self.grant,
+            &self.grant.quick_policy_digest,
+        )
+        .unwrap();
         let value = json!({"envelope":envelope,"grant":self.grant,
-            "policy_revision":"fixture-policy","blacklist_revision":"fixture-blacklist",
+            "policy_revision":self.grant.quick_policy_digest,"blacklist_revision":"fixture-blacklist",
             "execution_digest":canonical_digest(&envelope.execution).unwrap(),"context_digest":key[2],
             "result":measured.result,"admission_wall_seconds":null,"steps":measured.steps});
         WorkspaceEffect::decode(value, "compute", &self.grant.loop_name, &self.grant.run)

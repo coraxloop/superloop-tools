@@ -20,7 +20,10 @@ fn read(mut input: impl io::Read) -> Result<Vec<u8>, Error> {
         .read_to_end(&mut bytes)
         .map_err(failure)?;
     if bytes.len() as u64 > CAP {
-        return Err(failure("input exceeds cap"));
+        return Err(failure(format!(
+            "input bytes={} exceeds cap={CAP}",
+            bytes.len()
+        )));
     }
     Ok(bytes)
 }

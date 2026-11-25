@@ -58,6 +58,33 @@ fn is_miss(e: &Envelope, g: &Grant, p: &QuickPolicy, b: &Blacklist) {
     ));
 }
 
+/// ´test:unit:workspace-table-identifiers-fit-record-citations´
+#[test]
+fn workspace_table_identifiers_fit_record_citations() {
+    let (mut envelope, mut grant, mut policy, mut blacklist) = fixture();
+    policy.rules[0].id = "q".repeat(161);
+    rebind(&mut envelope, &mut grant, &policy, &blacklist);
+    let error = classify(&envelope, &grant, &policy, &blacklist).unwrap_err();
+    assert!(error.detail.contains("quick rule"));
+    assert!(error.detail.contains("160-byte"));
+    policy.rules[0].id = "q".repeat(160);
+    blacklist.entries.push(BlacklistEntry {
+        id: "b".repeat(161),
+        execution_digest: canonical_digest(&envelope.execution).unwrap(),
+        reason: "owner policy".into(),
+    });
+    rebind(&mut envelope, &mut grant, &policy, &blacklist);
+    let error = classify(&envelope, &grant, &policy, &blacklist).unwrap_err();
+    assert!(error.detail.contains("blacklist entry"));
+    assert!(error.detail.contains("160-byte"));
+    blacklist.entries[0].id = "b".repeat(160);
+    rebind(&mut envelope, &mut grant, &policy, &blacklist);
+    assert!(matches!(
+        classify(&envelope, &grant, &policy, &blacklist).unwrap(),
+        Classification::Deny(_)
+    ));
+}
+
 /// ´test:unit:workspace-envelope-exact-bounds-and-encoding´
 #[test]
 fn workspace_envelope_exact_bounds_and_encoding() {
@@ -174,7 +201,7 @@ fn workspace_shell_never_quick_and_blacklist_is_published() {
         json!({"blacklist_rule":"published-shell","revision":"black-1","reason":"owner policy"})
     );
     let deny = Classification::Deny(denial);
-    let key = learned_key("compute", &e, &g, &p.revision).unwrap();
+    let key = learned_key("compute", &e, &g, &g.quick_policy_digest).unwrap();
     for mode in [DoorMode::Allow, DoorMode::Audit, DoorMode::Enforce] {
         assert_eq!(
             disposition(
@@ -182,7 +209,7 @@ fn workspace_shell_never_quick_and_blacklist_is_published() {
                 &deny,
                 &e,
                 &g,
-                &p.revision,
+                &g.quick_policy_digest,
                 Some(LearnedDecision::Allow(&key)),
             )
             .unwrap(),
@@ -350,7 +377,7 @@ fn workspace_undeclared_shell_reaches_judgement_with_mark() {
 #[test]
 fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
     let (e, g, p, b) = fixture();
-    let key = learned_key("compute", &e, &g, &p.revision).unwrap();
+    let key = learned_key("compute", &e, &g, &g.quick_policy_digest).unwrap();
     let miss = Classification::Miss {
         reasons: vec!["unknown command".into()],
     };
@@ -361,7 +388,7 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
         (DoorMode::Enforce, Disposition::WaitForJudgement),
     ] {
         assert_eq!(
-            disposition(mode, &miss, &e, &g, &p.revision, None).unwrap(),
+            disposition(mode, &miss, &e, &g, &g.quick_policy_digest, None).unwrap(),
             expected
         );
         assert_eq!(
@@ -370,7 +397,7 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
                 &miss,
                 &e,
                 &g,
-                &p.revision,
+                &g.quick_policy_digest,
                 Some(LearnedDecision::Allow(&old))
             )
             .unwrap(),
@@ -383,7 +410,7 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
             &miss,
             &e,
             &g,
-            &p.revision,
+            &g.quick_policy_digest,
             Some(LearnedDecision::Allow(&key)),
         )
         .unwrap(),
@@ -395,7 +422,7 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
             &classify(&e, &g, &p, &b).unwrap(),
             &e,
             &g,
-            &p.revision,
+            &g.quick_policy_digest,
             None
         )
         .unwrap(),
@@ -403,7 +430,7 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
     );
     for slot in 0..8 {
         let (mut e, mut g, _, _) = fixture();
-        let mut revision = p.revision.clone();
+        let mut revision = g.quick_policy_digest.clone();
         let mut class = "compute";
         match slot {
             0 => e.cwd.push("more".into()),
@@ -413,7 +440,7 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
                 g.workspace = "/work/S".into();
                 e.grant_digest = g.digest().unwrap();
             }
-            4 => revision = "quick-2".into(),
+            4 => revision = "d".repeat(64),
             5 => {
                 g.quick_policy_digest = "d".repeat(64);
                 e.grant_digest = g.digest().unwrap();
@@ -435,7 +462,7 @@ fn workspace_learned_context_and_mode_do_not_import_legacy_labels() {
 #[test]
 fn workspace_disposition_modes_cover_each_decision_kind() {
     let (e, g, p, b) = fixture();
-    let key = learned_key("compute", &e, &g, &p.revision).unwrap();
+    let key = learned_key("compute", &e, &g, &g.quick_policy_digest).unwrap();
     let quick = classify(&e, &g, &p, &b).unwrap();
     let miss = Classification::Miss {
         reasons: vec!["unknown command".into()],
@@ -471,7 +498,7 @@ fn workspace_disposition_modes_cover_each_decision_kind() {
         ),
     ] {
         assert_eq!(
-            disposition(mode, &quick, &e, &g, &p.revision, None).unwrap(),
+            disposition(mode, &quick, &e, &g, &g.quick_policy_digest, None).unwrap(),
             quick_expected
         );
         assert_eq!(
@@ -480,14 +507,14 @@ fn workspace_disposition_modes_cover_each_decision_kind() {
                 &miss,
                 &e,
                 &g,
-                &p.revision,
+                &g.quick_policy_digest,
                 Some(LearnedDecision::Allow(&key)),
             )
             .unwrap(),
             quick_expected
         );
         assert_eq!(
-            disposition(mode, &miss, &e, &g, &p.revision, None).unwrap(),
+            disposition(mode, &miss, &e, &g, &g.quick_policy_digest, None).unwrap(),
             miss_expected
         );
         assert_eq!(
@@ -496,14 +523,22 @@ fn workspace_disposition_modes_cover_each_decision_kind() {
                 &miss,
                 &e,
                 &g,
-                &p.revision,
+                &g.quick_policy_digest,
                 Some(LearnedDecision::Refuse(&key)),
             )
             .unwrap(),
             refused_expected
         );
         assert_eq!(
-            disposition(mode, &deny, &deny_envelope, &deny_grant, &p.revision, None).unwrap(),
+            disposition(
+                mode,
+                &deny,
+                &deny_envelope,
+                &deny_grant,
+                &deny_grant.quick_policy_digest,
+                None,
+            )
+            .unwrap(),
             Disposition::Block
         );
     }
@@ -811,7 +846,7 @@ fn workspace_grant_snapshot_binds_every_field() {
 /// ´test:unit:workspace-sequence-evidence-stops-and-keeps-unknown-explicit´
 #[test]
 fn workspace_sequence_evidence_stops_and_keeps_unknown_explicit() {
-    let (mut e, g, p, _) = fixture();
+    let (mut e, g, _, _) = fixture();
     e.execution = Execution::Sequence {
         steps: vec![vec![b"one".to_vec()], vec![b"two".to_vec()]],
     };
@@ -823,19 +858,37 @@ fn workspace_sequence_evidence_stops_and_keeps_unknown_explicit() {
     };
     let mut effect = WorkspaceEffect {
         execution_digest: canonical_digest(&e.execution).unwrap(),
-        context_digest: learned_key("compute", &e, &g, &p.revision).unwrap()[2]
+        context_digest: learned_key("compute", &e, &g, &g.quick_policy_digest).unwrap()[2]
             .as_str()
             .unwrap()
             .into(),
         envelope: e,
-        grant: g,
-        policy_revision: p.revision,
+        grant: g.clone(),
+        policy_revision: g.quick_policy_digest.clone(),
         blacklist_revision: "black-1".into(),
         result: unknown,
         admission_wall_seconds: None,
         steps: vec![],
     };
     WorkspaceEffect::decode(json!(effect), "compute", "example", "R").unwrap();
+    let mut other_binding = effect.clone();
+    other_binding.policy_revision = "another-table".into();
+    other_binding.context_digest = learned_key(
+        "compute",
+        &other_binding.envelope,
+        &other_binding.grant,
+        &other_binding.policy_revision,
+    )
+    .unwrap()[2]
+        .as_str()
+        .unwrap()
+        .into();
+    assert_eq!(
+        WorkspaceEffect::decode(json!(other_binding), "compute", "example", "R")
+            .unwrap_err()
+            .kind,
+        "door-workspace-context-differs"
+    );
     let failed = Measurement {
         outcome: Outcome::Exited { code: 2 },
         wall_seconds: Some(0.2),
@@ -904,7 +957,7 @@ fn workspace_wire_decoder_refuses_lossy_and_duplicate_fields() {
 /// ´test:unit:workspace-sequence-timeout-retains-a-successful-prefix´
 #[test]
 fn workspace_sequence_timeout_retains_a_successful_prefix() {
-    let (mut e, g, p, _) = fixture();
+    let (mut e, g, _, _) = fixture();
     e.execution = Execution::Sequence {
         steps: vec![vec![b"one".to_vec()], vec![b"two".to_vec()]],
     };
@@ -922,13 +975,13 @@ fn workspace_sequence_timeout_retains_a_successful_prefix() {
     };
     let mut effect = WorkspaceEffect {
         execution_digest: canonical_digest(&e.execution).unwrap(),
-        context_digest: learned_key("compute", &e, &g, &p.revision).unwrap()[2]
+        context_digest: learned_key("compute", &e, &g, &g.quick_policy_digest).unwrap()[2]
             .as_str()
             .unwrap()
             .into(),
         envelope: e,
-        grant: g,
-        policy_revision: p.revision,
+        grant: g.clone(),
+        policy_revision: g.quick_policy_digest.clone(),
         blacklist_revision: "black-1".into(),
         result: timed_out,
         admission_wall_seconds: Some(0.1),
@@ -976,13 +1029,21 @@ fn workspace_quick_evidence_cannot_be_replayed_for_another_context() {
     };
     assert_eq!(evidence.evidence()["rule"], p.rules[0].id);
     assert_eq!(
-        disposition(DoorMode::Allow, &allow, &e, &g, &p.revision, None).unwrap(),
+        disposition(
+            DoorMode::Allow,
+            &allow,
+            &e,
+            &g,
+            &g.quick_policy_digest,
+            None,
+        )
+        .unwrap(),
         Disposition::Immediate
     );
     for mutation in 0..5 {
         let mut changed = e.clone();
         let mut grant = g.clone();
-        let mut revision = p.revision.clone();
+        let mut revision = g.quick_policy_digest.clone();
         match mutation {
             0 => changed.cwd.push("other".into()),
             1 => changed.env_additions.push(("X".into(), "1".into())),
@@ -1009,7 +1070,7 @@ fn workspace_learned_refusal_overrides_quick_allow_in_each_mode() {
     let (envelope, grant, policy, blacklist) = fixture();
     let quick = classify(&envelope, &grant, &policy, &blacklist).unwrap();
     assert!(matches!(quick, Classification::QuickAllow(_)));
-    let key = learned_key("compute", &envelope, &grant, &policy.revision).unwrap();
+    let key = learned_key("compute", &envelope, &grant, &grant.quick_policy_digest).unwrap();
     for (mode, expected) in [
         (DoorMode::Allow, Disposition::ImmediateRecordRefusal),
         (DoorMode::Enforce, Disposition::Block),
@@ -1021,7 +1082,7 @@ fn workspace_learned_refusal_overrides_quick_allow_in_each_mode() {
                 &quick,
                 &envelope,
                 &grant,
-                &policy.revision,
+                &grant.quick_policy_digest,
                 Some(LearnedDecision::Refuse(&key)),
             )
             .unwrap(),

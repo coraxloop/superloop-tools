@@ -9,7 +9,8 @@ use std::os::unix::fs::PermissionsExt as _;
 fn detail() -> Value {
     let grant=Grant::decode(json!({"schema":1,"loop":"alpha","run":"R","node":"fixture-node","workspace":"/work/R","baseline_env":[["PATH","/usr/bin"]],"resources":{},"shells":["/bin/sh"],"quick_policy_digest":"a".repeat(64),"blacklist_digest":"b".repeat(64),"executor_protocol":1})).unwrap();
     let envelope=Envelope::decode(json!({"schema":3,"grant_digest":grant.digest().unwrap(),"cwd":["checkout"],"execution":{"kind":"Argv","words":[b"custom".to_vec(),vec![255]]},"env_additions":[],"deadline_ms":1000})).unwrap();
-    json!({"execution_digest":canonical_digest(&envelope.execution).unwrap(),"context_digest":learned_key("compute",&envelope,&grant,"quick-1").unwrap()[2],"envelope":envelope,"grant":grant,"policy_revision":"quick-1","blacklist_revision":"black-1","result":{"outcome":{"kind":"Unknown"},"wall_seconds":null,"user_cpu_seconds":null,"system_cpu_seconds":null},"admission_wall_seconds":null,"steps":[]})
+    let policy_digest = grant.quick_policy_digest.clone();
+    json!({"execution_digest":canonical_digest(&envelope.execution).unwrap(),"context_digest":learned_key("compute",&envelope,&grant,&policy_digest).unwrap()[2],"envelope":envelope,"grant":grant,"policy_revision":policy_digest,"blacklist_revision":"black-1","result":{"outcome":{"kind":"Unknown"},"wall_seconds":null,"user_cpu_seconds":null,"system_cpu_seconds":null},"admission_wall_seconds":null,"steps":[]})
 }
 fn record() -> Value {
     let mut record = waiting("R", "1a", 3000, Mode::Audit).into_value();
@@ -25,6 +26,54 @@ fn record() -> Value {
         .unwrap()
         .remove("output_bytes");
     record
+}
+
+/// ´test:unit:workspace-quick-rule-citation-reads-only-for-its-grant-table´
+#[test]
+fn workspace_quick_rule_citation_reads_only_for_its_grant_table() {
+    let mut row = record();
+    let grant: Grant = serde_json::from_value(row["effect"]["workspace"]["grant"].clone()).unwrap();
+    let envelope: Envelope =
+        serde_json::from_value(row["effect"]["workspace"]["envelope"].clone()).unwrap();
+    let digest = grant.quick_policy_digest.clone();
+    let key = learned_key("compute", &envelope, &grant, &digest).unwrap();
+    row["shape_key"] = key[2].clone();
+    row["effect"]["workspace"]["context_digest"] = key[2].clone();
+    row["effect"]["workspace"]["policy_revision"] = json!(digest);
+    row["would_do_source"] = json!("quick-rule");
+    row["decision_tier"] = json!("quick-rule");
+    row["would_do"] = json!({"decision":"allow","reason":"fixture-rule"});
+    row["matched_rule"] = json!({"rule":"fixture-rule","policy_digest":digest});
+    assert_eq!(
+        RequestRecord::decode(row.clone()).unwrap().into_value(),
+        row
+    );
+    let mut changed = row.clone();
+    changed["matched_rule"]["policy_digest"] = json!("b".repeat(64));
+    assert!(RequestRecord::decode(changed).is_err());
+    let mut changed = row.clone();
+    changed["would_do"]["reason"] = json!("another-rule");
+    assert!(RequestRecord::decode(changed).is_err());
+    let mut changed = row;
+    changed["would_do_source"] = json!("fast-lane");
+    assert!(RequestRecord::decode(changed).is_err());
+}
+
+/// ´test:unit:workspace-unserved-executor-refusal-records-its-effect´
+#[test]
+fn workspace_unserved_executor_refusal_records_its_effect() {
+    let mut row = record();
+    let digest = row["effect"]["workspace"]["grant"]["quick_policy_digest"].clone();
+    row["state"] = Value::Null;
+    row["would_do_source"] = json!("quick-rule");
+    row["decision_tier"] = json!("quick-rule");
+    row["would_do"] = json!({"decision":"allow","reason":"fixture-rule"});
+    row["matched_rule"] = json!({"rule":"fixture-rule","policy_digest":digest});
+    row["effect"]["state"] = json!("refused");
+    row["effect"]["reason"] = json!("door-workspace-protocol-refusal");
+    row["effect"]["ref_check"] = json!("not-applicable");
+    row["effect"]["ending"] = crate::requests::unobserved_ending();
+    RequestRecord::decode(row).expect("unserved executor refusal remains readable");
 }
 
 fn finished_row(
@@ -312,7 +361,7 @@ fn failed_sequence_fixture() -> (Value, Value) {
     let detail = &mut row["effect"]["workspace"];
     detail["execution_digest"] = json!(canonical_digest(&envelope.execution).unwrap());
     detail["context_digest"] =
-        json!(learned_key("compute", &envelope, &grant, "quick-1").unwrap()[2]);
+        json!(learned_key("compute", &envelope, &grant, &grant.quick_policy_digest).unwrap()[2]);
     detail["envelope"] = json!(envelope);
     row["shape_key"] = detail["context_digest"].clone();
     let successful = json!({"outcome":{"kind":"Exited","code":0},
@@ -557,6 +606,48 @@ fn custodied_request(fixture: &Fixture, envelope: &Envelope) -> crate::door::Wor
         &wire,
     )
     .expect("custodied request")
+}
+
+/// ´test:unit:workspace-caller-files-exact-pending-schema-seven-intent´
+#[test]
+fn workspace_caller_files_exact_pending_schema_seven_intent() {
+    let fixture = prepared_fixture();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let registration = crate::door::Registration {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        worker_uid: 3000,
+        loop_uid: 41001,
+        scope: crate::door::Scope::Work,
+        mirror_ref: "refs/heads/lane/R".into(),
+    };
+    let seed = waiting("R", "1a", 3000, Mode::Audit).into_value();
+    let setting = json!({"mode":seed["mode"],"floor":seed["floor"],
+        "class":seed["class_setting"],"loop":seed["loop_setting"]});
+    let row = crate::door::workspace_record(
+        &registration,
+        &setting,
+        &request,
+        execute_command::workspace::Disposition::WaitForJudgement,
+        &json!({"decision":"undecided","reason":"workspace miss"}),
+        Value::Null,
+    )
+    .expect("schema-seven intent");
+    let value = row.value();
+    assert_eq!(value["schema"], 7);
+    assert_eq!(value["state"], "waiting");
+    assert_eq!(value["effect"]["state"], "pending");
+    assert_eq!(value["effect"]["workspace"]["envelope"], json!(envelope));
+    assert_eq!(
+        value["effect"]["workspace"]["grant"],
+        json!(request.grant())
+    );
+    assert_eq!(
+        value["effect"]["workspace"]["policy_revision"],
+        request.grant().quick_policy_digest
+    );
+    assert_eq!(RequestRecord::decode(value.clone()).unwrap().value(), value);
 }
 
 fn approved_record(
@@ -1255,4 +1346,123 @@ fn workspace_preflight_reader_bounds_truncated_evidence() {
     }
     let too_long = json!({"schema":3,"wire_bytes":vec![255;maximum+1],"truncated":false});
     assert!(RequestRecord::decode(preflight("door-workspace-protocol-refusal", too_long)).is_err());
+}
+
+/// ´test:unit:workspace-claim-checks-own-mode-ground-before-start´
+#[test]
+fn workspace_claim_checks_own_mode_ground_before_start() {
+    use crate::requests::modes::ModeTarget;
+    let fixture = prepared_fixture();
+    fixture.set_floor("allow");
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    let registration = crate::door::Registration {
+        loop_name: "alpha".into(),
+        run: "R".into(),
+        worker_uid: 3000,
+        loop_uid: 41001,
+        scope: crate::door::Scope::Work,
+        mirror_ref: "refs/heads/lane/R".into(),
+    };
+    store
+        .set_mode(&ModeTarget::Loop, Mode::Allow, "owner", "fixture", "1", &[])
+        .unwrap();
+    store
+        .set_mode(
+            &ModeTarget::class("compute").unwrap(),
+            Mode::Allow,
+            "owner",
+            "fixture",
+            "1",
+            &[],
+        )
+        .unwrap();
+    let setting = store.effective_mode("compute").unwrap();
+    let row = crate::door::workspace_record(
+        &registration,
+        &setting,
+        &request,
+        execute_command::workspace::Disposition::ImmediateJudgeAlongside,
+        &json!({"decision":"undecided","reason":"fixture miss"}),
+        Value::Null,
+    )
+    .unwrap()
+    .into_value();
+    assert!(row["state"].is_null());
+    let id = row["id"].as_str().unwrap().to_owned();
+    let lease = store
+        .file_active_workspace_claim(RequestRecord::decode(row).unwrap(), &request)
+        .expect("allow-mode filed claim");
+    assert!(store.request(&id).unwrap().value()["state"].is_null());
+    assert_eq!(
+        store.claim_workspace(&lease, &request).unwrap_err().kind,
+        "requests-state-refusal"
+    );
+}
+
+/// ´test:unit:workspace-waiting-claim-moves-state-once-under-the-store-lock´
+#[test]
+fn workspace_waiting_claim_moves_state_once_under_the_store_lock() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1a", &envelope);
+    let lease = store.publication_activity("R:1a").unwrap();
+    let claimed = store
+        .claim_workspace(&lease, &request)
+        .expect("agent claim");
+    assert!(claimed.value()["state"].is_null());
+    assert_eq!(
+        store.claim_workspace(&lease, &request).unwrap_err().kind,
+        "requests-state-refusal"
+    );
+}
+
+/// ´test:unit:workspace-claim-reads-owner-label-under-the-lock´
+#[test]
+fn workspace_claim_reads_owner_label_under_the_lock() {
+    let fixture = prepared_fixture();
+    let store = fixture.store();
+    let envelope: Envelope = serde_json::from_value(detail()["envelope"].clone()).unwrap();
+    let request = custodied_request(&fixture, &envelope);
+    approved_record(&store, "R:1a", &envelope);
+    store
+        .triage(
+            "R",
+            &[
+                json!({"id":"R:1a","action":"adjudicate", "treatment":"allow",
+                "reason":"fictional owner allow"}),
+            ],
+            "superloop",
+            "2",
+        )
+        .unwrap();
+    let lease = store.publication_activity("R:1a").unwrap();
+    let claimed = store
+        .claim_workspace(&lease, &request)
+        .expect("owner allow");
+    assert_eq!(claimed.value()["state"], "adjudicated");
+
+    approved_record(&store, "R:2b", &envelope);
+    store
+        .triage(
+            "R",
+            &[
+                json!({"id":"R:2b","action":"adjudicate", "treatment":"refuse",
+                "reason":"fictional owner refusal"}),
+            ],
+            "superloop",
+            "3",
+        )
+        .unwrap();
+    let refused_lease = store.publication_activity("R:2b").unwrap();
+    assert_eq!(
+        store
+            .claim_workspace(&refused_lease, &request)
+            .unwrap_err()
+            .kind,
+        "door-workspace-context-differs"
+    );
 }

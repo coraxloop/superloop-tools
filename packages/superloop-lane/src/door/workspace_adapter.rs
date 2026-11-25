@@ -36,6 +36,7 @@ pub(super) struct WorkspaceCall {
 /// One already custodied authority to execute this exact request.
 #[derive(Clone, Copy)]
 pub(super) enum WorkspaceAdmission<'a> {
+    QuickRule(&'a execute_command::workspace::QuickAllowance),
     Allowance(&'a WorkspaceAllowance),
     AllowModeIntent(&'a WorkspaceIntent),
 }
@@ -43,6 +44,9 @@ pub(super) enum WorkspaceAdmission<'a> {
 impl WorkspaceAdmission<'_> {
     fn check(&self, request: &WorkspaceRequest, id: &str) -> Result<(), LaneError> {
         match self {
+            Self::QuickRule(allowance) => allowance
+                .check_context(request.envelope(), request.grant())
+                .map_err(|error| LaneError::input(error.kind, error.detail)),
             Self::Allowance(allowance) => allowance.check(request),
             Self::AllowModeIntent(intent) => intent.check(request, id),
         }
@@ -443,6 +447,15 @@ const FINAL_BOUND: Duration = Duration::from_secs(5);
 pub(super) struct WorkspaceStop<'a> {
     pub(crate) flag: &'a AtomicBool,
     pub(crate) cause: &'static str,
+    pub(crate) selected: Option<&'a super::lifetime::FirstCause>,
+}
+
+impl WorkspaceStop<'_> {
+    fn cause(self) -> &'static str {
+        self.selected
+            .and_then(super::lifetime::FirstCause::get)
+            .map_or(self.cause, super::lifetime::Cause::name)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -839,7 +852,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             child_started: None,
             start_failure: None,
             build,
-            door_cause: sent_stop.then_some(stop.cause),
+            door_cause: sent_stop.then_some(stop.cause()),
         });
     };
     let mut result = WorkspaceResult::from_terminal(call, terminal, build)?;
@@ -850,17 +863,42 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
         ));
     }
     if sent_stop {
-        result.door_cause = Some(stop.cause);
+        result.door_cause = Some(stop.cause());
     }
     Ok(result)
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use execute_command::workspace::Execution;
     use std::os::unix::net::UnixStream;
     use std::process::Stdio;
+
+    pub fn run_fixture_command(
+        call: &WorkspaceCall,
+        identity: &std::path::Path,
+        sink: &mut impl WorkspaceOutputSink,
+        stop: WorkspaceStop<'_>,
+        lifetime: Instant,
+    ) -> Result<WorkspaceResult, LaneError> {
+        let (input, mut output, _child) = process_fixture(identity, Duration::from_secs(10));
+        let mut first_frame_seen = false;
+        run_stream(
+            call,
+            input,
+            &mut output,
+            sink,
+            stop,
+            DriverBounds {
+                lifetime,
+                acknowledgement: ACK_BOUND,
+                heartbeat_interval: HEARTBEAT_INTERVAL,
+                output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
+            },
+            &mut first_frame_seen,
+        )
+    }
 
     #[derive(Default)]
     struct Collected {
@@ -950,6 +988,7 @@ mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(5),
@@ -1108,6 +1147,7 @@ mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(15),
@@ -1169,6 +1209,7 @@ mod tests {
             WorkspaceStop {
                 flag: &stop,
                 cause: "worker-disconnected",
+                selected: None,
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(15),
@@ -1259,6 +1300,7 @@ mod tests {
             WorkspaceStop {
                 flag: &stop,
                 cause: "worker-disconnected",
+                selected: None,
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(60),
@@ -1539,6 +1581,7 @@ mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             Instant::now() + Duration::from_secs(5),
         )
@@ -1574,6 +1617,7 @@ mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             Instant::now() + Duration::from_secs(5),
         )
@@ -1606,6 +1650,7 @@ mod tests {
                 WorkspaceStop {
                     flag: &AtomicBool::new(false),
                     cause: "fixture-stop",
+                    selected: None,
                 },
                 DriverBounds {
                     lifetime: Instant::now() + Duration::from_secs(60),
@@ -1654,6 +1699,7 @@ mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             Instant::now() + Duration::from_millis(100),
         )

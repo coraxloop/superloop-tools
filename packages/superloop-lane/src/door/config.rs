@@ -54,6 +54,14 @@ pub(super) fn compute_deadlines(value: &Value) -> Result<Vec<ComputeDeadline>, L
     Ok(forms)
 }
 
+pub(super) fn workspace_judgement_wait_ms(value: &Value) -> Result<u64, LaneError> {
+    value
+        .get("workspace_judgement_wait_ms")
+        .map_or(Some(30_000), Value::as_u64)
+        .filter(|ms| (5_000..=120_000).contains(ms))
+        .ok_or_else(|| refusal("workspace_judgement_wait_ms must be 5000..120000"))
+}
+
 fn refusal(detail: impl Into<String>) -> LaneError {
     LaneError::input("door-agent-configuration", detail)
 }
@@ -100,6 +108,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, LaneError> {
             "agent_expected_tokens",
             "executable",
             "compute_deadlines",
+            "workspace_judgement_wait_ms",
         ]
         .contains(&key.as_str())
     }) {
@@ -158,7 +167,12 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, LaneError> {
         result["compute_deadlines"] =
             serde_json::to_value(forms).map_err(|error| refusal(error.to_string()))?;
     }
+    if let Some(wait) = table.get("workspace_judgement_wait_ms") {
+        result["workspace_judgement_wait_ms"] =
+            serde_json::to_value(wait).map_err(|error| refusal(error.to_string()))?;
+    }
     let _validated = compute_deadlines(&result)?;
+    let _validated = workspace_judgement_wait_ms(&result)?;
     Ok(result)
 }
 
@@ -185,7 +199,10 @@ pub fn runner(
         "loop_home",
     ];
     if value.as_object().is_none_or(|object| {
-        object.len() != KEYS.len() + usize::from(object.contains_key("compute_deadlines"))
+        object.len()
+            != KEYS.len()
+                + usize::from(object.contains_key("compute_deadlines"))
+                + usize::from(object.contains_key("workspace_judgement_wait_ms"))
             || KEYS.iter().any(|key| !object.contains_key(*key))
     }) {
         return Err(refusal(
@@ -193,6 +210,7 @@ pub fn runner(
         ));
     }
     let _validated = compute_deadlines(value)?;
+    let _validated = workspace_judgement_wait_ms(value)?;
     let path = |key: &str| {
         value[key]
             .as_str()
@@ -237,6 +255,26 @@ pub fn runner(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    /// ´test:unit:workspace-judgement-window-is-registered-and-bounded´
+    #[test]
+    fn workspace_judgement_window_is_registered_and_bounded() {
+        let prefix = "rubric_root = '/fixture'\nexecutable = '/fixture/codex'\nmodel = 'fixture'\n";
+        let value = parse(prefix.as_bytes()).unwrap();
+        assert_eq!(workspace_judgement_wait_ms(&value).unwrap(), 30_000);
+        for bound in [5_000, 120_000] {
+            let value =
+                parse(format!("{prefix}workspace_judgement_wait_ms = {bound}\n").as_bytes())
+                    .unwrap();
+            assert_eq!(workspace_judgement_wait_ms(&value).unwrap(), bound);
+        }
+        for bad in [0, 4_999, 120_001] {
+            let error = parse(format!("{prefix}workspace_judgement_wait_ms = {bad}\n").as_bytes())
+                .unwrap_err();
+            assert_eq!(error.kind, "door-agent-configuration");
+            assert!(error.detail.contains("workspace_judgement_wait_ms"));
+        }
+    }
 
     /// ´test:unit:agent-token-expectation-source-and-generation-are-closed´
     #[test]

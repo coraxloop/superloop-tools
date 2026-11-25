@@ -798,6 +798,8 @@ impl Store {
         input["publication"] = serde_json::to_value(&next).map_err(core)?;
         #[cfg(test)]
         view_tests::capture_service_before(&preview, &next, &input);
+        #[cfg(test)]
+        view_tests::before_owner_commit(&mut input);
         if let Some(key) = self.channel_view_key() {
             super::view::replace(key, None);
         }
@@ -822,6 +824,10 @@ impl Store {
     /// Refuses a conflicting claim, changed source or unavailable helper.
     pub fn claim_request(&self, source_id: &str) -> Result<bool, LaneError> {
         let _lock = self.write_lock("claim_request")?;
+        self.claim_request_locked(source_id)
+    }
+
+    pub(super) fn claim_request_locked(&self, source_id: &str) -> Result<bool, LaneError> {
         super::hold::request(source_id);
         let Some(client) = self.bound_client()? else {
             return Ok(true);

@@ -5,11 +5,19 @@ use std::cell::RefCell;
 use std::io::Write as _;
 
 type CommitHook = Box<dyn FnOnce(&Store)>;
+type CommitInputHook = Box<dyn FnOnce(&mut Value)>;
 type ReadHook = Box<dyn FnOnce(&Client)>;
 type ReplyHook = Box<dyn FnOnce(&mut Value)>;
 thread_local! { static READ: RefCell<Option<ReadHook>> = const { RefCell::new(None) }; }
 thread_local! { static REPLY: RefCell<Option<ReplyHook>> = const { RefCell::new(None) }; }
+thread_local! { static COMMIT_INPUT: RefCell<Option<CommitInputHook>> = const { RefCell::new(None) }; }
 thread_local! { static SERVICE_BOUNDARIES: RefCell<Option<[Value; 4]>> = const { RefCell::new(None) }; }
+pub(super) fn before_owner_commit(input: &mut Value) {
+    let hook = COMMIT_INPUT.with(|slot| slot.borrow_mut().take());
+    if let Some(hook) = hook {
+        hook(input);
+    }
+}
 pub(super) fn capture_service_before(preview: &Value, candidate: &Collection, input: &Value) {
     SERVICE_BOUNDARIES.with(|slot| {
         if slot.borrow().is_some() {
@@ -64,6 +72,7 @@ impl Drop for Reset {
         COMMITTED.with(|slot| slot.replace(None));
         READ.with(|slot| slot.replace(None));
         REPLY.with(|slot| slot.replace(None));
+        COMMIT_INPUT.with(|slot| slot.replace(None));
         SERVICE_BOUNDARIES.with(|slot| slot.replace(None));
     }
 }
@@ -195,6 +204,44 @@ fn same_value(path: &str, left: &Value, right: &Value) {
     );
 }
 
+fn record_only_float_bits(row: &Value) -> u64 {
+    row["body"]["record"]["effect"]["compute"]["preparation_wall_seconds"]
+        .as_f64()
+        .expect("record-only float")
+        .to_bits()
+}
+
+fn assert_record_only_publication(
+    boundaries: [&Value; 4],
+    id: &str,
+    original: u64,
+    shifted: u64,
+    mixed: bool,
+) {
+    let [preview, candidate, submitted, reply] = boundaries;
+    let preview_row = collection_row(preview, id);
+    let candidate_row = collection_row(candidate, id);
+    let submitted_row = collection_row(submitted, id);
+    let reply_row = collection_row(reply, id);
+    assert_eq!(preview_row["state"], "completed");
+    assert_eq!(reply_row["state"], "completed");
+    assert_eq!(record_only_float_bits(candidate_row), original);
+    assert_eq!(
+        record_only_float_bits(submitted_row),
+        if mixed { shifted } else { original }
+    );
+    assert_eq!(
+        record_only_float_bits(reply_row),
+        if mixed { shifted } else { original }
+    );
+    same_value(
+        "evaluated service result",
+        &candidate_row["service_result"],
+        &submitted_row["service_result"],
+    );
+    same_value("submitted -> reply", submitted, reply);
+}
+
 struct ComputeCase {
     wall_ns: u64,
     cpu_ns: u64,
@@ -288,6 +335,110 @@ fn measure_compute_case(case: &ComputeCase) {
     same_value("candidate -> submitted", &candidate, &submitted);
     same_value("submitted -> reply", &submitted, &reply);
     same_value("reply -> stored", &reply, &stored);
+}
+
+fn measure_record_only_float_change(mixed: bool) {
+    let (fixture, store, client) = seed_compute("fixture record-only measurement");
+    let id = common_id("alpha", "R:aa");
+    store
+        .collection_command(
+            "triage",
+            Some(&json!({"schema":1,"items":[{"id":id,
+                "decision":{"answer":{"outcome":"allow"},"reason":"fixture"}}]})),
+            None,
+            false,
+        )
+        .expect("triage through owner");
+    store
+        .channel_service_locked(
+            &client,
+            "claim",
+            &json!({"schema":1,"id":id,"claim":"fixture-record-only"}),
+            None,
+        )
+        .expect("claim through owner");
+    let mut record = store.request("R:aa").expect("local compute record");
+    let mut effect = finished_compute_effect(
+        &record,
+        &ComputeCase {
+            wall_ns: 1,
+            cpu_ns: 2,
+            output_bytes: 0,
+            queue_ns: None,
+            reason: "fixture record-only measurement",
+            path: "/work/checkout",
+        },
+    );
+    let original = 0x3de3_a256_c02c_62f3_u64;
+    let shifted = original - 1;
+    effect["compute"]["preparation_wall_seconds"] = json!(f64::from_bits(original));
+    record
+        .record_effect(effect.clone())
+        .expect("door effect record");
+    let document = json!({"schema":1,"id":id,"claim":"fixture-record-only","result":effect});
+    let _reset = Reset;
+    if mixed {
+        let wanted = id.clone();
+        COMMIT_INPUT.with(|slot| {
+            slot.replace(Some(Box::new(move |input| {
+                let row = input["publication"]["requests"]
+                    .as_array_mut()
+                    .expect("published rows")
+                    .iter_mut()
+                    .find(|row| row["id"] == wanted)
+                    .expect("door row");
+                row["body"]["record"]["effect"]["compute"]["preparation_wall_seconds"] =
+                    json!(f64::from_bits(shifted));
+            })));
+        });
+    }
+    SERVICE_BOUNDARIES.with(|slot| slot.replace(Some(std::array::from_fn(|_| Value::Null))));
+    let completion = store.channel_service_locked(&client, "complete", &document, Some(&record));
+    let [preview, candidate, submitted, reply] =
+        SERVICE_BOUNDARIES.with(|slot| slot.borrow_mut().take().expect("service boundaries"));
+    let stored = client
+        .call("--owner-read", "", "alpha", None)
+        .expect("committed owner collection");
+    same_value("reply -> stored", &reply, &stored);
+    assert_record_only_publication(
+        [&preview, &candidate, &submitted, &reply],
+        &id,
+        original,
+        shifted,
+        mixed,
+    );
+    let path = "body.record.effect.compute.preparation_wall_seconds";
+    if mixed {
+        let error = completion.expect_err("changed reply after successful commit");
+        assert_eq!(error.kind, "requests-channel-refusal");
+        assert_eq!(error.detail, "service publication reply differs");
+        let difference = first_value_difference("collection", &candidate, &reply)
+            .expect("record-only reply difference");
+        assert!(difference.contains(path), "{difference}");
+        assert!(difference.contains("3de3a256c02c62f3 -> 3de3a256c02c62f2"));
+        store
+            .record_incomplete("R", "R:aa", "requests-channel-refusal")
+            .expect("door's incomplete marker");
+        let status = fixture.command(&["status", "alpha"], b"").expect("status");
+        assert_eq!(status["incomplete_attempt"]["phase"], "incomplete");
+        assert_eq!(
+            status["incomplete_attempt"]["reason"],
+            "R:aa: requests-channel-refusal"
+        );
+    } else {
+        completion.expect("matching helper publication");
+        same_value("candidate -> reply", &candidate, &reply);
+    }
+}
+
+/// ´test:unit:record-only-float-shift-commits-before-reply-refusal´
+#[test]
+fn record_only_float_shift_commits_before_reply_refusal() {
+    if !publication_tests::in_namespace() {
+        return;
+    }
+    measure_record_only_float_change(false);
+    measure_record_only_float_change(true);
 }
 
 /// ´test:unit:compute-record-survives-owner-service-publication´
