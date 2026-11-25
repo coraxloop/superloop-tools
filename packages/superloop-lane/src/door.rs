@@ -971,15 +971,9 @@ impl Drop for PeerGuard {
 fn admit_peer(active: &Arc<AtomicUsize>, stream: &mut UnixStream) -> Option<PeerGuard> {
     if active.fetch_add(1, Ordering::Relaxed) >= MAX_PEERS {
         active.fetch_sub(1, Ordering::Relaxed);
-        // The request is already sent by the stub. Read it only on the full
-        // peer path so the refusal uses that request's reply schema.
-        let schema = request_frame_read_until(stream, Instant::now() + PEER_DEADLINE)
-            .ok()
-            .filter(|(request, _)| request["schema"] == 3)
-            .map_or(2, |_| 3);
         if let Err(error) = frame_write_no_drain(
             stream,
-            &json!({"schema":schema,"type":"final","status":125,
+            &json!({"schema":2,"type":"final","status":125,
                 "reason":"door-capacity-refusal","peer_limit":MAX_PEERS,
                 "retry_after_seconds":CAPACITY_RETRY_SECONDS,"ref_check":"not-reached","stdin_bytes":0,"stdout_bytes":0,"stderr_bytes":0,
                 "queue_state":"no-queue","queue_wall_seconds":null,"compute_exit_status":null,
@@ -3172,6 +3166,7 @@ fn serve_request_with_agent_at_context(
         RequestWait::new(stream)?.with_lifetime(acceptance, full_close, stream)?,
     );
     if is_workspace_request
+        && peer == registration.worker_uid
         && let Some(context) = workspace.as_ref()
         && let Some(requested_ms) = request["deadline_ms"].as_u64().filter(|ms| *ms > 0)
     {
@@ -11550,6 +11545,35 @@ mod tests {
         drop(grants);
         drop(peers);
         assert_eq!(active.load(Ordering::Relaxed), 0);
+    }
+
+    /// ´test:unit:door-capacity-silent-peer-does-not-hold-accept-loop´
+    #[test]
+    fn door_capacity_silent_peer_does_not_hold_accept_loop() {
+        let temp = tempfile::tempdir().expect("socket directory");
+        let socket = temp.path().join("door.sock");
+        let listener = UnixListener::bind(&socket).expect("capacity listener");
+        let active = Arc::new(AtomicUsize::new(MAX_PEERS));
+        let (progress, observed) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("silent excess peer");
+            assert!(admit_peer(&active, &mut first).is_none());
+            let (mut second, _) = listener.accept().expect("next excess peer");
+            assert!(admit_peer(&active, &mut second).is_none());
+            progress.send(()).expect("next peer answered");
+        });
+        let first = UnixStream::connect(&socket).expect("silent peer connection");
+        let second = UnixStream::connect(&socket).expect("next peer connection");
+        let next_answered = observed.recv_timeout(Duration::from_secs(5));
+        first
+            .shutdown(std::net::Shutdown::Both)
+            .expect("release silent peer even on failure");
+        drop(second);
+        server.join().expect("capacity server");
+        assert!(
+            next_answered.is_ok(),
+            "next peer did not receive an immediate answer"
+        );
     }
 
     fn call_fixture_socket_when_ready(

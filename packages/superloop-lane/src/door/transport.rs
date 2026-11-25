@@ -133,7 +133,11 @@ mod workspace_stub_tests {
             ("door-capacity-refusal", 2),
         ] {
             let reply = stub_call(&path, &args, &[]).expect("typed workspace refusal");
-            assert_eq!(reply["schema"], 3, "case {case}");
+            assert_eq!(
+                reply["schema"],
+                if case == 2 { 2 } else { 3 },
+                "case {case}"
+            );
             assert_eq!(reply["reason"], reason, "case {case}");
             assert_eq!(reply["status"], 125, "case {case}");
             if case == 0 {
@@ -143,6 +147,16 @@ mod workspace_stub_tests {
             }
             if case == 2 {
                 assert_eq!(reply["peer_limit"], super::super::MAX_PEERS);
+                assert_eq!(
+                    reply["retry_after_seconds"],
+                    super::super::CAPACITY_RETRY_SECONDS
+                );
+                assert_eq!(
+                    super::super::final_line(&args, &reply).as_deref(),
+                    Some(
+                        "door-capacity-refusal: peer_limit=16 retry_after=120s; no request was dispatched"
+                    )
+                );
             }
         }
         server.join().expect("reply server");
@@ -2979,6 +2993,16 @@ where
                 }
             });
             if workspace.is_some() && frame["schema"] != 3 {
+                if frame["schema"] == 2
+                    && frame["type"] == "final"
+                    && frame["status"] == 125
+                    && frame["reason"] == "door-capacity-refusal"
+                    && frame["peer_limit"].as_u64().is_some()
+                    && frame["retry_after_seconds"].as_u64().is_some()
+                {
+                    validate_final(&frame, 0, preflight_stderr)?;
+                    return Ok(frame);
+                }
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
                     "door-workspace-unavailable: installed door does not serve schema three; refresh its pinned copy",
