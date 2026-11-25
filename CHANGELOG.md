@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.12.0] - 2026-11-25
+
 ### Added
 
 - Publish a replaceable, read-only boxed workspace context for declared runs, including the grant's first shell, and teach the stub to send schema-three argv for shell-equivalent plain words or the worker's unchanged shell text for everything else, with a one-line waiting notice. A simple leading assignment becomes an environment addition; a grant with no shell uses `/bin/sh` and reaches judgement as an undeclared-shell miss. Compatibility: the door that serves schema three is the serving caller below, in this same release; install as that entry orders. An undeclared run publishes no context and its stub sends the same schema-two bytes; Git transport does not read a workspace context. A box launched by an earlier program has the door directory bind but no context file, and keeps schema two until a later declared launch round publishes one. A schema-three stub against an older door reports `door-workspace-unavailable` at once. Stored request forms do not change for an undeclared run (``proto:superlooplane:workspace-launch-declaration``, ``proto:executecommand:compute-workspace``).
@@ -1213,7 +1215,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.12.0...HEAD
+[0.12.0]: https://github.com/coraxloop/superloop-tools/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/coraxloop/superloop-tools/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/coraxloop/superloop-tools/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/coraxloop/superloop-tools/compare/v0.8.2...v0.9.0
