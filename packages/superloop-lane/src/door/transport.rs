@@ -35,11 +35,14 @@ thread_local! {
 const CHUNK: usize = 8192;
 #[cfg(test)]
 type FixtureDeadline = Box<dyn FnOnce() -> Instant + Send>;
+#[cfg(test)]
+type FixtureWrite = Box<dyn FnOnce(&mut UnixStream)>;
 
 #[cfg(test)]
 thread_local! {
     static INPUT_DEADLINE: std::cell::RefCell<Option<FixtureDeadline>> = const { std::cell::RefCell::new(None) };
     pub(super) static CHECK_DEADLINE: std::cell::RefCell<Option<FixtureDeadline>> = const { std::cell::RefCell::new(None) };
+    static STUB_BEFORE_REQUEST_WRITE: std::cell::RefCell<Option<FixtureWrite>> = const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(test)]
@@ -161,6 +164,67 @@ mod workspace_stub_tests {
         }
         server.join().expect("reply server");
         clear_context();
+    }
+
+    /// ´test:unit:workspace-stub-reads-capacity-final-after-request-write-breaks´
+    #[test]
+    fn workspace_stub_reads_capacity_final_after_request_write_breaks() {
+        let args = [
+            OsString::from("fixture-node"),
+            OsString::from("/usr/bin/true"),
+        ];
+        for capacity in [true, false] {
+            let temp = tempfile::tempdir().expect("fixture");
+            context(&temp.path().join("context.json"));
+            let (path, listener) = socket(&temp);
+            let (closed, observed) = std::sync::mpsc::sync_channel(1);
+            let server = thread::spawn(move || {
+                let (mut peer, _) = listener.accept().expect("stub connection");
+                if capacity {
+                    let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                        super::super::MAX_PEERS,
+                    ));
+                    assert!(super::super::admit_peer(&active, &mut peer).is_none());
+                }
+                drop(peer);
+                closed.send(()).expect("closed peer event");
+            });
+            STUB_BEFORE_REQUEST_WRITE.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move |stream| {
+                    observed
+                        .recv_timeout(Duration::from_secs(5))
+                        .expect("door closed before request write");
+                    assert_eq!(
+                        std::io::Write::write(stream, b"x")
+                            .expect_err("closed door must refuse a write")
+                            .kind(),
+                        io::ErrorKind::BrokenPipe
+                    );
+                }));
+            });
+            let result = stub_call(&path, &args, &[]);
+            server.join().expect("fixture server");
+            if capacity {
+                let reply = result.expect("capacity final survived broken request write");
+                assert_eq!(reply["reason"], "door-capacity-refusal");
+                assert_eq!(
+                    reply["retry_after_seconds"],
+                    super::super::CAPACITY_RETRY_SECONDS
+                );
+                assert_eq!(
+                    super::super::final_line(&args, &reply).as_deref(),
+                    Some(
+                        "door-capacity-refusal: peer_limit=16 retry_after=120s; no request was dispatched"
+                    )
+                );
+            } else {
+                assert_eq!(
+                    result.expect_err("no final preserves write failure").kind(),
+                    io::ErrorKind::BrokenPipe
+                );
+            }
+            clear_context();
+        }
     }
 
     fn socket(temp: &tempfile::TempDir) -> (PathBuf, UnixListener) {
@@ -2867,6 +2931,16 @@ fn validate_final(final_reply: &Value, received_out: usize, received_err: usize)
     Ok(())
 }
 
+fn early_capacity_final(frame: &Value) -> bool {
+    frame["schema"] == 2
+        && frame["type"] == "final"
+        && frame["status"] == 125
+        && frame["reason"] == "door-capacity-refusal"
+        && frame["peer_limit"].as_u64().is_some()
+        && frame["retry_after_seconds"].as_u64().is_some()
+        && validate_final(frame, 0, 0).is_ok()
+}
+
 fn compute_client_deadline(frame: &Value) -> io::Result<Instant> {
     let registered = frame["registered_deadline_ms"].as_u64();
     let requested = frame["request_deadline_ms"].as_u64();
@@ -2970,7 +3044,24 @@ where
         || json!({"schema":2,"argv":words,"deadline_ms":deadline_ms}),
         |envelope| json!(envelope),
     );
-    frame_write_until(&mut stream, &request, deadline)?;
+    #[cfg(test)]
+    STUB_BEFORE_REQUEST_WRITE.with(|slot| {
+        if let Some(hook) = slot.borrow_mut().take() {
+            hook(&mut stream);
+        }
+    });
+    if let Err(write_error) = frame_write_until(&mut stream, &request, deadline) {
+        // A full door can send its capacity final and close before this write.
+        // Preserve the write failure unless that already queued frame is valid.
+        if stream.set_nonblocking(true).is_ok()
+            && let Ok(frame) =
+                frame_read_until(&mut stream, Instant::now() + Duration::from_secs(1))
+            && early_capacity_final(&frame)
+        {
+            return Ok(frame);
+        }
+        return Err(write_error);
+    }
     #[cfg(test)]
     STUB_REQUEST_SENT.with(|slot| {
         if let Some(sender) = slot.borrow_mut().take()
@@ -2993,14 +3084,7 @@ where
                 }
             });
             if workspace.is_some() && frame["schema"] != 3 {
-                if frame["schema"] == 2
-                    && frame["type"] == "final"
-                    && frame["status"] == 125
-                    && frame["reason"] == "door-capacity-refusal"
-                    && frame["peer_limit"].as_u64().is_some()
-                    && frame["retry_after_seconds"].as_u64().is_some()
-                {
-                    validate_final(&frame, 0, preflight_stderr)?;
+                if preflight_stderr == 0 && early_capacity_final(&frame) {
                     return Ok(frame);
                 }
                 return Err(io::Error::new(
