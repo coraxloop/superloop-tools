@@ -3250,7 +3250,7 @@ fn serve_request_with_agent_at_context(
                         "request store home is absent",
                     )
                 })?;
-                let Some(_slot) = WorkspaceWaitSlot::acquire(home, registration)
+                let Some(slot) = WorkspaceWaitSlot::acquire(home, registration)
                     .map_err(|error| LaneError::input("door-request-refusal", error.to_string()))?
                 else {
                     let mut reply =
@@ -3542,6 +3542,7 @@ fn serve_request_with_agent_at_context(
                         return Ok(String::new());
                     }
                 };
+                drop(slot);
                 #[cfg(test)]
                 AFTER_WAITING_CLAIM.with(|slot| {
                     if let Some(hook) = slot.borrow_mut().take() {
@@ -6671,12 +6672,13 @@ mod tests {
         use execute_command::workspace::{Blacklist, QuickPolicy, canonical_digest};
         use std::fmt::Write as _;
 
-        for (mode, agent_enabled, stop_after_claim, retake_blocked) in [
-            (Mode::Allow, true, false, false),
-            (Mode::Enforce, true, false, false),
-            (Mode::Enforce, false, false, false),
-            (Mode::Enforce, true, true, false),
-            (Mode::Enforce, true, false, true),
+        for (mode, agent_enabled, stop_after_claim, retake_blocked, slot_after_claim) in [
+            (Mode::Allow, true, false, false, false),
+            (Mode::Enforce, true, false, false, false),
+            (Mode::Enforce, false, false, false, false),
+            (Mode::Enforce, true, true, false, false),
+            (Mode::Enforce, true, false, true, false),
+            (Mode::Enforce, true, false, false, true),
         ] {
             struct Allows {
                 release: Mutex<std::sync::mpsc::Receiver<()>>,
@@ -6685,6 +6687,8 @@ mod tests {
                 wire: Option<Vec<u8>>,
                 hold_admission: bool,
                 held_admission: Mutex<Option<super::RequestGuard>>,
+                hold_second_slot: bool,
+                held_slot: Mutex<Option<super::WorkspaceWaitSlot>>,
             }
             impl super::agent::AgentRunner for Allows {
                 fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
@@ -6752,7 +6756,11 @@ mod tests {
                         assert_eq!(third["retry_after_seconds"], 30);
                         assert_eq!(third["admission_window"], super::admission_window());
                         assert_eq!(store.list_run("R").expect("filed records").len(), 1);
-                        drop(second);
+                        if self.hold_second_slot {
+                            *self.held_slot.lock().expect("held waiter slot") = Some(second);
+                        } else {
+                            drop(second);
+                        }
                         if self.hold_admission {
                             let held = super::RequestGuard::acquire_operation(
                                 home,
@@ -6877,6 +6885,8 @@ mod tests {
                     wire: (mode == Mode::Enforce).then(|| wire.clone()),
                     hold_admission: retake_blocked,
                     held_admission: Mutex::new(None),
+                    hold_second_slot: slot_after_claim,
+                    held_slot: Mutex::new(None),
                 };
                 if retake_blocked {
                     let clock = Arc::new(super::FixtureAdmissionClock {
@@ -6888,7 +6898,18 @@ mod tests {
                         *slot.borrow_mut() = Some(std::rc::Rc::new(clock));
                     });
                 }
-                if stop_after_claim {
+                if slot_after_claim {
+                    let home = home.clone();
+                    let registration = registration.clone();
+                    super::AFTER_WAITING_CLAIM.with(|slot| {
+                        *slot.borrow_mut() = Some(Box::new(move |_| {
+                            let third = super::WorkspaceWaitSlot::acquire(&home, &registration)
+                                .expect("third waiter acquisition after claim")
+                                .expect("a claimed request no longer occupies a waiter slot");
+                            drop(third);
+                        }));
+                    });
+                } else if stop_after_claim {
                     super::AFTER_WAITING_CLAIM.with(|slot| {
                         *slot.borrow_mut() = Some(Box::new(|wait| {
                             wait.cause.select(super::lifetime::Cause::Deadline);
