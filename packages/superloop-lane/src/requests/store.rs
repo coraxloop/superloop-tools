@@ -2194,7 +2194,6 @@ impl Store {
     }
 
     /// Re-read one waiting or labelled workspace request and claim it before execution.
-    #[allow(dead_code)] // The serving caller selects the claim in the next cut.
     pub(crate) fn claim_workspace(
         &self,
         activity: &PublicationActivity,

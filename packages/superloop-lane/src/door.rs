@@ -574,16 +574,16 @@ struct RequestGuard {
 
 // These locks count waiting workspace calls without retaining either admission
 // guard. Their names are separate from admission locks, which restart probes.
-#[allow(dead_code)] // The waiting serving path takes these slots in the next commit.
-struct WorkspaceWaitSlot(nix::fcntl::Flock<File>);
+struct WorkspaceWaitSlot {
+    _held: nix::fcntl::Flock<File>,
+}
 
-#[allow(dead_code)] // The waiting serving path takes these slots in the next commit.
 impl WorkspaceWaitSlot {
     fn acquire(home: &Path, registration: &Registration) -> io::Result<Option<Self>> {
         for slot in 0..2 {
             let class = format!("workspace-wait-{slot}");
             if let Some(lock) = RequestGuard::acquire_lock(home, registration, &class, false)? {
-                return Ok(Some(Self(lock)));
+                return Ok(Some(Self { _held: lock }));
             }
         }
         Ok(None)
@@ -756,6 +756,15 @@ impl RequestGuard {
             Err((_, error)) => Err(io::Error::from(error)),
         }
     }
+}
+
+fn claim_workspace_under_admission(
+    store: &Store,
+    activity: &crate::requests::store::PublicationActivity,
+    _admission: &RequestGuard,
+    request: &WorkspaceRequest,
+) -> Result<RequestRecord, LaneError> {
+    store.claim_workspace(activity, request)
 }
 
 #[cfg(test)]
@@ -2809,6 +2818,7 @@ fn run_claimed_workspace(
     admission_deadline: Instant,
     context: &WorkspaceSocketContext<'_>,
     mode: execute_command::policy::DoorMode,
+    announcement_sent: bool,
 ) -> Result<Value, LaneError> {
     let ending_guard = RequestEnding {
         store,
@@ -2831,13 +2841,22 @@ fn run_claimed_workspace(
             "request ended before the executor call; nothing was run",
         ));
     }
+    let command_started = if announcement_sent {
+        Instant::now()
+    } else {
+        started
+    };
     let (deadline, announcement) = workspace_deadline_announcement(
-        started,
+        command_started,
         request.envelope().deadline_ms,
         context.deadline_ms,
         context.judgement_wait_ms,
     );
-    let announced = frame_write_until(stream, &announcement, admission_deadline);
+    let announced = if announcement_sent {
+        Ok(())
+    } else {
+        frame_write_until(stream, &announcement, admission_deadline)
+    };
     if let Err(error) = announced {
         let mut failed_ending = ending;
         failed_ending["cause"] = json!("transport");
@@ -2999,6 +3018,40 @@ fn run_claimed_workspace(
     Ok(reply)
 }
 
+#[allow(clippy::too_many_arguments)]
+fn finish_waiting_without_run(
+    registration: &Registration,
+    peer: u32,
+    store: &Store,
+    wait: &RequestWait,
+    id: &str,
+    mut effect: Value,
+    mut ending: Value,
+    reason: &str,
+    detail: &str,
+    started: Instant,
+    deadline: Instant,
+) -> Result<Value, LaneError> {
+    let cause = wait.cause.select(lifetime::Cause::for_reply(reason));
+    ending["cause"] = json!(cause.name());
+    ending["local_child"] = json!("not-started");
+    ending["remote"]["state"] = json!("not-started");
+    effect["state"] = json!("refused");
+    effect["reason"] = json!(reason);
+    effect["ref_check"] = json!("not-applicable");
+    effect["ending"] = ending.clone();
+    wait.remember_effect(effect.clone());
+    store.finish_request(id, Some(effect), &ending)?;
+    let mut reply = transport::refusal(registration, peer, reason, started);
+    reply["schema"] = json!(3);
+    reply["request_id"] = json!(id);
+    reply["request_record_error"] = json!(detail);
+    wait.report(&mut reply);
+    wait.write_final(&reply, deadline)
+        .map_err(|error| LaneError::input("door-workspace-protocol-refusal", error.to_string()))?;
+    Ok(reply)
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn serve_request_with_agent_at_context(
     stream: &mut UnixStream,
@@ -3139,6 +3192,7 @@ fn serve_request_with_agent_at_context(
                     "registered node route is absent",
                 )
             })?;
+            let socket_request = request;
             let request = workspace_request(
                 context.runs,
                 registration,
@@ -3177,6 +3231,299 @@ fn serve_request_with_agent_at_context(
             let mode = execute_command::policy::DoorMode::from_record(setting["mode"].as_str())
                 .map_err(|error| LaneError::input(error.0, "workspace mode differs"))?;
             let disposition = request.disposition(mode, &classification, learned.as_ref())?;
+            if disposition == execute_command::workspace::Disposition::WaitForJudgement {
+                let home = owner_home.ok_or_else(|| {
+                    LaneError::input(
+                        "door-workspace-unregistered",
+                        "request store home is absent",
+                    )
+                })?;
+                let _slot = WorkspaceWaitSlot::acquire(home, registration)
+                    .map_err(|error| LaneError::input("door-request-refusal", error.to_string()))?
+                    .ok_or_else(|| {
+                        LaneError::input(
+                            "door-request-concurrent",
+                            "two workspace requests of this box are already waiting; nothing was run",
+                        )
+                    })?;
+                let record = workspace_record(
+                    registration,
+                    &setting,
+                    &request,
+                    disposition,
+                    &json!({"decision":"undecided","reason":"workspace miss awaits judgement"}),
+                    Value::Null,
+                )
+                .map_err(|error| {
+                    LaneError::input("door-workspace-context-differs", error.to_string())
+                })?;
+                let id = record.id().to_owned();
+                let effect = record.value()["effect"].clone();
+                let ending = crate::requests::unobserved_ending();
+                let lease = store.file_active(record)?;
+                let _ending_guard = RequestEnding {
+                    store,
+                    wait: wait.as_ref(),
+                    id: &id,
+                };
+                let (command_deadline, announcement) = workspace_deadline_announcement(
+                    started,
+                    request.envelope().deadline_ms,
+                    context.deadline_ms,
+                    context.judgement_wait_ms,
+                );
+                frame_write_until(stream, &announcement, admission_deadline).map_err(|error| {
+                    LaneError::input("door-workspace-protocol-refusal", error.to_string())
+                })?;
+                frame_write_until(
+                    stream,
+                    &json!({"schema":3,"type":"waiting","request_id":id,
+                        "reason":"judgement"}),
+                    admission_deadline,
+                )
+                .map_err(|error| {
+                    LaneError::input("door-workspace-protocol-refusal", error.to_string())
+                })?;
+                drop(request_guard.take());
+                let reasons = match &classification {
+                    execute_command::workspace::Classification::Miss { reasons } => {
+                        reasons.as_slice()
+                    }
+                    _ => &[],
+                };
+                let input = request.agent_input(reasons, "")?;
+                let bytes = match input.encode() {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        completed_reply = Some(finish_waiting_without_run(
+                            registration,
+                            peer,
+                            store,
+                            &wait,
+                            &id,
+                            effect,
+                            ending,
+                            "door-workspace-referred",
+                            &error.to_string(),
+                            started,
+                            command_deadline,
+                        )?);
+                        drop(lease);
+                        return Ok(String::new());
+                    }
+                };
+                let Some(runner) = agent else {
+                    completed_reply = Some(finish_waiting_without_run(
+                        registration,
+                        peer,
+                        store,
+                        &wait,
+                        &id,
+                        effect,
+                        ending,
+                        "door-workspace-referred",
+                        "door-agent-unconfigured",
+                        started,
+                        command_deadline,
+                    )?);
+                    drop(lease);
+                    return Ok(String::new());
+                };
+                let judgement_deadline =
+                    Instant::now() + Duration::from_millis(context.judgement_wait_ms);
+                let budget = judgement_deadline.saturating_duration_since(Instant::now());
+                let returned = runner.judge_request_controlled(
+                    &bytes,
+                    budget,
+                    &json!({"loop":registration.loop_name,"run":registration.run,
+                        "request_id":id}),
+                    &Instant::now,
+                    &|| {
+                        wait.stop(admission_deadline).is_some()
+                            || Instant::now() >= judgement_deadline
+                    },
+                );
+                let mut result = if Instant::now() >= judgement_deadline {
+                    agent::RunnerOutcome::referral(
+                        "timeout",
+                        "door-judgement-window",
+                        Instant::now(),
+                    )
+                } else {
+                    returned
+                };
+                let binding = store.request(&id)?.into_value();
+                let _verdict = result.apply_judgement(&binding);
+                store.record_agent(
+                    &id,
+                    &result,
+                    result.rubric_digest.as_deref(),
+                    configured_model,
+                    Some(&input.request),
+                )?;
+                if let Some(stop) = wait.stop(admission_deadline) {
+                    completed_reply = Some(finish_waiting_without_run(
+                        registration,
+                        peer,
+                        store,
+                        &wait,
+                        &id,
+                        effect,
+                        ending,
+                        stop.reason(),
+                        "request ended during judgement; nothing was run",
+                        started,
+                        command_deadline,
+                    )?);
+                    drop(lease);
+                    return Ok(String::new());
+                }
+                if result.verdict != "allow" || result.status != "verdict" {
+                    let reason = if result.verdict == "refuse" {
+                        "door-rubric-refusal"
+                    } else {
+                        "door-workspace-referred"
+                    };
+                    completed_reply = Some(finish_waiting_without_run(
+                        registration,
+                        peer,
+                        store,
+                        &wait,
+                        &id,
+                        effect,
+                        ending,
+                        reason,
+                        &result.reason,
+                        started,
+                        command_deadline,
+                    )?);
+                    drop(lease);
+                    return Ok(String::new());
+                }
+                let clock: &dyn AdmissionClock = &RealAdmissionClock;
+                let (retaken, waited) = RequestGuard::acquire_controlled(
+                    home,
+                    registration,
+                    socket_request,
+                    admission_operation,
+                    started,
+                    clock,
+                    Some((&wait, admission_deadline)),
+                )
+                .map_err(|error| LaneError::input("door-request-refusal", error.to_string()))?;
+                let Some(guard) = retaken else {
+                    completed_reply = Some(finish_waiting_without_run(
+                        registration,
+                        peer,
+                        store,
+                        &wait,
+                        &id,
+                        effect,
+                        ending,
+                        "door-request-concurrent",
+                        &format!("admission did not return after {waited:?}; nothing was run"),
+                        started,
+                        command_deadline,
+                    )?);
+                    drop(lease);
+                    return Ok(String::new());
+                };
+                request_guard = Some(guard);
+                let fresh = workspace_request(
+                    context.runs,
+                    registration,
+                    context.owner,
+                    route.authenticated_node().name(),
+                    context.wire,
+                )?;
+                let _tables =
+                    workspace_tables::read(context.config_directory, context.owner, &fresh)?;
+                if let Some(stop) = wait.stop(admission_deadline) {
+                    completed_reply = Some(finish_waiting_without_run(
+                        registration,
+                        peer,
+                        store,
+                        &wait,
+                        &id,
+                        effect,
+                        ending,
+                        stop.reason(),
+                        "request ended before claim; nothing was run",
+                        started,
+                        command_deadline,
+                    )?);
+                    drop(lease);
+                    return Ok(String::new());
+                }
+                let allowance = match WorkspaceAllowance::from_judgement_record(store, &id, &fresh)
+                {
+                    Ok(allowance) => allowance,
+                    Err(error) => {
+                        completed_reply = Some(finish_waiting_without_run(
+                            registration,
+                            peer,
+                            store,
+                            &wait,
+                            &id,
+                            effect,
+                            ending,
+                            "door-request-refusal",
+                            &error.detail,
+                            started,
+                            command_deadline,
+                        )?);
+                        drop(lease);
+                        return Ok(String::new());
+                    }
+                };
+                let claimed = match claim_workspace_under_admission(
+                    store,
+                    &lease,
+                    request_guard.as_ref().ok_or_else(|| {
+                        LaneError::input("door-request-refusal", "admission guard was lost")
+                    })?,
+                    &fresh,
+                ) {
+                    Ok(claimed) => claimed,
+                    Err(error) => {
+                        completed_reply = Some(finish_waiting_without_run(
+                            registration,
+                            peer,
+                            store,
+                            &wait,
+                            &id,
+                            effect,
+                            ending,
+                            "door-request-refusal",
+                            &error.detail,
+                            started,
+                            command_deadline,
+                        )?);
+                        drop(lease);
+                        return Ok(String::new());
+                    }
+                };
+                completed_reply = Some(run_claimed_workspace(
+                    stream,
+                    registration,
+                    peer,
+                    &fresh,
+                    route,
+                    workspace_adapter::WorkspaceAdmission::Allowance(&allowance),
+                    store,
+                    &wait,
+                    &id,
+                    claimed.value()["effect"].clone(),
+                    ending,
+                    started,
+                    admission_deadline,
+                    &context,
+                    mode,
+                    true,
+                )?);
+                drop(lease);
+                return Ok(String::new());
+            }
             if matches!(
                 disposition,
                 execute_command::workspace::Disposition::Immediate
@@ -3359,6 +3706,7 @@ fn serve_request_with_agent_at_context(
                                 admission_deadline,
                                 &context,
                                 mode,
+                                false,
                             );
                             drop(request_guard.take());
                             if run.is_ok()
@@ -3436,6 +3784,7 @@ fn serve_request_with_agent_at_context(
                         admission_deadline,
                         &context,
                         mode,
+                        false,
                     )?);
                     drop(lease);
                     return Ok(String::new());
@@ -6060,7 +6409,7 @@ mod tests {
             io::sink(),
             io::sink(),
         )
-        .expect("miss refusal");
+        .expect("miss referral");
         let blocked = super::transport::stub_call_stream(
             &socket,
             &[
@@ -6157,11 +6506,15 @@ mod tests {
                 .is_some_and(|text| { text.contains("fixture effect write failure") })
         );
         assert_eq!(stderr, b"");
-        assert_eq!(missed["reason"], "door-workspace-protocol-refusal");
-        assert!(missed["request_record_error"].as_str().is_some_and(|text| {
-            text.contains("without an exact rule") && text.contains("nothing was run")
-        }));
+        assert_eq!(missed["reason"], "door-workspace-referred");
+        assert_eq!(missed["status"], 125);
+        assert_eq!(missed["request_record_error"], "door-agent-unconfigured");
         assert!(
+            missed["request_id"]
+                .as_str()
+                .is_some_and(|id| !id.is_empty())
+        );
+        assert_eq!(
             super::final_line(
                 &[
                     OsString::from("fixture-node"),
@@ -6169,9 +6522,8 @@ mod tests {
                 ],
                 &missed
             )
-            .is_some_and(
-                |line| line.contains("without an exact rule") && line.contains("nothing was run")
-            )
+            .as_deref(),
+            Some("door-workspace-referred: door-agent-unconfigured")
         );
         assert_eq!(blocked["reason"], "door-request-refusal");
         assert_eq!(foreign_peer["reason"], "door-caller-authority-refusal");
@@ -6195,7 +6547,31 @@ mod tests {
             )
         );
         let rows = fixture.store().list().expect("request rows").0;
-        assert_eq!(rows.len(), 5);
+        assert_eq!(rows.len(), 6);
+        let referred = rows
+            .iter()
+            .find(|row| Some(row.id()) == missed["request_id"].as_str())
+            .expect("filed miss");
+        assert_eq!(referred.value()["state"], "waiting");
+        assert_eq!(referred.value()["would_do_source"], "superloop");
+        assert_eq!(
+            referred.value()["would_do"]["reason"],
+            "workspace miss awaits judgement"
+        );
+        assert!(referred.value()["workspace_agent_input"].is_null());
+        assert_eq!(referred.value()["effect"]["state"], "refused");
+        assert_eq!(
+            referred.value()["effect"]["reason"],
+            "door-workspace-referred"
+        );
+        assert_eq!(
+            referred.value()["effect"]["ending"]["local_child"],
+            "not-started"
+        );
+        assert_eq!(
+            referred.value()["effect"]["ending"]["remote"]["state"],
+            "not-started"
+        );
         assert_eq!(
             rows.iter()
                 .filter(|row| row.value()["effect"]["state"] == "completed")
@@ -6230,7 +6606,7 @@ mod tests {
         );
         let refused = rows
             .iter()
-            .find(|row| row.value()["effect"]["state"] == "refused")
+            .find(|row| row.value()["effect"]["reason"] == "door-request-refusal")
             .expect("blacklist effect");
         assert_eq!(refused.value()["effect"]["reason"], "door-request-refusal");
         assert!(
@@ -6247,174 +6623,250 @@ mod tests {
         use execute_command::workspace::{Blacklist, QuickPolicy, canonical_digest};
         use std::fmt::Write as _;
 
-        struct Allows(Mutex<std::sync::mpsc::Receiver<()>>);
-        impl super::agent::AgentRunner for Allows {
-            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
-                self.0
-                    .lock()
-                    .expect("release lock")
-                    .recv_timeout(Duration::from_secs(120))
-                    .expect("test released the agent after the worker reply");
-                let mut answer = super::agent::RunnerOutcome::referral(
-                    "verdict",
-                    "fixture permits the miss",
-                    Instant::now(),
-                );
-                answer.verdict = "allow".into();
-                answer.scope = "loop".into();
-                answer
-            }
-        }
-
-        let fixture = Fixture::new();
-        fixture.set_floor("allow");
-        let store = fixture.store();
-        for target in [
-            crate::requests::modes::ModeTarget::Loop,
-            crate::requests::modes::ModeTarget::class("compute").expect("class"),
+        for (mode, agent_enabled) in [
+            (Mode::Allow, true),
+            (Mode::Enforce, true),
+            (Mode::Enforce, false),
         ] {
-            store
-                .set_mode(
-                    &target,
-                    Mode::Allow,
-                    "fixture owner",
-                    "fixture mode",
-                    "1",
-                    &[],
-                )
-                .expect("allow compute mode");
-        }
-        let node = crate::workspace_node::tests::Fixture::new();
-        let quick = QuickPolicy {
-            revision: "fixture-1".into(),
-            rules: vec![],
-        };
-        let blacklist = Blacklist {
-            revision: "fixture-1".into(),
-            entries: vec![],
-        };
-        let mut grant = node.grant.clone();
-        grant.quick_policy_digest = canonical_digest(&quick).expect("quick digest");
-        grant.blacklist_digest = canonical_digest(&blacklist).expect("blacklist digest");
-        let mut placement = node.placement.clone();
-        placement["grant_digest"] = json!(grant.digest().expect("grant digest"));
-        let reservation = json!({"schema":1,"phase":"started","loop":"alpha",
+            struct Allows {
+                release: Mutex<std::sync::mpsc::Receiver<()>>,
+                waiting_home: Option<std::path::PathBuf>,
+                registration: Registration,
+            }
+            impl super::agent::AgentRunner for Allows {
+                fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+                    if let Some(home) = &self.waiting_home {
+                        let git = super::RequestGuard::acquire_operation(
+                            home,
+                            &self.registration,
+                            Some(super::transport::Operation::GitUpload),
+                        )
+                        .expect("Git admission while workspace waits")
+                        .expect("Git is admitted");
+                        drop(git);
+                        let compute = super::RequestGuard::acquire_operation(
+                            home,
+                            &self.registration,
+                            Some(super::transport::Operation::Compute),
+                        )
+                        .expect("legacy compute admission while workspace waits")
+                        .expect("legacy compute is admitted");
+                        drop(compute);
+                    }
+                    self.release
+                        .lock()
+                        .expect("release lock")
+                        .recv_timeout(Duration::from_secs(120))
+                        .expect("test released the agent after the worker reply");
+                    let mut answer = super::agent::RunnerOutcome::referral(
+                        "verdict",
+                        "fixture permits the miss",
+                        Instant::now(),
+                    );
+                    answer.verdict = "allow".into();
+                    answer.scope = "loop".into();
+                    answer
+                }
+            }
+
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            for target in [
+                crate::requests::modes::ModeTarget::Loop,
+                crate::requests::modes::ModeTarget::class("compute").expect("class"),
+            ] {
+                store
+                    .set_mode(&target, mode, "fixture owner", "fixture mode", "1", &[])
+                    .expect("allow compute mode");
+            }
+            let node = crate::workspace_node::tests::Fixture::new();
+            let quick = QuickPolicy {
+                revision: "fixture-1".into(),
+                rules: vec![],
+            };
+            let blacklist = Blacklist {
+                revision: "fixture-1".into(),
+                entries: vec![],
+            };
+            let mut grant = node.grant.clone();
+            grant.quick_policy_digest = canonical_digest(&quick).expect("quick digest");
+            grant.blacklist_digest = canonical_digest(&blacklist).expect("blacklist digest");
+            let mut placement = node.placement.clone();
+            placement["grant_digest"] = json!(grant.digest().expect("grant digest"));
+            let reservation = json!({"schema":1,"phase":"started","loop":"alpha",
             "run":"R","worker_uid":3000,"door_scope":"work",
             "plan":{"loop":"alpha","run":"R",
                 "compute_workspace":{"digest":grant.digest().expect("grant digest"),
                     "grant":grant},"compute_placement":placement}});
-        crate::launch::publish_reservation(
-            &crate::launch::reservation_path(&fixture.home.join("runs"), "R"),
-            &reservation,
-        )
-        .expect("protected reservation");
-        let config = fixture.home.join(".config/loops/alpha");
-        for (name, value) in [
-            ("workspace-quick-policy.json", json!(quick)),
-            ("workspace-blacklist.json", json!(blacklist)),
-        ] {
-            let path = config.join(name);
-            fs::write(&path, serde_json::to_vec(&value).expect("policy JSON"))
-                .expect("policy file");
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("policy mode");
-        }
-        let settings = config.join("workers.toml");
-        let mut contents = fs::read_to_string(&settings).unwrap_or_default();
-        let _written = write!(
-            contents,
-            "\n[workspace_policy]\nquick_policy_digest = \"{}\"\nblacklist_digest = \"{}\"\n",
-            grant.quick_policy_digest, grant.blacklist_digest
-        );
-        fs::write(&settings, contents).expect("published policy digests");
-        fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).expect("settings mode");
-        let context = fixture.home.join("workspace-context.json");
-        fs::write(
-            &context,
-            serde_json::to_vec(&json!({"schema":1,"run":"R",
+            crate::launch::publish_reservation(
+                &crate::launch::reservation_path(&fixture.home.join("runs"), "R"),
+                &reservation,
+            )
+            .expect("protected reservation");
+            let config = fixture.home.join(".config/loops/alpha");
+            for (name, value) in [
+                ("workspace-quick-policy.json", json!(quick)),
+                ("workspace-blacklist.json", json!(blacklist)),
+            ] {
+                let path = config.join(name);
+                fs::write(&path, serde_json::to_vec(&value).expect("policy JSON"))
+                    .expect("policy file");
+                fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("policy mode");
+            }
+            let settings = config.join("workers.toml");
+            let mut contents = fs::read_to_string(&settings).unwrap_or_default();
+            let _written = write!(
+                contents,
+                "\n[workspace_policy]\nquick_policy_digest = \"{}\"\nblacklist_digest = \"{}\"\n",
+                grant.quick_policy_digest, grant.blacklist_digest
+            );
+            fs::write(&settings, contents).expect("published policy digests");
+            fs::set_permissions(&settings, fs::Permissions::from_mode(0o600))
+                .expect("settings mode");
+            let context = fixture.home.join("workspace-context.json");
+            fs::write(
+                &context,
+                serde_json::to_vec(&json!({"schema":1,"run":"R",
                 "worker_uid":nix::unistd::Uid::effective().as_raw(),
                 "node_alias":"fixture-node","grant_digest":grant.digest().expect("digest"),
                 "checkout":grant.workspace,"cwd":[],"shell":"/bin/sh"}))
-            .expect("context JSON"),
-        )
-        .expect("stub context");
-        let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join("allow-miss.sock"));
-        let listener = UnixListener::bind(&socket).expect("service socket");
-        let route = route_for(&fixture.home);
-        let (agent_release, agent_wait) = std::sync::mpsc::sync_channel(1);
-        let registration = Registration {
-            loop_name: "alpha".into(),
-            run: "R".into(),
-            worker_uid: 3000,
-            loop_uid: 41001,
-            scope: Scope::Work,
-            mirror_ref: "refs/heads/lane/R".into(),
-        };
-        let home = fixture.home.clone();
-        let server = thread::spawn(move || {
-            super::transport::WORKSPACE_FIXTURE_IDENTITY
-                .with(|slot| *slot.borrow_mut() = Some(node.identity));
-            let runs: std::os::fd::OwnedFd =
-                File::open(home.join("runs")).expect("held runs").into();
-            let config: std::os::fd::OwnedFd = File::open(home.join(".config/loops/alpha"))
-                .expect("held config")
-                .into();
-            let mut peer = FixtureServer::accept(&listener).expect("stub peer");
-            let allow_agent = Allows(Mutex::new(agent_wait));
-            let request = fixture_request(&mut peer).expect("stub request");
-            let wire = serde_json::to_vec(&request).expect("request wire");
-            let started = Instant::now();
-            super::serve_request_with_agent_at_context(
-                &mut peer,
-                &registration,
-                3000,
-                &request,
-                Some(&route),
-                Some(&route),
-                Some(home.as_path()),
-                None,
-                Some(&store),
-                Some(&allow_agent),
-                None,
-                started,
-                super::lifetime::Start::at(started).expect("lifetime"),
-                Some(super::WorkspaceSocketContext {
-                    runs: &runs,
-                    config_directory: &config,
-                    owner: nix::unistd::Uid::effective().as_raw(),
-                    wire: &wire,
-                    judgement_wait_ms: 30_000,
-                    deadline_ms: super::compute::DEADLINE_MS,
-                }),
+                .expect("context JSON"),
             )
-            .expect("workspace service")
-            .0
-        });
-        super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(context));
-        let mut stdout = Vec::new();
-        let reply = super::transport::stub_call_stream(
-            &socket,
-            &[
-                OsString::from("fixture-node"),
-                OsString::from("/usr/bin/printf other"),
-            ],
-            io::empty(),
-            &mut stdout,
-            io::sink(),
-        )
-        .expect("real stub call");
-        agent_release
-            .send(())
-            .expect("agent may finish after the worker reply");
-        super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
-        assert_eq!(server.join().expect("service thread"), reply);
-        assert_eq!(reply["reason"], "door-complete");
-        assert_eq!(stdout, b"other");
-        let rows = fixture.store().list_run("R").expect("request rows");
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].value()["effect"]["state"], "completed");
-        assert_eq!(rows[0].value()["state"], "waiting");
-        assert_eq!(rows[0].value()["agent_verdict"], "allow");
-        assert_eq!(rows[0].value()["would_do_source"], "agent");
+            .expect("stub context");
+            let socket =
+                crate::fixture_exec::fixture_socket_path(fixture.home.join("mode-miss.sock"));
+            let listener = UnixListener::bind(&socket).expect("service socket");
+            let route = route_for(&fixture.home);
+            let (agent_release, agent_wait) = std::sync::mpsc::sync_channel(1);
+            let registration = Registration {
+                loop_name: "alpha".into(),
+                run: "R".into(),
+                worker_uid: 3000,
+                loop_uid: 41001,
+                scope: Scope::Work,
+                mirror_ref: "refs/heads/lane/R".into(),
+            };
+            let home = fixture.home.clone();
+            let server = thread::spawn(move || {
+                super::transport::WORKSPACE_FIXTURE_IDENTITY
+                    .with(|slot| *slot.borrow_mut() = Some(node.identity));
+                let runs: std::os::fd::OwnedFd =
+                    File::open(home.join("runs")).expect("held runs").into();
+                let config: std::os::fd::OwnedFd = File::open(home.join(".config/loops/alpha"))
+                    .expect("held config")
+                    .into();
+                let mut peer = FixtureServer::accept(&listener).expect("stub peer");
+                let allow_agent = Allows {
+                    release: Mutex::new(agent_wait),
+                    waiting_home: (mode == Mode::Enforce).then(|| home.clone()),
+                    registration: registration.clone(),
+                };
+                let request = fixture_request(&mut peer).expect("stub request");
+                let wire = serde_json::to_vec(&request).expect("request wire");
+                let started = Instant::now();
+                super::serve_request_with_agent_at_context(
+                    &mut peer,
+                    &registration,
+                    3000,
+                    &request,
+                    Some(&route),
+                    Some(&route),
+                    Some(home.as_path()),
+                    None,
+                    Some(&store),
+                    agent_enabled.then_some(&allow_agent as &dyn super::agent::AgentRunner),
+                    None,
+                    started,
+                    super::lifetime::Start::at(started).expect("lifetime"),
+                    Some(super::WorkspaceSocketContext {
+                        runs: &runs,
+                        config_directory: &config,
+                        owner: nix::unistd::Uid::effective().as_raw(),
+                        wire: &wire,
+                        judgement_wait_ms: 30_000,
+                        deadline_ms: super::compute::DEADLINE_MS,
+                    }),
+                )
+                .expect("workspace service")
+                .0
+            });
+            super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(context));
+            let mut stdout = Vec::new();
+            let mut stderr = Vec::new();
+            if mode == Mode::Enforce && agent_enabled {
+                agent_release.send(()).expect("agent may decide the wait");
+            }
+            let reply = super::transport::stub_call_stream(
+                &socket,
+                &[
+                    OsString::from("fixture-node"),
+                    OsString::from("/usr/bin/printf other"),
+                ],
+                io::empty(),
+                &mut stdout,
+                &mut stderr,
+            )
+            .expect("real stub call");
+            if mode == Mode::Allow && agent_enabled {
+                agent_release
+                    .send(())
+                    .expect("agent may finish after the worker reply");
+            }
+            super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
+            assert_eq!(server.join().expect("service thread"), reply);
+            assert_eq!(
+                reply["reason"],
+                if agent_enabled {
+                    "door-complete"
+                } else {
+                    "door-workspace-referred"
+                },
+                "mode={mode:?} reply={reply}"
+            );
+            assert_eq!(
+                stdout,
+                if agent_enabled {
+                    b"other".as_slice()
+                } else {
+                    b"".as_slice()
+                }
+            );
+            if mode == Mode::Enforce {
+                assert!(
+                    String::from_utf8_lossy(&stderr).contains("door-waiting request_id="),
+                    "the worker sees the waiting request id: {stderr:?}"
+                );
+            }
+            let rows = fixture.store().list_run("R").expect("request rows");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(
+                rows[0].value()["effect"]["state"],
+                if agent_enabled {
+                    "completed"
+                } else {
+                    "refused"
+                }
+            );
+            assert_eq!(
+                rows[0].value()["state"],
+                if mode == Mode::Allow || !agent_enabled {
+                    "waiting"
+                } else {
+                    "observed"
+                }
+            );
+            assert_eq!(
+                rows[0].value()["would_do_source"],
+                if agent_enabled { "agent" } else { "superloop" }
+            );
+            if agent_enabled {
+                assert_eq!(rows[0].value()["agent_verdict"], "allow");
+            } else {
+                assert_eq!(rows[0].value()["would_do"]["decision"], "undecided");
+                assert!(rows[0].value()["workspace_agent_input"].is_null());
+            }
+        }
     }
 
     /// ´test:unit:unrecorded-ending-retains-observed-stop-cause´
