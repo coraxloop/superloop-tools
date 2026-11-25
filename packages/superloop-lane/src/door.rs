@@ -2765,6 +2765,212 @@ impl workspace_adapter::WorkspaceOutputSink for WorkspaceWorkerSink<'_> {
 }
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_claimed_workspace(
+    stream: &mut UnixStream,
+    registration: &Registration,
+    peer: u32,
+    request: &WorkspaceRequest,
+    route: &transport::HostRunner,
+    admission: workspace_adapter::WorkspaceAdmission<'_>,
+    store: &Store,
+    wait: &Arc<RequestWait>,
+    id: &str,
+    mut effect: Value,
+    ending: Value,
+    started: Instant,
+    admission_deadline: Instant,
+    context: &WorkspaceSocketContext<'_>,
+    mode: execute_command::policy::DoorMode,
+) -> Result<Value, LaneError> {
+    let ending_guard = RequestEnding {
+        store,
+        wait: wait.as_ref(),
+        id,
+    };
+    if let Some(stop) = wait.stop(admission_deadline) {
+        effect["reason"] = json!(stop.reason());
+        let mut stopped_ending = ending;
+        stopped_ending["cause"] = json!(stop.name());
+        stopped_ending["wall_clock"] = json!("monotonic-awake");
+        stopped_ending["local_child"] = json!("not-started");
+        stopped_ending["remote"]["state"] = json!("not-started");
+        effect["ending"] = stopped_ending.clone();
+        wait.remember_effect(effect.clone());
+        let finished = store.finish_request(id, Some(effect), &stopped_ending);
+        finished?;
+        return Err(LaneError::input(
+            stop.reason(),
+            "request ended before the executor call; nothing was run",
+        ));
+    }
+    let (deadline, announcement) = workspace_deadline_announcement(
+        started,
+        request.envelope().deadline_ms,
+        context.deadline_ms,
+        context.judgement_wait_ms,
+    );
+    let announced = frame_write_until(stream, &announcement, admission_deadline);
+    if let Err(error) = announced {
+        let mut failed_ending = ending;
+        failed_ending["cause"] = json!("transport");
+        failed_ending["wall_clock"] = json!("monotonic-awake");
+        failed_ending["local_child"] = json!("not-started");
+        failed_ending["remote"]["state"] = json!("not-started");
+        effect["ending"] = failed_ending.clone();
+        wait.remember_effect(effect.clone());
+        let finished = store.finish_request(id, Some(effect), &failed_ending);
+        finished?;
+        return Err(LaneError::input(
+            "door-workspace-protocol-refusal",
+            error.to_string(),
+        ));
+    }
+    let stop_flag = Arc::new(AtomicBool::new(false));
+    let done = Arc::new(AtomicBool::new(false));
+    let watched_wait = Arc::clone(wait);
+    let watched_flag = Arc::clone(&stop_flag);
+    let watched_done = Arc::clone(&done);
+    let watcher = thread::spawn(move || {
+        while !watched_done.load(Ordering::Acquire) {
+            if watched_wait.stop(deadline).is_some() {
+                watched_flag.store(true, Ordering::Release);
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    });
+    let mut sink = WorkspaceWorkerSink {
+        wait,
+        stdout: 0,
+        stderr: 0,
+    };
+    let result = route.run_workspace(
+        request,
+        admission,
+        id,
+        &mut sink,
+        workspace_adapter::WorkspaceStop {
+            flag: &stop_flag,
+            cause: "worker-disconnected",
+            selected: Some(&wait.cause),
+        },
+        deadline + Duration::from_secs(245),
+    );
+    done.store(true, Ordering::Release);
+    let _joined = watcher.join();
+    let mut reply = transport::refusal(registration, peer, "door-workspace-unknown", started);
+    reply["schema"] = json!(3);
+    reply["stdout_bytes"] = json!(sink.stdout);
+    reply["stderr_bytes"] = json!(sink.stderr);
+    if let Ok(result) = &result {
+        let evidence = result.evidence();
+        let status = result
+            .command_status()
+            .unwrap_or_else(|| match &result.result.outcome {
+                execute_command::workspace::Outcome::Exited { code } => *code,
+                execute_command::workspace::Outcome::Signalled { signal } => {
+                    i32::try_from(*signal).unwrap_or(0).saturating_add(128)
+                }
+                execute_command::workspace::Outcome::TimedOut => 124,
+                execute_command::workspace::Outcome::Unknown => 125,
+            });
+        let reason = match result.ending {
+            workspace_adapter::Ending::Complete => "door-complete",
+            workspace_adapter::Ending::NodeDeadline => wait
+                .cause
+                .get()
+                .filter(|cause| *cause == lifetime::Cause::Deadline)
+                .map_or("door-complete", lifetime::Cause::reason),
+            workspace_adapter::Ending::OutputIncomplete => "door-workspace-incomplete",
+            workspace_adapter::Ending::OutputLimit => "door-output-limit-refusal",
+            workspace_adapter::Ending::NothingRan(_) => "door-workspace-not-started",
+            workspace_adapter::Ending::Incomplete => wait
+                .cause
+                .get()
+                .map_or("door-workspace-unknown", lifetime::Cause::reason),
+            workspace_adapter::Ending::Interrupted(_) => wait
+                .cause
+                .get()
+                .map_or("door-disconnect-refusal", lifetime::Cause::reason),
+        };
+        reply["reason"] = json!(reason);
+        if reason == "door-request-deadline" {
+            reply["registered_deadline_ms"] = announcement["registered_deadline_ms"].clone();
+            reply["request_deadline_ms"] = announcement["request_deadline_ms"].clone();
+        }
+        reply["status"] = json!(status);
+        reply["compute_exit_status"] = json!(status);
+        effect["state"] = evidence["ending"].clone();
+        effect["reason"] = json!(reason);
+        effect["exit_status"] = match &result.result.outcome {
+            execute_command::workspace::Outcome::Exited { code } => json!(code),
+            _ => result
+                .command_status()
+                .map_or(Value::Null, |status| json!(status)),
+        };
+        effect["ref_check"] = json!("not-applicable");
+        effect["stdout_bytes"] = json!(sink.stdout);
+        effect["stderr_bytes"] = json!(sink.stderr);
+        effect["mediation_wall_seconds"] = json!(started.elapsed().as_secs_f64());
+        effect["compute_wall_seconds"] = json!(result.result.wall_seconds);
+        effect["workspace"]["result"] = json!(result.result);
+        effect["workspace"]["steps"] = json!(result.steps);
+        effect["workspace_node"] = evidence;
+    } else if let Err(error) = &result {
+        reply["request_record_error"] = json!(error.line());
+        effect["state"] = json!("unknown");
+        effect["reason"] = json!("door-workspace-unknown");
+        effect["ref_check"] = json!("not-applicable");
+        effect["stdout_bytes"] = json!(sink.stdout);
+        effect["stderr_bytes"] = json!(sink.stderr);
+        effect["mediation_wall_seconds"] = json!(started.elapsed().as_secs_f64());
+        effect["workspace_node"] = json!({
+            "node_reason":"unobserved","entry_version":"unobserved",
+            "entry_version_differs":false,"output_incomplete":true,
+            "child_started":null,"start_failure":null,
+            "output_bytes":sink.stdout + sink.stderr,
+            "result":effect["workspace"]["result"],"steps":[],
+            "ending":"unknown","cause":"route-incomplete","door_cause":null
+        });
+        if let Some(stop) = wait.cause.get().filter(|cause| {
+            matches!(
+                cause,
+                lifetime::Cause::Deadline
+                    | lifetime::Cause::Disconnect
+                    | lifetime::Cause::ObservationFailure
+            )
+        }) {
+            reply["reason"] = json!(stop.reason());
+            effect["reason"] = json!(stop.reason());
+            effect["workspace_node"]["door_cause"] = json!(stop.name());
+            if stop == lifetime::Cause::Deadline {
+                reply["registered_deadline_ms"] = announcement["registered_deadline_ms"].clone();
+                reply["request_deadline_ms"] = announcement["request_deadline_ms"].clone();
+            }
+        }
+    }
+    wait.cause.select(lifetime::Cause::for_reply(
+        reply["reason"].as_str().unwrap_or_default(),
+    ));
+    effect["ending"] = wait.ending_snapshot();
+    wait.remember_effect(effect.clone());
+    let recorded = store.record_effect(id, effect);
+    if let Err(error) = recorded {
+        reply["request_record_error"] = json!(error.line());
+        post_reply_event(id, "terminal-record", error.kind);
+    } else if mode.as_str() == "enforce"
+        && let Err(error) = store.publish_observed(id)
+    {
+        reply["request_record_error"] = json!(error.line());
+    }
+    wait.report(&mut reply);
+    let sent = wait.write_final(&reply, deadline + Duration::from_secs(245));
+    sent.map_err(|error| LaneError::input("door-workspace-protocol-refusal", error.to_string()))?;
+    drop(ending_guard);
+    Ok(reply)
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn serve_request_with_agent_at_context(
     stream: &mut UnixStream,
     registration: &Registration,
@@ -3036,203 +3242,23 @@ fn serve_request_with_agent_at_context(
                         ));
                     }
                     let lease = store.file_active_workspace_claim(record, &request)?;
-                    let ending_guard = RequestEnding {
-                        store,
-                        wait: &wait,
-                        id: &id,
-                    };
-                    if let Some(stop) = wait.stop(admission_deadline) {
-                        effect["reason"] = json!(stop.reason());
-                        let mut stopped_ending = ending;
-                        stopped_ending["cause"] = json!(stop.name());
-                        stopped_ending["wall_clock"] = json!("monotonic-awake");
-                        stopped_ending["local_child"] = json!("not-started");
-                        stopped_ending["remote"]["state"] = json!("not-started");
-                        effect["ending"] = stopped_ending.clone();
-                        wait.remember_effect(effect.clone());
-                        let finished = store.finish_request(&id, Some(effect), &stopped_ending);
-                        finished?;
-                        return Err(LaneError::input(
-                            stop.reason(),
-                            "request ended before the executor call; nothing was run",
-                        ));
-                    }
-                    let (deadline, announcement) = workspace_deadline_announcement(
-                        started,
-                        request.envelope().deadline_ms,
-                        context.deadline_ms,
-                        context.judgement_wait_ms,
-                    );
-                    let announced = frame_write_until(stream, &announcement, admission_deadline);
-                    if let Err(error) = announced {
-                        let mut failed_ending = ending;
-                        failed_ending["cause"] = json!("transport");
-                        failed_ending["wall_clock"] = json!("monotonic-awake");
-                        failed_ending["local_child"] = json!("not-started");
-                        failed_ending["remote"]["state"] = json!("not-started");
-                        effect["ending"] = failed_ending.clone();
-                        wait.remember_effect(effect.clone());
-                        let finished = store.finish_request(&id, Some(effect), &failed_ending);
-                        finished?;
-                        return Err(LaneError::input(
-                            "door-workspace-protocol-refusal",
-                            error.to_string(),
-                        ));
-                    }
-                    let stop_flag = Arc::new(AtomicBool::new(false));
-                    let done = Arc::new(AtomicBool::new(false));
-                    let watched_wait = Arc::clone(&wait);
-                    let watched_flag = Arc::clone(&stop_flag);
-                    let watched_done = Arc::clone(&done);
-                    let watcher = thread::spawn(move || {
-                        while !watched_done.load(Ordering::Acquire) {
-                            if watched_wait.stop(deadline).is_some() {
-                                watched_flag.store(true, Ordering::Release);
-                                break;
-                            }
-                            thread::sleep(Duration::from_millis(20));
-                        }
-                    });
-                    let mut sink = WorkspaceWorkerSink {
-                        wait: &wait,
-                        stdout: 0,
-                        stderr: 0,
-                    };
-                    let result = route.run_workspace(
+                    completed_reply = Some(run_claimed_workspace(
+                        stream,
+                        registration,
+                        peer,
                         &request,
+                        route,
                         admission,
+                        store,
+                        &wait,
                         &id,
-                        &mut sink,
-                        workspace_adapter::WorkspaceStop {
-                            flag: &stop_flag,
-                            cause: "worker-disconnected",
-                            selected: Some(&wait.cause),
-                        },
-                        deadline + Duration::from_secs(245),
-                    );
-                    done.store(true, Ordering::Release);
-                    let _joined = watcher.join();
-                    let mut reply =
-                        transport::refusal(registration, peer, "door-workspace-unknown", started);
-                    reply["schema"] = json!(3);
-                    reply["stdout_bytes"] = json!(sink.stdout);
-                    reply["stderr_bytes"] = json!(sink.stderr);
-                    if let Ok(result) = &result {
-                        let evidence = result.evidence();
-                        let status = result.command_status().unwrap_or_else(|| {
-                            match &result.result.outcome {
-                                execute_command::workspace::Outcome::Exited { code } => *code,
-                                execute_command::workspace::Outcome::Signalled { signal } => {
-                                    i32::try_from(*signal).unwrap_or(0).saturating_add(128)
-                                }
-                                execute_command::workspace::Outcome::TimedOut => 124,
-                                execute_command::workspace::Outcome::Unknown => 125,
-                            }
-                        });
-                        let reason = match result.ending {
-                            workspace_adapter::Ending::Complete => "door-complete",
-                            workspace_adapter::Ending::NodeDeadline => wait
-                                .cause
-                                .get()
-                                .filter(|cause| *cause == lifetime::Cause::Deadline)
-                                .map_or("door-complete", lifetime::Cause::reason),
-                            workspace_adapter::Ending::OutputIncomplete => {
-                                "door-workspace-incomplete"
-                            }
-                            workspace_adapter::Ending::OutputLimit => "door-output-limit-refusal",
-                            workspace_adapter::Ending::NothingRan(_) => {
-                                "door-workspace-not-started"
-                            }
-                            workspace_adapter::Ending::Incomplete => wait
-                                .cause
-                                .get()
-                                .map_or("door-workspace-unknown", lifetime::Cause::reason),
-                            workspace_adapter::Ending::Interrupted(_) => wait
-                                .cause
-                                .get()
-                                .map_or("door-disconnect-refusal", lifetime::Cause::reason),
-                        };
-                        reply["reason"] = json!(reason);
-                        if reason == "door-request-deadline" {
-                            reply["registered_deadline_ms"] =
-                                announcement["registered_deadline_ms"].clone();
-                            reply["request_deadline_ms"] =
-                                announcement["request_deadline_ms"].clone();
-                        }
-                        reply["status"] = json!(status);
-                        reply["compute_exit_status"] = json!(status);
-                        effect["state"] = evidence["ending"].clone();
-                        effect["reason"] = json!(reason);
-                        effect["exit_status"] = match &result.result.outcome {
-                            execute_command::workspace::Outcome::Exited { code } => json!(code),
-                            _ => result
-                                .command_status()
-                                .map_or(Value::Null, |status| json!(status)),
-                        };
-                        effect["ref_check"] = json!("not-applicable");
-                        effect["stdout_bytes"] = json!(sink.stdout);
-                        effect["stderr_bytes"] = json!(sink.stderr);
-                        effect["mediation_wall_seconds"] = json!(started.elapsed().as_secs_f64());
-                        effect["compute_wall_seconds"] = json!(result.result.wall_seconds);
-                        effect["workspace"]["result"] = json!(result.result);
-                        effect["workspace"]["steps"] = json!(result.steps);
-                        effect["workspace_node"] = evidence;
-                    } else if let Err(error) = &result {
-                        reply["request_record_error"] = json!(error.line());
-                        effect["state"] = json!("unknown");
-                        effect["reason"] = json!("door-workspace-unknown");
-                        effect["ref_check"] = json!("not-applicable");
-                        effect["stdout_bytes"] = json!(sink.stdout);
-                        effect["stderr_bytes"] = json!(sink.stderr);
-                        effect["mediation_wall_seconds"] = json!(started.elapsed().as_secs_f64());
-                        effect["workspace_node"] = json!({
-                            "node_reason":"unobserved","entry_version":"unobserved",
-                            "entry_version_differs":false,"output_incomplete":true,
-                            "child_started":null,"start_failure":null,
-                            "output_bytes":sink.stdout + sink.stderr,
-                            "result":effect["workspace"]["result"],"steps":[],
-                            "ending":"unknown","cause":"route-incomplete","door_cause":null
-                        });
-                        if let Some(stop) = wait.cause.get().filter(|cause| {
-                            matches!(
-                                cause,
-                                lifetime::Cause::Deadline
-                                    | lifetime::Cause::Disconnect
-                                    | lifetime::Cause::ObservationFailure
-                            )
-                        }) {
-                            reply["reason"] = json!(stop.reason());
-                            effect["reason"] = json!(stop.reason());
-                            effect["workspace_node"]["door_cause"] = json!(stop.name());
-                            if stop == lifetime::Cause::Deadline {
-                                reply["registered_deadline_ms"] =
-                                    announcement["registered_deadline_ms"].clone();
-                                reply["request_deadline_ms"] =
-                                    announcement["request_deadline_ms"].clone();
-                            }
-                        }
-                    }
-                    wait.cause.select(lifetime::Cause::for_reply(
-                        reply["reason"].as_str().unwrap_or_default(),
-                    ));
-                    effect["ending"] = wait.ending_snapshot();
-                    wait.remember_effect(effect.clone());
-                    let recorded = store.record_effect(&id, effect);
-                    if let Err(error) = recorded {
-                        reply["request_record_error"] = json!(error.line());
-                        post_reply_event(&id, "terminal-record", error.kind);
-                    } else if mode.as_str() == "enforce"
-                        && let Err(error) = store.publish_observed(&id)
-                    {
-                        reply["request_record_error"] = json!(error.line());
-                    }
-                    wait.report(&mut reply);
-                    let sent = wait.write_final(&reply, deadline + Duration::from_secs(245));
-                    sent.map_err(|error| {
-                        LaneError::input("door-workspace-protocol-refusal", error.to_string())
-                    })?;
-                    completed_reply = Some(reply);
-                    drop(ending_guard);
+                        effect,
+                        ending,
+                        started,
+                        admission_deadline,
+                        &context,
+                        mode,
+                    )?);
                     drop(lease);
                     return Ok(String::new());
                 }
