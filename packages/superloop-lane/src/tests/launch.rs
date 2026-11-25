@@ -2358,6 +2358,8 @@ exit 2
         json!({"state":"bound-on-launch","transport":"rights","purposes":["owner-home","runs-root","entry-executable","podman-executable","hash-executable","credential-client","credential-clock","configuration"]})
     );
     assert_eq!(preview["prepare_argv"]["directory_transfer_socket_fd"], 0);
+    assert_eq!(preview["prepare_argv"]["timeout_seconds"], 600);
+    assert_eq!(preview["setup_argv"]["timeout_seconds"], 600);
     assert_eq!(
         preview["prepare_argv"]["transferred_directory_descriptors"],
         json!([])

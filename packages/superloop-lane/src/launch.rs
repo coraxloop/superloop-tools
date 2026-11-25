@@ -29,6 +29,10 @@ use crate::plan::{Plan, protected_identifier_path, protected_identity_dir};
 use crate::settings::Settings;
 use crate::{load_plan, valid_run_name};
 
+// Fresh Podman preparation has no useful progress signal; this bounds a hang
+// without treating ordinary host-load delay as a failed launch.
+const PREPARATION_HANG_SECONDS: u64 = 600;
+
 /// Read the current host list for the backend bound into a protected plan.
 pub(crate) fn selected_vendor_hosts<'a>(
     settings: &'a Settings,
@@ -4360,7 +4364,7 @@ fn run_with_program(
             prepare_argv,
             &environment,
             owner_home,
-            60,
+            PREPARATION_HANG_SECONDS,
             "prepare-home",
             &verified_home,
             &root,
@@ -4372,7 +4376,7 @@ fn run_with_program(
             setup_argv,
             &environment,
             owner_home,
-            60,
+            PREPARATION_HANG_SECONDS,
             "prepare-runtime",
             &verified_home,
             &root,
@@ -4409,7 +4413,7 @@ fn run_with_program(
             prepare_argv,
             &environment,
             owner_home,
-            60,
+            PREPARATION_HANG_SECONDS,
             "prepare-home",
             &verified_home,
             &root,
@@ -4423,7 +4427,7 @@ fn run_with_program(
             prepare_argv,
             &environment,
             owner_home,
-            60,
+            PREPARATION_HANG_SECONDS,
             "prepare-home",
             &verified_home,
             &root,
@@ -4477,7 +4481,7 @@ fn run_with_program(
         setup_argv.clone(),
         &environment,
         owner_home,
-        60,
+        PREPARATION_HANG_SECONDS,
         "prepare-runtime",
         &verified_home,
         &root,
@@ -8676,7 +8680,7 @@ mod tests {
             vector,
             &BTreeMap::new(),
             fixture.path(),
-            60,
+            super::PREPARATION_HANG_SECONDS,
             "prepare-runtime",
             &held,
             fixture.path(),
@@ -8685,6 +8689,7 @@ mod tests {
         )
         .expect("preview without provisioned configuration");
         assert_eq!(preview["anchor_manifest"]["operation"], "prepare-runtime");
+        assert_eq!(preview["timeout_seconds"], super::PREPARATION_HANG_SECONDS);
         assert_eq!(
             preview["anchor_manifest"]["purposes"]
                 .as_array()
