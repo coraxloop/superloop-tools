@@ -2758,6 +2758,34 @@ fn workspace_deadline_announcement(
     (deadline, frame)
 }
 
+struct WorkspaceWaitedBounds {
+    command: Instant,
+    route: Instant,
+    final_frame: Instant,
+}
+
+fn workspace_waited_bounds(
+    request_started: Instant,
+    command_started: Instant,
+    requested_ms: u64,
+    registered_ms: u64,
+    judgement_wait_ms: u64,
+) -> WorkspaceWaitedBounds {
+    let bound = Duration::from_millis(requested_ms.min(registered_ms));
+    let window_end = request_started + bound + Duration::from_millis(judgement_wait_ms);
+    // The adapter may wait five seconds for a terminal after stop. The stub
+    // keeps its separate final-frame margin after this window.
+    WorkspaceWaitedBounds {
+        command: (command_started + bound).min(
+            window_end
+                .checked_sub(workspace_adapter::STOP_TERMINAL_BOUND)
+                .unwrap_or(request_started),
+        ),
+        route: window_end,
+        final_frame: window_end + Duration::from_secs(2),
+    }
+}
+
 struct WorkspaceWorkerSink<'a> {
     wait: &'a RequestWait,
     stdout: usize,
@@ -2833,7 +2861,31 @@ fn run_claimed_workspace(
         wait: wait.as_ref(),
         id,
     };
-    if let Some(stop) = wait.stop(admission_deadline) {
+    let command_started = if announcement_sent {
+        Instant::now()
+    } else {
+        started
+    };
+    let (ordinary_deadline, announcement) = workspace_deadline_announcement(
+        command_started,
+        request.envelope().deadline_ms,
+        context.deadline_ms,
+        context.judgement_wait_ms,
+    );
+    let (deadline, route_lifetime, final_deadline) = if announcement_sent {
+        let bounds = workspace_waited_bounds(
+            started,
+            command_started,
+            request.envelope().deadline_ms,
+            context.deadline_ms,
+            context.judgement_wait_ms,
+        );
+        (bounds.command, bounds.route, bounds.final_frame)
+    } else {
+        let lifetime = ordinary_deadline + Duration::from_secs(245);
+        (ordinary_deadline, lifetime, lifetime)
+    };
+    if let Some(stop) = wait.stop(admission_deadline.min(deadline)) {
         effect["reason"] = json!(stop.reason());
         let mut stopped_ending = ending;
         stopped_ending["cause"] = json!(stop.name());
@@ -2849,17 +2901,6 @@ fn run_claimed_workspace(
             "request ended before the executor call; nothing was run",
         ));
     }
-    let command_started = if announcement_sent {
-        Instant::now()
-    } else {
-        started
-    };
-    let (deadline, announcement) = workspace_deadline_announcement(
-        command_started,
-        request.envelope().deadline_ms,
-        context.deadline_ms,
-        context.judgement_wait_ms,
-    );
     let announced = if announcement_sent {
         Ok(())
     } else {
@@ -2910,7 +2951,7 @@ fn run_claimed_workspace(
             cause: "worker-disconnected",
             selected: Some(&wait.cause),
         },
-        deadline + Duration::from_secs(245),
+        route_lifetime,
     );
     done.store(true, Ordering::Release);
     let _joined = watcher.join();
@@ -3020,7 +3061,7 @@ fn run_claimed_workspace(
         reply["request_record_error"] = json!(error.line());
     }
     wait.report(&mut reply);
-    let sent = wait.write_final(&reply, deadline + Duration::from_secs(245));
+    let sent = wait.write_final(&reply, final_deadline);
     sent.map_err(|error| LaneError::input("door-workspace-protocol-refusal", error.to_string()))?;
     drop(ending_guard);
     Ok(reply)
@@ -3851,13 +3892,16 @@ fn serve_request_with_agent_at_context(
                     ),
                 ));
             }
-            Ok("this door does not serve this workspace disposition; nothing was run".into())
+            Err(LaneError::input(
+                "door-workspace-context-differs",
+                "workspace disposition was not handled; nothing was run",
+            ))
         })();
         if let Some(reply) = completed_reply {
             return Ok((reply, Vec::new()));
         }
         let (reason, detail) = match answer {
-            Ok(detail) => ("door-workspace-protocol-refusal", detail),
+            Ok(detail) => ("door-workspace-context-differs", detail),
             Err(error) => (error.kind, error.detail),
         };
         let mut reply = transport::refusal(registration, peer, reason, started);
@@ -6205,6 +6249,61 @@ mod tests {
             frame["remaining_ms"]
                 .as_u64()
                 .is_some_and(|ms| ms <= registered)
+        );
+    }
+
+    /// ´test:unit:door-workspace-waited-run-ends-inside-announced-window´
+    #[test]
+    fn door_workspace_waited_run_ends_inside_announced_window() {
+        let request_started = Instant::now();
+        let command_started = request_started + Duration::from_secs(50);
+        let requested = 60_000;
+        let registered = 120_000;
+        let judgement = 45_000;
+        let ordinary = command_started + Duration::from_millis(requested);
+        let bounds = super::workspace_waited_bounds(
+            request_started,
+            command_started,
+            requested,
+            registered,
+            judgement,
+        );
+        assert!(
+            bounds.command < ordinary,
+            "retaken admission consumed the window"
+        );
+        assert_eq!(bounds.command, request_started + Duration::from_secs(100));
+        assert_eq!(
+            bounds.route,
+            bounds.command + super::workspace_adapter::STOP_TERMINAL_BOUND,
+            "the node's stop interval stays inside the announced window"
+        );
+        assert_eq!(bounds.final_frame, bounds.route + Duration::from_secs(2));
+        let (_peer, door) = UnixStream::pair().expect("fixture peer");
+        let (start, clock) = super::lifetime::Start::controlled(request_started);
+        let wait = super::RequestWait::new(&door)
+            .expect("wait")
+            .with_lifetime(start, true, &door)
+            .expect("lifetime");
+        clock.advance(100_000);
+        assert_eq!(
+            wait.stop(bounds.command)
+                .map(super::lifetime::Cause::reason),
+            Some("door-request-deadline"),
+            "the retaken run ends under the door's cause inside the announced window"
+        );
+        let late_retake = request_started + Duration::from_secs(101);
+        assert!(
+            super::workspace_waited_bounds(
+                request_started,
+                late_retake,
+                requested,
+                registered,
+                judgement,
+            )
+            .command
+                < late_retake,
+            "a spent window must stop before the executor call"
         );
     }
 
