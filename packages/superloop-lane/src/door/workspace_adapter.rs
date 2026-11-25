@@ -447,6 +447,15 @@ const FINAL_BOUND: Duration = Duration::from_secs(5);
 pub(super) struct WorkspaceStop<'a> {
     pub(crate) flag: &'a AtomicBool,
     pub(crate) cause: &'static str,
+    pub(crate) selected: Option<&'a super::lifetime::FirstCause>,
+}
+
+impl WorkspaceStop<'_> {
+    fn cause(self) -> &'static str {
+        self.selected
+            .and_then(super::lifetime::FirstCause::get)
+            .map_or(self.cause, super::lifetime::Cause::name)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -843,7 +852,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
             child_started: None,
             start_failure: None,
             build,
-            door_cause: sent_stop.then_some(stop.cause),
+            door_cause: sent_stop.then_some(stop.cause()),
         });
     };
     let mut result = WorkspaceResult::from_terminal(call, terminal, build)?;
@@ -854,7 +863,7 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
         ));
     }
     if sent_stop {
-        result.door_cause = Some(stop.cause);
+        result.door_cause = Some(stop.cause());
     }
     Ok(result)
 }
@@ -979,6 +988,7 @@ pub(super) mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(5),
@@ -1137,6 +1147,7 @@ pub(super) mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(15),
@@ -1198,6 +1209,7 @@ pub(super) mod tests {
             WorkspaceStop {
                 flag: &stop,
                 cause: "worker-disconnected",
+                selected: None,
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(15),
@@ -1288,6 +1300,7 @@ pub(super) mod tests {
             WorkspaceStop {
                 flag: &stop,
                 cause: "worker-disconnected",
+                selected: None,
             },
             DriverBounds {
                 lifetime: Instant::now() + Duration::from_secs(60),
@@ -1568,6 +1581,7 @@ pub(super) mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             Instant::now() + Duration::from_secs(5),
         )
@@ -1603,6 +1617,7 @@ pub(super) mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             Instant::now() + Duration::from_secs(5),
         )
@@ -1635,6 +1650,7 @@ pub(super) mod tests {
                 WorkspaceStop {
                     flag: &AtomicBool::new(false),
                     cause: "fixture-stop",
+                    selected: None,
                 },
                 DriverBounds {
                     lifetime: Instant::now() + Duration::from_secs(60),
@@ -1683,6 +1699,7 @@ pub(super) mod tests {
             WorkspaceStop {
                 flag: &AtomicBool::new(false),
                 cause: "fixture-stop",
+                selected: None,
             },
             Instant::now() + Duration::from_millis(100),
         )

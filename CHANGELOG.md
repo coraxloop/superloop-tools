@@ -14,6 +14,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Report a workspace command stopped by the door's own deadline as `door-request-deadline`, with its requested and registered bounds, and retain the selected cause beside node evidence even when the terminal frame was not observed.
+
 - Cancel a workspace command when the node entry's output reader fails, and close a failed pipe setup without waiting for the control route's silence bound (``proto:superlooplane:workspace-executor-call``). Compatibility: no wire or record shape changes; a reader error now ends the command and reports incomplete output, and the repaired node entry is reinstalled on each compute node with the next release.
 
 ## [0.11.0] - 2026-11-24

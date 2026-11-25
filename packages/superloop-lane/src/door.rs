@@ -3088,6 +3088,7 @@ fn serve_request_with_agent_at_context(
                         workspace_adapter::WorkspaceStop {
                             flag: &stop_flag,
                             cause: "worker-disconnected",
+                            selected: Some(&wait.cause),
                         },
                         deadline + Duration::from_secs(245),
                     );
@@ -3111,8 +3112,12 @@ fn serve_request_with_agent_at_context(
                             }
                         });
                         let reason = match result.ending {
-                            workspace_adapter::Ending::Complete
-                            | workspace_adapter::Ending::NodeDeadline => "door-complete",
+                            workspace_adapter::Ending::Complete => "door-complete",
+                            workspace_adapter::Ending::NodeDeadline => wait
+                                .cause
+                                .get()
+                                .filter(|cause| *cause == lifetime::Cause::Deadline)
+                                .map_or("door-complete", lifetime::Cause::reason),
                             workspace_adapter::Ending::OutputIncomplete => {
                                 "door-workspace-incomplete"
                             }
@@ -3120,10 +3125,22 @@ fn serve_request_with_agent_at_context(
                             workspace_adapter::Ending::NothingRan(_) => {
                                 "door-workspace-not-started"
                             }
-                            workspace_adapter::Ending::Incomplete => "door-workspace-unknown",
-                            workspace_adapter::Ending::Interrupted(_) => "door-disconnect-refusal",
+                            workspace_adapter::Ending::Incomplete => wait
+                                .cause
+                                .get()
+                                .map_or("door-workspace-unknown", lifetime::Cause::reason),
+                            workspace_adapter::Ending::Interrupted(_) => wait
+                                .cause
+                                .get()
+                                .map_or("door-disconnect-refusal", lifetime::Cause::reason),
                         };
                         reply["reason"] = json!(reason);
+                        if reason == "door-request-deadline" {
+                            reply["registered_deadline_ms"] =
+                                announcement["registered_deadline_ms"].clone();
+                            reply["request_deadline_ms"] =
+                                announcement["request_deadline_ms"].clone();
+                        }
                         reply["status"] = json!(status);
                         reply["compute_exit_status"] = json!(status);
                         effect["state"] = evidence["ending"].clone();
@@ -3158,6 +3175,24 @@ fn serve_request_with_agent_at_context(
                             "result":effect["workspace"]["result"],"steps":[],
                             "ending":"unknown","cause":"route-incomplete","door_cause":null
                         });
+                        if let Some(stop) = wait.cause.get().filter(|cause| {
+                            matches!(
+                                cause,
+                                lifetime::Cause::Deadline
+                                    | lifetime::Cause::Disconnect
+                                    | lifetime::Cause::ObservationFailure
+                            )
+                        }) {
+                            reply["reason"] = json!(stop.reason());
+                            effect["reason"] = json!(stop.reason());
+                            effect["workspace_node"]["door_cause"] = json!(stop.name());
+                            if stop == lifetime::Cause::Deadline {
+                                reply["registered_deadline_ms"] =
+                                    announcement["registered_deadline_ms"].clone();
+                                reply["request_deadline_ms"] =
+                                    announcement["request_deadline_ms"].clone();
+                            }
+                        }
                     }
                     wait.cause.select(lifetime::Cause::for_reply(
                         reply["reason"].as_str().unwrap_or_default(),
@@ -5559,6 +5594,26 @@ mod tests {
         };
         use std::fmt::Write as _;
 
+        struct AdvanceOnReady {
+            clock: std::sync::mpsc::Receiver<Arc<super::lifetime::TestClock>>,
+            bytes: Vec<u8>,
+            advanced: bool,
+        }
+        impl io::Write for AdvanceOnReady {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                self.bytes.extend_from_slice(bytes);
+                if !self.advanced && self.bytes.windows(5).any(|window| window == b"ready") {
+                    self.clock.recv().map_err(io::Error::other)?.advance(10_000);
+                    self.advanced = true;
+                }
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> io::Result<()> {
+                Ok(())
+            }
+        }
+
         let fixture = Fixture::new();
         fixture.set_floor("allow");
         let node = crate::workspace_node::tests::Fixture::new();
@@ -5567,14 +5622,30 @@ mod tests {
         };
         let quick = QuickPolicy {
             revision: "fixture-1".into(),
-            rules: vec![QuickRule {
-                id: "fixture-printf".into(),
-                execution,
-                path: "/usr/bin".into(),
-                programs: vec!["/usr/bin/printf".into()],
-                env_additions: Vec::new(),
-                workspace_operands: Vec::new(),
-            }],
+            rules: vec![
+                QuickRule {
+                    id: "fixture-printf".into(),
+                    execution,
+                    path: "/usr/bin".into(),
+                    programs: vec!["/usr/bin/printf".into()],
+                    env_additions: Vec::new(),
+                    workspace_operands: Vec::new(),
+                },
+                QuickRule {
+                    id: "fixture-running-shell".into(),
+                    execution: Execution::Argv {
+                        words: vec![
+                            b"/bin/sh".to_vec(),
+                            b"-c".to_vec(),
+                            b"printf ready; /usr/bin/sleep 60".to_vec(),
+                        ],
+                    },
+                    path: "/usr/bin".into(),
+                    programs: vec!["/bin/sh".into()],
+                    env_additions: Vec::new(),
+                    workspace_operands: Vec::new(),
+                },
+            ],
         };
         let blacklist = Blacklist {
             revision: "fixture-1".into(),
@@ -5659,6 +5730,7 @@ mod tests {
         };
         let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join("workspace.sock"));
         let listener = UnixListener::bind(&socket).expect("workspace service socket");
+        let (clock_tx, clock_rx) = std::sync::mpsc::sync_channel(1);
         let home = fixture.home.clone();
         let identity = node.identity;
         let server = thread::spawn(move || {
@@ -5670,7 +5742,7 @@ mod tests {
                 .expect("held config")
                 .into();
             let mut replies = Vec::new();
-            for ordinal in 0..6 {
+            for ordinal in 0..7 {
                 let mut peer = FixtureServer::accept(&listener).expect("stub peer");
                 let request = fixture_request(&mut peer).expect("stub request");
                 let wire = serde_json::to_vec(&request).expect("request wire");
@@ -5678,6 +5750,13 @@ mod tests {
                 if ordinal == 5 {
                     fixture_fault(Some(FixtureFault::EffectWrite));
                 }
+                let lifetime_start = if ordinal == 6 {
+                    let (start, clock) = super::lifetime::Start::controlled(started);
+                    clock_tx.send(clock).expect("deadline clock");
+                    start
+                } else {
+                    super::lifetime::Start::at(started).expect("lifetime")
+                };
                 let reply = super::serve_request_with_agent_at_context(
                     &mut peer,
                     &registration,
@@ -5691,7 +5770,7 @@ mod tests {
                     None,
                     None,
                     started,
-                    super::lifetime::Start::at(started).expect("lifetime"),
+                    lifetime_start,
                     Some(super::WorkspaceSocketContext {
                         runs: &runs,
                         config_directory: &config,
@@ -5783,6 +5862,29 @@ mod tests {
             io::sink(),
         )
         .expect("effect-write fault still returns command status");
+        let deadline_request = json!({"cwd":[],"env_additions":[],
+            "execution":Execution::Argv {
+                words:vec![b"/bin/sh".to_vec(),b"-c".to_vec(),
+                    b"printf ready; /usr/bin/sleep 60".to_vec()]},
+            "deadline_ms":10_000});
+        let mut deadline_output = AdvanceOnReady {
+            clock: clock_rx,
+            bytes: Vec::new(),
+            advanced: false,
+        };
+        let deadline = super::transport::stub_call_stream(
+            &socket,
+            &[
+                OsString::from("--workspace-json"),
+                OsString::from(deadline_request.to_string()),
+            ],
+            io::empty(),
+            &mut deadline_output,
+            io::sink(),
+        )
+        .expect("deadline reply");
+        assert_eq!(deadline_output.bytes, b"ready");
+        assert!(deadline_output.advanced);
         super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
         let server_replies = server.join().expect("service thread");
         assert_eq!(
@@ -5793,7 +5895,8 @@ mod tests {
                 missed.clone(),
                 blocked.clone(),
                 foreign_peer.clone(),
-                faulted.clone()
+                faulted.clone(),
+                deadline.clone()
             ]
         );
         assert_eq!(reply["reason"], "door-complete", "{reply}");
@@ -5804,6 +5907,17 @@ mod tests {
         assert_eq!(faulted_stdout, b"fixture-ok");
         assert_eq!(faulted["reason"], "door-complete");
         assert_eq!(faulted["status"], 0);
+        assert_eq!(deadline["reason"], "door-request-deadline", "{deadline}");
+        assert_eq!(
+            deadline["registered_deadline_ms"],
+            super::compute::DEADLINE_MS
+        );
+        assert_eq!(deadline["request_deadline_ms"], 10_000);
+        assert!(super::final_line(&[], &deadline).is_some_and(|line| {
+            line.contains("door-request-deadline")
+                && line.contains("registered_deadline_ms=1800000")
+                && line.contains("request_deadline_ms=10000")
+        }));
         assert!(
             faulted["request_record_error"]
                 .as_str()
@@ -5848,7 +5962,7 @@ mod tests {
             )
         );
         let rows = fixture.store().list().expect("request rows").0;
-        assert_eq!(rows.len(), 4);
+        assert_eq!(rows.len(), 5);
         assert_eq!(
             rows.iter()
                 .filter(|row| row.value()["effect"]["state"] == "completed")
@@ -5867,6 +5981,20 @@ mod tests {
                 grant.quick_policy_digest
             );
         }
+        let timed_out = rows
+            .iter()
+            .find(|row| row.value()["effect"]["reason"] == "door-request-deadline")
+            .expect("deadline effect");
+        assert_eq!(timed_out.value()["effect"]["state"], "interrupted");
+        assert_eq!(
+            timed_out.value()["effect"]["workspace_node"]["node_reason"],
+            "node-stopped"
+        );
+        assert_eq!(timed_out.value()["effect"]["ending"]["cause"], "deadline");
+        assert_eq!(
+            timed_out.value()["effect"]["workspace_node"]["door_cause"],
+            "deadline"
+        );
         let refused = rows
             .iter()
             .find(|row| row.value()["effect"]["state"] == "refused")
