@@ -30,6 +30,22 @@ pub use workspace::{
     WorkspaceAllowance, WorkspaceIntent, WorkspaceLearned, WorkspaceRequest, workspace_request,
 };
 
+/// Print the canonical digests of a loop's protected workspace policy bodies.
+///
+/// # Errors
+/// Refuses an invalid loop name, unsafe configuration directory or malformed table.
+pub fn workspace_digests(owner_home: &Path, loop_name: &str) -> Result<String, LaneError> {
+    loop_home::validate_name(loop_name)
+        .map_err(|error| LaneError::input("door-workspace-context-differs", error.message()))?;
+    let owner = nix::unistd::Uid::effective().as_raw();
+    let config = owner_home.join(".config/loops").join(loop_name);
+    let directory = crate::pinned::open_protected(owner_home, &config, owner)?;
+    let (quick, blacklist) = workspace_tables::digests(&directory, owner)?;
+    Ok(format!(
+        "[workspace_policy]\nquick_policy_digest = \"{quick}\"\nblacklist_digest = \"{blacklist}\""
+    ))
+}
+
 /// Format the final door reply for the SSH command boundary.
 #[must_use]
 pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Option<String> {
@@ -2687,14 +2703,15 @@ struct WorkspaceSocketContext<'a> {
     owner: u32,
     wire: &'a [u8],
     judgement_wait_ms: u64,
+    deadline_ms: u64,
 }
 
 fn workspace_deadline_announcement(
     started: Instant,
     requested_ms: u64,
+    registered_ms: u64,
     judgement_wait_ms: u64,
 ) -> (Instant, Value) {
-    let registered_ms = compute::DEADLINE_MS;
     let bound_ms = requested_ms.min(registered_ms);
     let deadline = started + Duration::from_millis(bound_ms);
     let frame = json!({"schema":3,"type":"compute-deadline",
@@ -3043,6 +3060,7 @@ fn serve_request_with_agent_at_context(
                     let (deadline, announcement) = workspace_deadline_announcement(
                         started,
                         request.envelope().deadline_ms,
+                        context.deadline_ms,
                         context.judgement_wait_ms,
                     );
                     let announced = frame_write_until(stream, &announcement, admission_deadline);
@@ -4316,6 +4334,7 @@ fn run_service_with_snapshot(
         .ok_or_else(|| LaneError::input("door-registration", "row uid is absent"))?;
     let compute_deadlines = Arc::new(config::compute_deadlines(&generation["agent"])?);
     let workspace_judgement_wait_ms = config::workspace_judgement_wait_ms(&generation["agent"])?;
+    let workspace_deadline_ms = config::workspace_deadline_ms(&generation["agent"])?;
     let agent_runner = Arc::new(config::runner(
         &generation["agent"],
         &owner_home,
@@ -4483,6 +4502,7 @@ fn run_service_with_snapshot(
                         owner,
                         wire: &request_wire,
                         judgement_wait_ms: workspace_judgement_wait_ms,
+                        deadline_ms: workspace_deadline_ms,
                     }),
                 )
                 .map(|_reply| ())
@@ -5569,7 +5589,8 @@ mod tests {
         let started = Instant::now();
         let requested = super::compute::MAX_DEADLINE_MS;
         let registered = super::compute::DEADLINE_MS;
-        let (deadline, frame) = super::workspace_deadline_announcement(started, requested, 45_000);
+        let (deadline, frame) =
+            super::workspace_deadline_announcement(started, requested, registered, 45_000);
         assert_eq!(
             deadline.duration_since(started).as_millis(),
             u128::from(registered)
@@ -5693,6 +5714,13 @@ mod tests {
         fs::write(&settings, contents).expect("published policy digests");
         fs::set_permissions(&settings, fs::Permissions::from_mode(0o600))
             .expect("workers settings mode");
+        assert_eq!(
+            super::workspace_digests(&fixture.home, "alpha").expect("policy digest lines"),
+            format!(
+                "[workspace_policy]\nquick_policy_digest = \"{}\"\nblacklist_digest = \"{}\"",
+                grant.quick_policy_digest, grant.blacklist_digest
+            )
+        );
         let store = fixture.store();
         for target in [
             crate::requests::modes::ModeTarget::Loop,
@@ -5777,6 +5805,7 @@ mod tests {
                         owner: nix::unistd::Uid::effective().as_raw(),
                         wire: &wire,
                         judgement_wait_ms: 30_000,
+                        deadline_ms: super::compute::DEADLINE_MS,
                     }),
                 )
                 .expect("workspace service")

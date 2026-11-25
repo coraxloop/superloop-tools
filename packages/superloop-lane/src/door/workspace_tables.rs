@@ -24,6 +24,16 @@ fn read_table<T: serde::de::DeserializeOwned>(
     serde_json::from_slice(&bytes).map_err(|error| differs(file, error))
 }
 
+pub(super) fn digests(directory: &OwnedFd, owner: u32) -> Result<(String, String), LaneError> {
+    let quick: QuickPolicy = read_table(directory, owner, "workspace-quick-policy.json")?;
+    let blacklist: Blacklist = read_table(directory, owner, "workspace-blacklist.json")?;
+    let quick = canonical_digest(&quick)
+        .map_err(|error| differs("workspace-quick-policy.json", error.detail))?;
+    let blacklist = canonical_digest(&blacklist)
+        .map_err(|error| differs("workspace-blacklist.json", error.detail))?;
+    Ok((quick, blacklist))
+}
+
 pub(super) fn read(
     directory: &OwnedFd,
     owner: u32,
