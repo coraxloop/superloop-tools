@@ -801,7 +801,8 @@ fn workspace_client_deadline(frame: &Value) -> io::Result<Instant> {
         || frame["type"] != "compute-deadline"
         || !matches!((registered, requested, remaining, judgement),
             (Some(bound), Some(request), Some(left), Some(wait))
-            if request > 0 && request <= bound && left <= request && wait > 0 && wait <= 86_400_000)
+            if bound > 0 && request > 0 && left <= request.min(bound)
+                && wait > 0 && wait <= 86_400_000)
     {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
