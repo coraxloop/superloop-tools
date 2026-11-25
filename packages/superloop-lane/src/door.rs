@@ -912,6 +912,12 @@ fn admission_window() -> String {
     )
 }
 
+fn concurrent_fields(reply: &mut Value, waited: Duration) {
+    reply["admission_window"] = json!(admission_window());
+    reply["waited_seconds"] = json!((waited.as_secs_f64() * 1000.0).round() / 1000.0);
+    reply["retry_after_seconds"] = json!(RETRY_AFTER_SECONDS);
+}
+
 fn concurrent_refusal(
     wait: &RequestWait,
     registration: &Registration,
@@ -926,9 +932,7 @@ fn concurrent_refusal(
         registration.run
     );
     let mut reply = transport::refusal(registration, peer, "door-request-concurrent", started);
-    reply["admission_window"] = json!(admission_window());
-    reply["waited_seconds"] = json!((waited.as_secs_f64() * 1000.0).round() / 1000.0);
-    reply["retry_after_seconds"] = json!(RETRY_AFTER_SECONDS);
+    concurrent_fields(&mut reply, waited);
     wait.write_final(&reply, deadline)?;
     Ok((reply, Vec::new()))
 }
@@ -3035,6 +3039,7 @@ fn finish_waiting_without_run(
     detail: &str,
     started: Instant,
     deadline: Instant,
+    waited: Duration,
 ) -> Result<Value, LaneError> {
     let cause = wait.cause.select(lifetime::Cause::for_reply(reason));
     ending["cause"] = json!(cause.name());
@@ -3050,6 +3055,9 @@ fn finish_waiting_without_run(
     reply["schema"] = json!(3);
     reply["request_id"] = json!(id);
     reply["request_record_error"] = json!(detail);
+    if reason == "door-request-concurrent" {
+        concurrent_fields(&mut reply, waited);
+    }
     wait.report(&mut reply);
     wait.write_final(&reply, deadline)
         .map_err(|error| LaneError::input("door-workspace-protocol-refusal", error.to_string()))?;
@@ -3242,14 +3250,24 @@ fn serve_request_with_agent_at_context(
                         "request store home is absent",
                     )
                 })?;
-                let _slot = WorkspaceWaitSlot::acquire(home, registration)
+                let Some(_slot) = WorkspaceWaitSlot::acquire(home, registration)
                     .map_err(|error| LaneError::input("door-request-refusal", error.to_string()))?
-                    .ok_or_else(|| {
-                        LaneError::input(
-                            "door-request-concurrent",
-                            "two workspace requests of this box are already waiting; nothing was run",
-                        )
-                    })?;
+                else {
+                    let mut reply =
+                        transport::refusal(registration, peer, "door-request-concurrent", started);
+                    reply["schema"] = json!(3);
+                    reply["request_record_error"] = json!(
+                        "two workspace requests of this box are already waiting; nothing was run"
+                    );
+                    concurrent_fields(&mut reply, Duration::ZERO);
+                    wait.report(&mut reply);
+                    wait.write_final(&reply, admission_deadline)
+                        .map_err(|error| {
+                            LaneError::input("door-workspace-protocol-refusal", error.to_string())
+                        })?;
+                    completed_reply = Some(reply);
+                    return Ok(String::new());
+                };
                 let waiting_reason = if agent.is_some() {
                     "workspace miss awaits judgement"
                 } else {
@@ -3316,6 +3334,7 @@ fn serve_request_with_agent_at_context(
                             &error.to_string(),
                             started,
                             command_deadline,
+                            Duration::ZERO,
                         )?);
                         drop(lease);
                         return Ok(String::new());
@@ -3334,6 +3353,7 @@ fn serve_request_with_agent_at_context(
                         "door-agent-unconfigured",
                         started,
                         command_deadline,
+                        Duration::ZERO,
                     )?);
                     drop(lease);
                     return Ok(String::new());
@@ -3383,6 +3403,7 @@ fn serve_request_with_agent_at_context(
                         "request ended during judgement; nothing was run",
                         started,
                         command_deadline,
+                        Duration::ZERO,
                     )?);
                     drop(lease);
                     return Ok(String::new());
@@ -3405,11 +3426,16 @@ fn serve_request_with_agent_at_context(
                         &result.reason,
                         started,
                         command_deadline,
+                        Duration::ZERO,
                     )?);
                     drop(lease);
                     return Ok(String::new());
                 }
                 let clock: &dyn AdmissionClock = &RealAdmissionClock;
+                #[cfg(test)]
+                let fixture_clock = ADMISSION_CLOCK.with(|slot| slot.borrow().clone());
+                #[cfg(test)]
+                let clock = fixture_clock.as_deref().unwrap_or(clock);
                 let (retaken, waited) = RequestGuard::acquire_controlled(
                     home,
                     registration,
@@ -3433,6 +3459,7 @@ fn serve_request_with_agent_at_context(
                         &format!("admission did not return after {waited:?}; nothing was run"),
                         started,
                         command_deadline,
+                        waited,
                     )?);
                     drop(lease);
                     return Ok(String::new());
@@ -3460,6 +3487,7 @@ fn serve_request_with_agent_at_context(
                         "request ended before claim; nothing was run",
                         started,
                         command_deadline,
+                        Duration::ZERO,
                     )?);
                     drop(lease);
                     return Ok(String::new());
@@ -3480,6 +3508,7 @@ fn serve_request_with_agent_at_context(
                             &error.detail,
                             started,
                             command_deadline,
+                            Duration::ZERO,
                         )?);
                         drop(lease);
                         return Ok(String::new());
@@ -3507,6 +3536,7 @@ fn serve_request_with_agent_at_context(
                             &error.detail,
                             started,
                             command_deadline,
+                            Duration::ZERO,
                         )?);
                         drop(lease);
                         return Ok(String::new());
@@ -6641,17 +6671,20 @@ mod tests {
         use execute_command::workspace::{Blacklist, QuickPolicy, canonical_digest};
         use std::fmt::Write as _;
 
-        for (mode, agent_enabled, stop_after_claim) in [
-            (Mode::Allow, true, false),
-            (Mode::Enforce, true, false),
-            (Mode::Enforce, false, false),
-            (Mode::Enforce, true, true),
+        for (mode, agent_enabled, stop_after_claim, retake_blocked) in [
+            (Mode::Allow, true, false, false),
+            (Mode::Enforce, true, false, false),
+            (Mode::Enforce, false, false, false),
+            (Mode::Enforce, true, true, false),
+            (Mode::Enforce, true, false, true),
         ] {
             struct Allows {
                 release: Mutex<std::sync::mpsc::Receiver<()>>,
                 waiting_home: Option<std::path::PathBuf>,
                 registration: Registration,
                 wire: Option<Vec<u8>>,
+                hold_admission: bool,
+                held_admission: Mutex<Option<super::RequestGuard>>,
             }
             impl super::agent::AgentRunner for Allows {
                 fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
@@ -6714,8 +6747,22 @@ mod tests {
                         .expect("third request answer")
                         .0;
                         assert_eq!(third["reason"], "door-request-concurrent");
+                        assert_eq!(third["schema"], 3);
+                        assert_eq!(third["waited_seconds"], 0.0);
+                        assert_eq!(third["retry_after_seconds"], 30);
+                        assert_eq!(third["admission_window"], super::admission_window());
                         assert_eq!(store.list_run("R").expect("filed records").len(), 1);
                         drop(second);
+                        if self.hold_admission {
+                            let held = super::RequestGuard::acquire_operation(
+                                home,
+                                &self.registration,
+                                Some(super::transport::Operation::Compute),
+                            )
+                            .expect("retake contention fixture")
+                            .expect("compute guard before retake");
+                            *self.held_admission.lock().expect("held admission") = Some(held);
+                        }
                     }
                     self.release
                         .lock()
@@ -6828,7 +6875,19 @@ mod tests {
                     waiting_home: (mode == Mode::Enforce).then(|| home.clone()),
                     registration: registration.clone(),
                     wire: (mode == Mode::Enforce).then(|| wire.clone()),
+                    hold_admission: retake_blocked,
+                    held_admission: Mutex::new(None),
                 };
+                if retake_blocked {
+                    let clock = Arc::new(super::FixtureAdmissionClock {
+                        now: Mutex::new(Instant::now()),
+                        slept_ms: std::sync::atomic::AtomicU64::new(0),
+                        attempts: AtomicUsize::new(0),
+                    });
+                    super::ADMISSION_CLOCK.with(|slot| {
+                        *slot.borrow_mut() = Some(std::rc::Rc::new(clock));
+                    });
+                }
                 if stop_after_claim {
                     super::AFTER_WAITING_CLAIM.with(|slot| {
                         *slot.borrow_mut() = Some(Box::new(|wait| {
@@ -6889,7 +6948,9 @@ mod tests {
             assert_eq!(server.join().expect("service thread"), reply);
             assert_eq!(
                 reply["reason"],
-                if stop_after_claim {
+                if retake_blocked {
+                    "door-request-concurrent"
+                } else if stop_after_claim {
                     "door-request-deadline"
                 } else if agent_enabled {
                     "door-complete"
@@ -6900,7 +6961,7 @@ mod tests {
             );
             assert_eq!(
                 stdout,
-                if agent_enabled && !stop_after_claim {
+                if agent_enabled && !stop_after_claim && !retake_blocked {
                     b"other".as_slice()
                 } else {
                     b"".as_slice()
@@ -6920,7 +6981,7 @@ mod tests {
                 .expect("workspace record");
             assert_eq!(
                 workspace.value()["effect"]["state"],
-                if agent_enabled && !stop_after_claim {
+                if agent_enabled && !stop_after_claim && !retake_blocked {
                     "completed"
                 } else {
                     "refused"
@@ -6931,7 +6992,7 @@ mod tests {
             } else {
                 assert_eq!(
                     workspace.value()["state"],
-                    if mode == Mode::Allow || !agent_enabled {
+                    if mode == Mode::Allow || !agent_enabled || retake_blocked {
                         "waiting"
                     } else {
                         "observed"
@@ -6958,6 +7019,19 @@ mod tests {
                     "door-request-deadline"
                 );
                 assert_eq!(workspace.value()["effect"]["ending"]["cause"], "deadline");
+            }
+            if retake_blocked {
+                assert_eq!(reply["retry_after_seconds"], 30);
+                assert_eq!(reply["admission_window"], super::admission_window());
+                assert!(
+                    reply["waited_seconds"]
+                        .as_f64()
+                        .is_some_and(|wait| wait > 0.0)
+                );
+                assert_eq!(
+                    workspace.value()["effect"]["reason"],
+                    "door-request-concurrent"
+                );
             }
         }
     }
