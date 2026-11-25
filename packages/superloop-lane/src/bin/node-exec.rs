@@ -12,8 +12,7 @@ fn main() {
         let _written = writeln!(io::stderr().lock(), "node-exec-usage: no arguments");
         std::process::exit(2);
     }
-    if let Err(error) = superloop_lane::workspace_node::serve(
-        io::stdin(),
+    if let Err(error) = superloop_lane::workspace_node::serve_standard_input(
         io::stdout().lock(),
         Path::new("/etc/superloop/node-identity"),
         0,

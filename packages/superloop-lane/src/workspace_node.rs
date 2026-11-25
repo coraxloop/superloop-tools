@@ -825,6 +825,21 @@ pub fn serve<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
     serve_with_limits(input, output, identity_path, owner, StreamBounds::default())
 }
 
+/// Serve the installed entry from an unbuffered duplicate of standard input.
+/// The control reader polls this descriptor between a frame's length and body.
+/// # Errors
+/// Refuses an unavailable input descriptor or an invalid workspace call.
+pub fn serve_standard_input<W: Write + AsRawFd>(
+    output: W,
+    identity_path: &Path,
+    owner: u32,
+) -> io::Result<()> {
+    use std::os::fd::AsFd as _;
+
+    let input = File::from(io::stdin().as_fd().try_clone_to_owned()?);
+    serve(input, output, identity_path, owner)
+}
+
 fn serve_with_limits<R: Read + AsRawFd + Send, W: Write + AsRawFd>(
     mut input: R,
     mut output: W,
