@@ -532,21 +532,29 @@ impl CodexRunner {
         };
         // The owner refresh guard covers canonical selection and confirmed
         // private publication. The entered vendor never holds that guard.
-        let refresh_guard = match crate::credential::try_lock(&self.owner_home, &self.loop_name) {
-            Ok(guard) => guard,
-            Err(error) => {
-                return RunnerOutcome::referral(
-                    "failure",
-                    if error.kind == "credential-lock-busy" {
-                        "door-agent-refresh-busy"
-                    } else {
-                        "door-agent-refresh-lock"
-                    },
-                    started,
-                );
+        let end = started + budget;
+        let refresh_guard = loop {
+            if stop() {
+                return RunnerOutcome::referral("timeout", "door-agent-no-budget", started);
+            }
+            match crate::credential::try_lock(&self.owner_home, &self.loop_name) {
+                Ok(guard) => break guard,
+                Err(error) if error.kind == "credential-lock-busy" => {
+                    let left = end.saturating_duration_since(now());
+                    if left <= CLEANUP_RESERVE {
+                        return RunnerOutcome::referral(
+                            "failure",
+                            "door-agent-refresh-busy",
+                            started,
+                        );
+                    }
+                    std::thread::sleep(Duration::from_millis(10).min(left - CLEANUP_RESERVE));
+                }
+                Err(_) => {
+                    return RunnerOutcome::referral("failure", "door-agent-refresh-lock", started);
+                }
             }
         };
-        let end = started + budget;
         let publication = crate::credential::publish_door_under_lock(
             &self.owner_home,
             &self.loop_name,
@@ -1599,18 +1607,13 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
         drain_seam_case(false);
     }
 
-    /// ´test:unit:door-runner-limits-refresh-lock-to-publication-and-refuses-contention´
+    /// ´test:unit:door-runner-waits-for-refresh-lock-and-releases-before-vendor´
     #[test]
-    fn door_runner_limits_refresh_lock_to_publication_and_refuses_contention() {
-        let (root, runner, input) =
-            fixture("#!/usr/bin/python3\nraise SystemExit('must not run while busy')\n");
+    fn door_runner_waits_for_refresh_lock_and_releases_before_vendor() {
+        let (root, runner, input) = fixture("#!/usr/bin/python3\nraise SystemExit('replaced')\n");
         let guard = crate::credential::lock(root.path(), "alpha").expect("box helper lock");
-        let result = runner.judge(
-            &input.encode().expect("bounded fixture input"),
-            Duration::from_millis(FIXTURE_HANG_MS),
-        );
-        assert_eq!(result.reason, "door-agent-refresh-busy");
-        drop(guard);
+        let held = std::cell::RefCell::new(Some(guard));
+        let calls = std::cell::Cell::new(0);
         let lock = root
             .path()
             .join(".config/loops/alpha/lanes/codex/.refresh.lock");
@@ -1620,9 +1623,16 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
         );
         crate::fixture_exec::write_executable(&runner.executable, script.as_bytes())
             .expect("lock-observing CLI");
-        let result = runner.judge(
+        let result = runner.judge_with_clock(
             &input.encode().expect("bounded fixture input"),
             Duration::from_millis(FIXTURE_HANG_MS),
+            || {
+                calls.set(calls.get() + 1);
+                if calls.get() == 3 {
+                    held.borrow_mut().take();
+                }
+                Instant::now()
+            },
         );
         assert_eq!(result.status, "verdict", "{result:?}");
         assert_eq!(result.reason, "lock released");
@@ -1636,6 +1646,40 @@ print(json.dumps({{"type":"item.completed","item":{{"type":"agent_message","text
             Duration::from_millis(FIXTURE_HANG_MS),
         );
         assert_eq!(result.reason, "door-agent-refresh-lock");
+    }
+
+    /// ´test:unit:door-runner-refresh-lock-contention-ends-at-budget´
+    #[test]
+    fn door_runner_refresh_lock_contention_ends_at_budget() {
+        let (root, runner, input) =
+            fixture("#!/usr/bin/python3\nraise SystemExit('must not run while busy')\n");
+        let guard = crate::credential::lock(root.path(), "alpha").expect("box helper lock");
+        let epoch = Instant::now();
+        let calls = std::cell::Cell::new(0_u64);
+        let result = runner.judge_controlled(
+            &input.encode().expect("bounded fixture input"),
+            Duration::from_secs(4),
+            || {
+                let tick = calls.get();
+                calls.set(tick + 1);
+                epoch + Duration::from_secs(if tick == 0 { 0 } else { 2 * tick - 1 })
+            },
+            || false,
+        );
+        assert_eq!(result.reason, "door-agent-refresh-busy");
+        assert!(calls.get() >= 3, "the guard was retried within the budget");
+        let stops = std::cell::Cell::new(0);
+        let result = runner.judge_controlled(
+            &input.encode().expect("bounded fixture input"),
+            Duration::from_secs(4),
+            Instant::now,
+            || {
+                stops.set(stops.get() + 1);
+                stops.get() > 1
+            },
+        );
+        assert_eq!(result.reason, "door-agent-no-budget");
+        drop(guard);
     }
 
     /// ´test:unit:door-agent-projects-current-owner-generation-before-spawn´
