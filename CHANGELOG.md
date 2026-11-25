@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Send a declared workspace call's schema-three `compute-deadline` frame before box admission. A second command now keeps its stub waiting for the bounded guard wait and receives `door-request-concurrent` with its admission figures if that wait ends; a stop during admission and a full peer-capacity refusal also retain their own names instead of appearing as `door-workspace-unavailable`. A peer that leaves during first-mode store contention ends that wait without a schema-two lock-credit frame. Compatibility: rebuild the lane program and refresh each loop's pinned door service and boxed stub; the changed stub bytes require the door step to repin the runs it names (``rule:superlooplane:door-rebuild-rollout``). An old stub keeps using schema two with a new door. A new stub with an old door can still mistake a delayed or schema-two early reply for an unavailable workspace route; neither order changes stored records or the node entry, and either install order is safe while the door and stub are refreshed together before workspace work resumes.
+
 ## [0.13.1] - 2026-11-25
 
 ### Fixed

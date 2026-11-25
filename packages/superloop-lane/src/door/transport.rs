@@ -64,6 +64,91 @@ mod workspace_stub_tests {
         STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
     }
 
+    /// ´test:unit:workspace-stub-reads-admission-and-capacity-refusals´
+    #[test]
+    fn workspace_stub_reads_admission_and_capacity_refusals() {
+        let temp = tempfile::tempdir().expect("fixture");
+        context(&temp.path().join("context.json"));
+        let (path, listener) = socket(&temp);
+        let server = thread::spawn(move || {
+            let uid = nix::unistd::Uid::effective().as_raw();
+            let registration = super::super::Registration {
+                loop_name: "fixture".into(),
+                run: "R".into(),
+                worker_uid: uid,
+                loop_uid: uid,
+                scope: super::super::Scope::Work,
+                mirror_ref: "refs/heads/lane/R".into(),
+            };
+            for case in 0..3 {
+                let (mut peer, _) = listener.accept().expect("stub connection");
+                if case == 2 {
+                    let active = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(
+                        super::super::MAX_PEERS,
+                    ));
+                    assert!(super::super::admit_peer(&active, &mut peer).is_none());
+                    continue;
+                }
+                let request = super::super::frame_read_until(
+                    &mut peer,
+                    Instant::now() + Duration::from_secs(5),
+                )
+                .expect("workspace request");
+                assert_eq!(request["schema"], 3);
+                let wait = super::super::RequestWait::new(&peer).expect("request wait");
+                let deadline = Instant::now() + Duration::from_secs(5);
+                if case == 0 {
+                    super::super::concurrent_refusal(
+                        &wait,
+                        &registration,
+                        uid,
+                        Instant::now(),
+                        Duration::from_secs(30),
+                        deadline,
+                        3,
+                    )
+                    .expect("concurrent reply");
+                } else {
+                    super::super::stopped_admission_refusal(
+                        &wait,
+                        &registration,
+                        uid,
+                        Instant::now(),
+                        Duration::ZERO,
+                        deadline,
+                        super::super::lifetime::Cause::Deadline,
+                        3,
+                    )
+                    .expect("stopped reply");
+                }
+            }
+        });
+        let args = [
+            OsString::from("fixture-node"),
+            OsString::from("/usr/bin/true"),
+        ];
+        for (reason, case) in [
+            ("door-request-concurrent", 0),
+            ("door-request-deadline", 1),
+            ("door-capacity-refusal", 2),
+        ] {
+            let reply = stub_call(&path, &args, &[]).expect("typed workspace refusal");
+            assert_eq!(reply["schema"], 3, "case {case}");
+            assert_eq!(reply["reason"], reason, "case {case}");
+            assert_eq!(reply["status"], 125, "case {case}");
+            if case == 0 {
+                assert_eq!(reply["waited_seconds"], 30.0);
+                assert_eq!(reply["retry_after_seconds"], 30);
+                assert!(reply["admission_window"].is_string());
+            }
+            if case == 2 {
+                assert_eq!(reply["peer_limit"], super::super::MAX_PEERS);
+            }
+        }
+        server.join().expect("reply server");
+        clear_context();
+    }
+
     fn socket(temp: &tempfile::TempDir) -> (PathBuf, UnixListener) {
         let path = crate::fixture_exec::fixture_socket_path(temp.path().join("door.sock"));
         let listener = UnixListener::bind(&path).expect("socket fixture");
@@ -479,6 +564,8 @@ struct ExplicitWorkspace {
 #[cfg(test)]
 thread_local! {
     pub(super) static STUB_CONTEXT_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(super) static STUB_FIRST_FRAME_OBSERVED: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<()>>> = const { std::cell::RefCell::new(None) };
+    pub(super) static STUB_REQUEST_SENT: std::cell::RefCell<Option<std::sync::mpsc::SyncSender<UnixStream>>> = const { std::cell::RefCell::new(None) };
 }
 
 fn workspace_context_path() -> PathBuf {
@@ -2870,6 +2957,14 @@ where
         |envelope| json!(envelope),
     );
     frame_write_until(&mut stream, &request, deadline)?;
+    #[cfg(test)]
+    STUB_REQUEST_SENT.with(|slot| {
+        if let Some(sender) = slot.borrow_mut().take()
+            && let Ok(clone) = stream.try_clone()
+        {
+            let _sent = sender.send(clone);
+        }
+    });
     let mut preflight_stderr = 0_usize;
     if compute_request {
         loop {
@@ -2877,6 +2972,12 @@ where
                 .map_err(|error| if workspace.is_some() {
                     io::Error::new(error.kind(), "door-workspace-unavailable: installed door does not serve schema three; refresh its pinned copy")
                 } else { error })?;
+            #[cfg(test)]
+            STUB_FIRST_FRAME_OBSERVED.with(|slot| {
+                if let Some(sender) = slot.borrow_mut().take() {
+                    let _sent = sender.send(());
+                }
+            });
             if workspace.is_some() && frame["schema"] != 3 {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
