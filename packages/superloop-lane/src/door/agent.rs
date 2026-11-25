@@ -548,7 +548,9 @@ impl CodexRunner {
                             started,
                         );
                     }
-                    std::thread::sleep(Duration::from_millis(10).min(left - CLEANUP_RESERVE));
+                    std::thread::sleep(
+                        Duration::from_millis(10).min(left.saturating_sub(CLEANUP_RESERVE)),
+                    );
                 }
                 Err(_) => {
                     return RunnerOutcome::referral("failure", "door-agent-refresh-lock", started);
