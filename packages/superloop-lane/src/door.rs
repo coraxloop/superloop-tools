@@ -3800,9 +3800,7 @@ fn serve_request_with_agent_at_context(
                     ),
                 ));
             }
-            Ok(format!(
-                "{disposition:?}: this door does not yet run a workspace command without an exact rule; nothing was run"
-            ))
+            Ok("this door does not serve this workspace disposition; nothing was run".into())
         })();
         if let Some(reply) = completed_reply {
             return Ok((reply, Vec::new()));
@@ -6632,6 +6630,7 @@ mod tests {
                 release: Mutex<std::sync::mpsc::Receiver<()>>,
                 waiting_home: Option<std::path::PathBuf>,
                 registration: Registration,
+                wire: Option<Vec<u8>>,
             }
             impl super::agent::AgentRunner for Allows {
                 fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
@@ -6652,6 +6651,50 @@ mod tests {
                         .expect("legacy compute admission while workspace waits")
                         .expect("legacy compute is admitted");
                         drop(compute);
+                        let route = route_for(home);
+                        let store = super::Store::open(home, "alpha", true)
+                            .expect("protected request store");
+                        let second = super::WorkspaceWaitSlot::acquire(home, &self.registration)
+                            .expect("second waiter slot")
+                            .expect("second waiter may enter");
+                        let runs: std::os::fd::OwnedFd =
+                            File::open(home.join("runs")).expect("held runs").into();
+                        let config: std::os::fd::OwnedFd =
+                            File::open(home.join(".config/loops/alpha"))
+                                .expect("held config")
+                                .into();
+                        let wire = self.wire.as_deref().expect("workspace request wire");
+                        let request: Value = serde_json::from_slice(wire).expect("request JSON");
+                        let (_peer, mut stream) = FixtureClient::pair().expect("third peer");
+                        let started = Instant::now();
+                        let third = super::serve_request_with_agent_at_context(
+                            &mut stream,
+                            &self.registration,
+                            3000,
+                            &request,
+                            Some(&route),
+                            Some(&route),
+                            Some(home),
+                            None,
+                            Some(&store),
+                            None,
+                            None,
+                            started,
+                            super::lifetime::Start::at(started).expect("third lifetime"),
+                            Some(super::WorkspaceSocketContext {
+                                runs: &runs,
+                                config_directory: &config,
+                                owner: nix::unistd::Uid::effective().as_raw(),
+                                wire,
+                                judgement_wait_ms: 30_000,
+                                deadline_ms: super::compute::DEADLINE_MS,
+                            }),
+                        )
+                        .expect("third request answer")
+                        .0;
+                        assert_eq!(third["reason"], "door-request-concurrent");
+                        assert_eq!(store.list_run("R").expect("filed records").len(), 1);
+                        drop(second);
                     }
                     self.release
                         .lock()
@@ -6757,13 +6800,14 @@ mod tests {
                     .expect("held config")
                     .into();
                 let mut peer = FixtureServer::accept(&listener).expect("stub peer");
+                let request = fixture_request(&mut peer).expect("stub request");
+                let wire = serde_json::to_vec(&request).expect("request wire");
                 let allow_agent = Allows {
                     release: Mutex::new(agent_wait),
                     waiting_home: (mode == Mode::Enforce).then(|| home.clone()),
                     registration: registration.clone(),
+                    wire: (mode == Mode::Enforce).then(|| wire.clone()),
                 };
-                let request = fixture_request(&mut peer).expect("stub request");
-                let wire = serde_json::to_vec(&request).expect("request wire");
                 let started = Instant::now();
                 super::serve_request_with_agent_at_context(
                     &mut peer,
@@ -6840,8 +6884,12 @@ mod tests {
             }
             let rows = fixture.store().list_run("R").expect("request rows");
             assert_eq!(rows.len(), 1);
+            let workspace = rows
+                .iter()
+                .find(|row| row.value()["operation"] == "compute-workspace")
+                .expect("workspace record");
             assert_eq!(
-                rows[0].value()["effect"]["state"],
+                workspace.value()["effect"]["state"],
                 if agent_enabled {
                     "completed"
                 } else {
@@ -6849,7 +6897,7 @@ mod tests {
                 }
             );
             assert_eq!(
-                rows[0].value()["state"],
+                workspace.value()["state"],
                 if mode == Mode::Allow || !agent_enabled {
                     "waiting"
                 } else {
@@ -6857,14 +6905,14 @@ mod tests {
                 }
             );
             assert_eq!(
-                rows[0].value()["would_do_source"],
+                workspace.value()["would_do_source"],
                 if agent_enabled { "agent" } else { "superloop" }
             );
             if agent_enabled {
-                assert_eq!(rows[0].value()["agent_verdict"], "allow");
+                assert_eq!(workspace.value()["agent_verdict"], "allow");
             } else {
-                assert_eq!(rows[0].value()["would_do"]["decision"], "undecided");
-                assert!(rows[0].value()["workspace_agent_input"].is_null());
+                assert_eq!(workspace.value()["would_do"]["decision"], "undecided");
+                assert!(workspace.value()["workspace_agent_input"].is_null());
             }
         }
     }
