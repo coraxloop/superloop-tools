@@ -303,8 +303,9 @@ mod tests {
             let end = awake + Duration::from_secs(120);
             peer.shutdown(std::net::Shutdown::Write).expect("input EOF");
             assert_eq!(wait.stop(end), None, "half close is only EOF");
-            drop(peer);
+            peer.shutdown(std::net::Shutdown::Both).expect("full close");
             assert_eq!(wait.stop(end), cancellable.then_some(Cause::Disconnect));
+            drop(peer);
             clock.advance(120_000);
             assert_eq!(
                 wait.stop(end),

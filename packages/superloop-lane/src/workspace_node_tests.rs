@@ -775,7 +775,7 @@ fn workspace_node_output_limit_precedes_a_later_failed_start() {
             vec![
                 b"/bin/sh".to_vec(),
                 b"-c".to_vec(),
-                br"setsid /bin/sh -c 'while [ ! -e release ]; do /usr/bin/sleep 0.01; done; /usr/bin/head -c 4096 /dev/zero' & echo $! > escaped.pid; printf ready".to_vec(),
+                br"setsid /bin/sh -c 'echo $$ > escaped.pid; while [ ! -e release ]; do /usr/bin/sleep 0.01; done; /usr/bin/head -c 4096 /dev/zero' & while [ ! -s escaped.pid ]; do /usr/bin/sleep 0.01; done; printf ready".to_vec(),
             ],
             vec![b"/no-such-workspace-program".to_vec()],
         ],
