@@ -572,6 +572,24 @@ struct RequestGuard {
     _held: Vec<nix::fcntl::Flock<File>>,
 }
 
+// These locks count waiting workspace calls without retaining either admission
+// guard. Their names are separate from admission locks, which restart probes.
+#[allow(dead_code)] // The waiting serving path takes these slots in the next commit.
+struct WorkspaceWaitSlot(nix::fcntl::Flock<File>);
+
+#[allow(dead_code)] // The waiting serving path takes these slots in the next commit.
+impl WorkspaceWaitSlot {
+    fn acquire(home: &Path, registration: &Registration) -> io::Result<Option<Self>> {
+        for slot in 0..2 {
+            let class = format!("workspace-wait-{slot}");
+            if let Some(lock) = RequestGuard::acquire_lock(home, registration, &class, false)? {
+                return Ok(Some(Self(lock)));
+            }
+        }
+        Ok(None)
+    }
+}
+
 impl RequestGuard {
     fn acquire_wait(
         home: &Path,
@@ -701,7 +719,9 @@ impl RequestGuard {
             owner,
         )
         .map_err(io::Error::other)?;
-        let name = if class.is_empty() {
+        let name = if class.starts_with("workspace-wait-") {
+            format!("door-{}-{}.lock", class, registration.worker_uid)
+        } else if class.is_empty() {
             format!("door-admission-{}.lock", registration.worker_uid)
         } else {
             format!("door-admission-{}-{class}.lock", registration.worker_uid)
@@ -8621,6 +8641,43 @@ mod tests {
                 "admission-idle"
             );
         }
+    }
+
+    /// ´test:unit:door-workspace-wait-slots-do-not-hold-admission´
+    #[test]
+    fn door_workspace_wait_slots_do_not_hold_admission() {
+        let fixture = Fixture::new();
+        let registration = concurrent_registration(3000);
+        let first = super::WorkspaceWaitSlot::acquire(&fixture.home, &registration)
+            .expect("first slot")
+            .expect("available");
+        let second = super::WorkspaceWaitSlot::acquire(&fixture.home, &registration)
+            .expect("second slot")
+            .expect("available");
+        assert!(
+            super::WorkspaceWaitSlot::acquire(&fixture.home, &registration)
+                .expect("third slot")
+                .is_none()
+        );
+        assert_eq!(
+            super::restart_probe(&fixture.home, "alpha").expect("admission probe")["status"],
+            "admission-idle"
+        );
+        let admission = super::RequestGuard::acquire_operation(
+            &fixture.home,
+            &registration,
+            Some(super::transport::Operation::Compute),
+        )
+        .expect("admission")
+        .expect("waiters released admission");
+        drop(admission);
+        drop(first);
+        assert!(
+            super::WorkspaceWaitSlot::acquire(&fixture.home, &registration)
+                .expect("released slot")
+                .is_some()
+        );
+        drop(second);
     }
 
     /// ´test:unit:door-terminal-record-survives-advisory-unwind´
