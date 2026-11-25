@@ -362,6 +362,7 @@ thread_local! {
     static AFTER_READER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_WRITER_POLL: std::cell::RefCell<Option<WriterPollHook>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    pub(crate) static AFTER_WRITER_LOCK_RETRY: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_TIMEOUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static STRETCH_SHARED_HOLD: std::cell::Cell<Option<Duration>> = const { std::cell::Cell::new(None) };
@@ -1600,6 +1601,11 @@ impl Store {
             if changing && error.kind() == std::io::ErrorKind::WouldBlock {
                 AFTER_WRITER_LOCK_CONTENTION.with(|hook| {
                     if let Some(action) = hook.borrow_mut().take() {
+                        action();
+                    }
+                });
+                AFTER_WRITER_LOCK_RETRY.with(|hook| {
+                    if let Some(action) = hook.borrow_mut().as_mut() {
                         action();
                     }
                 });

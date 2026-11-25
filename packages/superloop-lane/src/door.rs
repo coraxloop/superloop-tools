@@ -3281,9 +3281,7 @@ fn serve_request_with_agent_at_context(
             let store = fixture_store.or(opened.as_ref()).ok_or_else(|| {
                 LaneError::input("door-workspace-unregistered", "request store is absent")
             })?;
-            let mode_store = store
-                .for_request(admission_deadline)?
-                .with_wait_credit(std::sync::Arc::clone(&wait));
+            let mode_store = store.for_request(admission_deadline)?;
             let setting = mode_store.ensure_first_mode("compute")?;
             let (learned, _fault) = WorkspaceAllowance::from_store_lookup(store, &request)?;
             let mode = execute_command::policy::DoorMode::from_record(setting["mode"].as_str())
@@ -6316,6 +6314,17 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn door_workspace_quick_rule_runs_from_stub_to_recorded_effect() {
+        quick_rule_fixture(false);
+    }
+
+    /// ´test:unit:door-workspace-first-mode-lock-wait-keeps-schema-three´
+    #[test]
+    fn door_workspace_first_mode_lock_wait_keeps_schema_three() {
+        quick_rule_fixture(true);
+    }
+
+    #[allow(clippy::too_many_lines)]
+    fn quick_rule_fixture(contend_first_mode: bool) {
         use execute_command::workspace::{
             Blacklist, BlacklistEntry, Execution, QuickPolicy, QuickRule, canonical_digest,
         };
@@ -6431,7 +6440,10 @@ mod tests {
         for target in [
             crate::requests::modes::ModeTarget::Loop,
             crate::requests::modes::ModeTarget::class("compute").expect("class"),
-        ] {
+        ]
+        .into_iter()
+        .take(if contend_first_mode { 1 } else { 2 })
+        {
             store
                 .set_mode(
                     &target,
@@ -6464,6 +6476,25 @@ mod tests {
         };
         let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join("workspace.sock"));
         let listener = UnixListener::bind(&socket).expect("workspace service socket");
+        let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let holder = contend_first_mode.then(|| {
+            let home = fixture.home.clone();
+            thread::spawn(move || {
+                let store = Store::open(&home, "alpha", true).expect("holder store");
+                let held = store
+                    .fixture_exclusive_lock()
+                    .expect("held first-mode lock");
+                ready_tx.send(()).expect("lock held");
+                release_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("observed retries release lock");
+                drop(held);
+            })
+        });
+        if holder.is_some() {
+            ready_rx.recv().expect("first-mode lock held");
+        }
         let (clock_tx, clock_rx) = std::sync::mpsc::sync_channel(1);
         let home = fixture.home.clone();
         let identity = node.identity;
@@ -6477,6 +6508,18 @@ mod tests {
                 .into();
             let mut replies = Vec::new();
             for ordinal in 0..7 {
+                if ordinal == 0 && contend_first_mode {
+                    let release = release_tx.clone();
+                    let mut retries = 0;
+                    crate::requests::store::AFTER_WRITER_LOCK_RETRY.with(|slot| {
+                        *slot.borrow_mut() = Some(Box::new(move || {
+                            retries += 1;
+                            if retries == 8 {
+                                release.send(()).expect("release held mode lock");
+                            }
+                        }));
+                    });
+                }
                 let mut peer = FixtureServer::accept(&listener).expect("stub peer");
                 let request = fixture_request(&mut peer).expect("stub request");
                 let wire = serde_json::to_vec(&request).expect("request wire");
@@ -6517,6 +6560,11 @@ mod tests {
                 )
                 .expect("workspace service")
                 .0;
+                if ordinal == 0 && contend_first_mode {
+                    crate::requests::store::AFTER_WRITER_LOCK_RETRY.with(|slot| {
+                        slot.borrow_mut().take();
+                    });
+                }
                 if ordinal == 2 {
                     assert_eq!(
                         super::REQUEST_END_COUNT.with(std::cell::Cell::get),
@@ -6630,6 +6678,9 @@ mod tests {
         assert!(deadline_output.advanced);
         super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
         let server_replies = server.join().expect("service thread");
+        if let Some(holder) = holder {
+            holder.join().expect("lock holder");
+        }
         assert_eq!(
             server_replies,
             [
@@ -6786,6 +6837,7 @@ mod tests {
 
         for (mode, agent_enabled, stop_after_claim, retake_blocked, slot_after_claim, settings) in [
             (Mode::Allow, true, false, false, false, 1),
+            (Mode::Allow, true, false, false, false, 3),
             (Mode::Allow, true, false, false, false, 0),
             (Mode::Allow, true, false, false, false, 2),
             (Mode::Enforce, true, false, false, false, 2),
@@ -6910,8 +6962,12 @@ mod tests {
                 crate::requests::modes::ModeTarget::class("compute").expect("class"),
             ]
             .into_iter()
-            .take(usize::try_from(settings).expect("setting count"))
-            {
+            .skip(if settings == 3 { 1 } else { 0 })
+            .take(if settings == 3 {
+                1
+            } else {
+                usize::try_from(settings).expect("setting count")
+            }) {
                 store
                     .set_mode(&target, mode, "fixture owner", "fixture mode", "1", &[])
                     .expect("allow compute mode");
