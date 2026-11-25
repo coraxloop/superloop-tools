@@ -6962,7 +6962,7 @@ mod tests {
                 crate::requests::modes::ModeTarget::class("compute").expect("class"),
             ]
             .into_iter()
-            .skip(if settings == 3 { 1 } else { 0 })
+            .skip(usize::from(settings == 3))
             .take(if settings == 3 {
                 1
             } else {
