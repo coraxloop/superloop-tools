@@ -443,18 +443,22 @@ def route_call(marker, seconds, command, payload=source, outer=False, hold_marke
         start_new_session=True)
 
 
-def wait_for(observation):
-    until = time.monotonic() + 20
+def wait_for(observation, producer=None):
+    # A busy node can delay preparation well past twenty seconds. The route's
+    # exit, rather than that short wall, proves its readiness event is lost.
+    until = time.monotonic() + 120
     while not observation():
+        if producer is not None and producer.poll() is not None:
+            raise AssertionError(f"fixture producer exited {producer.returncode} before its event")
         if time.monotonic() >= until:
-            raise AssertionError("fixture event was not reached")
+            raise AssertionError("fixture event was not reached before the hang bound")
         time.sleep(0.02)
 
 
-def hold_process(marker):
+def hold_process(marker, producer):
     # The child waits for this acknowledgement after writing its PID, so it
     # cannot exit and let the number be reused before pidfd_open succeeds.
-    wait_for(marker.exists)
+    wait_for(marker.exists, producer)
     descriptor = os.pidfd_open(int(marker.read_text()))
     marker.with_name(marker.name + ".held").touch()
     return descriptor
@@ -498,7 +502,7 @@ marker = route_root / "silent.pid"
 child = route_call(marker, 40, ["/usr/bin/sleep", "30"], hold_marker=True)
 wrapper_handle = None
 try:
-    wrapper_handle = hold_process(marker)
+    wrapper_handle = hold_process(marker, child)
     wrapper_pid = int(marker.read_text())
     child.stdin.close()
     code, errors = finish_route(child)
@@ -523,7 +527,7 @@ with lock_path.open("a") as held:
         marker = route_root / (ending + ".pid")
         child = route_call(marker, seconds, ["/usr/bin/true"])
         try:
-            wait_for(lambda: has_lock_open(child))
+            wait_for(lambda: has_lock_open(child), child)
             if ending == "door-disconnect-refusal":
                 child.stdin.close()
             code, errors = finish_route(child)
@@ -554,7 +558,7 @@ marker = route_root / "signal-worker.pid"
 child = route_call(marker, 40, ["/usr/bin/sleep", "30"], hold_marker=True)
 worker_handle = None
 try:
-    worker_handle = hold_process(marker)
+    worker_handle = hold_process(marker, child)
     signal.pidfd_send_signal(worker_handle, signal.SIGKILL)
     code, errors = finish_route(child)
     result = json.loads(errors.decode().split("DOOR-COMPUTE ")[-1])
@@ -597,7 +601,7 @@ marker = route_root / "stalled.pid"
 child = route_call(marker, 40, ["/usr/bin/true"], stall_payload)
 fetch_handle = None
 try:
-    fetch_handle = hold_process(fetch_pid)
+    fetch_handle = hold_process(fetch_pid, child)
     child.stdin.close()
     code, errors = finish_route(child)
     assert code == 125, errors
@@ -631,7 +635,7 @@ child = route_call(route_root / "never-wrapper.pid", 40, ["/usr/bin/true"],
                    ignore_payload)
 ignored_handle = None
 try:
-    ignored_handle = hold_process(ignored_pid)
+    ignored_handle = hold_process(ignored_pid, child)
     os.kill(child.pid, signal.SIGKILL)
     child.wait(timeout=5)
     process = Path(f"/proc/{int(ignored_pid.read_text())}/stat")
@@ -693,8 +697,8 @@ child = route_call(route_root / "survivor-wrapper.pid", 40,
 writer_handle = None
 supervisor_handle = None
 try:
-    writer_handle = hold_process(survivor_pid)
-    supervisor_handle = hold_process(supervisor_pid)
+    writer_handle = hold_process(survivor_pid, child)
+    supervisor_handle = hold_process(supervisor_pid, child)
     stop_held(supervisor_handle)
     supervisor_handle = None
     code, errors = finish_route(child)
@@ -745,7 +749,7 @@ for attempt in range(2):
                        ["/usr/bin/true"], remove_payload)
     remover_handle = None
     try:
-        remover_handle = hold_process(removal_ready)
+        remover_handle = hold_process(removal_ready, child)
         os.kill(child.pid, signal.SIGKILL)
         child.wait(timeout=5)
         wait_for(stopped_and_unlocked)
