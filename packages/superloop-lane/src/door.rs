@@ -779,6 +779,7 @@ thread_local! {
     static ADMISSION_CONTENDED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static FIXTURE_ADMISSION_CLOCK: std::cell::RefCell<Option<Arc<FixtureAdmissionClock>>> = const { std::cell::RefCell::new(None) };
     static AFTER_WAITING_CLAIM: std::cell::RefCell<Option<WaitingClaimHook>> = const { std::cell::RefCell::new(None) };
+    static REQUEST_END_COUNT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 #[cfg(test)]
@@ -888,6 +889,7 @@ fn recover_at_start(home: &Path, loop_name: &str) {
 pub(crate) fn request_end_event(event: &Value) {
     #[cfg(test)]
     {
+        REQUEST_END_COUNT.with(|count| count.set(count.get() + 1));
         #[allow(clippy::print_stderr)] // Preserve libtest capture of terminal evidence.
         {
             eprintln!("door-request-end {event}");
@@ -3091,7 +3093,7 @@ fn finish_waiting_without_run(
     effect["ref_check"] = json!("not-applicable");
     effect["ending"] = ending.clone();
     wait.remember_effect(effect.clone());
-    store.finish_request(id, Some(effect), &ending)?;
+    store.record_effect(id, effect)?;
     let mut reply = transport::refusal(registration, peer, reason, started);
     reply["schema"] = json!(3);
     reply["request_id"] = json!(id);
@@ -6476,6 +6478,7 @@ mod tests {
                 let request = fixture_request(&mut peer).expect("stub request");
                 let wire = serde_json::to_vec(&request).expect("request wire");
                 let started = Instant::now();
+                let before_end_count = super::REQUEST_END_COUNT.with(std::cell::Cell::get);
                 if ordinal == 5 {
                     fixture_fault(Some(FixtureFault::EffectWrite));
                 }
@@ -6511,6 +6514,13 @@ mod tests {
                 )
                 .expect("workspace service")
                 .0;
+                if ordinal == 2 {
+                    assert_eq!(
+                        super::REQUEST_END_COUNT.with(std::cell::Cell::get),
+                        before_end_count + 1,
+                        "a referred request emits one ending after its final write"
+                    );
+                }
                 replies.push(reply);
             }
             super::POST_REPLY_EVENTS.with(|events| {
