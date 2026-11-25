@@ -14,7 +14,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Give fresh-launch `prepare-home` and `prepare-runtime` a 600-second hang bound instead of the 60-second wall limit that refused otherwise healthy rootless Podman preparation under host load. The private runner retains the same timeout refusal and cleanup. Compatibility: a fresh-launch dry run now prints `timeout_seconds: 600` for both steps; an older dry-run report is not refused solely for its old bound because the fresh preview has no digest binding for that field, so repeat the dry run before acting to see the bound this program applies.
+- Give fresh-launch `prepare-home` and `prepare-runtime` a 600-second hang bound instead of the 60-second wall limit, which refused rootless Podman preparation slowed by host load in launches that succeeded when repeated. The private runner retains the same timeout refusal and cleanup. Compatibility: no operator acts and no stored form changes; a fresh-launch dry run prints `timeout_seconds: 600` for both steps, and no preview digest binds that field. A step that is truly stuck is now refused after ten minutes instead of one, and for that long the run's other changing commands refuse as `launch-busy` and the loop's installations as `install-busy`, as they already did while preparation ran.
 
 ## [0.13.1] - 2026-11-25
 
