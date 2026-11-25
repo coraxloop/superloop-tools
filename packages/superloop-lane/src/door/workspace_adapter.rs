@@ -36,6 +36,7 @@ pub(super) struct WorkspaceCall {
 /// One already custodied authority to execute this exact request.
 #[derive(Clone, Copy)]
 pub(super) enum WorkspaceAdmission<'a> {
+    QuickRule(&'a execute_command::workspace::QuickAllowance),
     Allowance(&'a WorkspaceAllowance),
     AllowModeIntent(&'a WorkspaceIntent),
 }
@@ -43,6 +44,9 @@ pub(super) enum WorkspaceAdmission<'a> {
 impl WorkspaceAdmission<'_> {
     fn check(&self, request: &WorkspaceRequest, id: &str) -> Result<(), LaneError> {
         match self {
+            Self::QuickRule(allowance) => allowance
+                .check_context(request.envelope(), request.grant())
+                .map_err(|error| LaneError::input(error.kind, error.detail)),
             Self::Allowance(allowance) => allowance.check(request),
             Self::AllowModeIntent(intent) => intent.check(request, id),
         }
@@ -856,11 +860,36 @@ fn run_stream<I: AsRawFd + Send + 'static, O: AsRawFd + io::Read>(
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use execute_command::workspace::Execution;
     use std::os::unix::net::UnixStream;
     use std::process::Stdio;
+
+    pub fn run_fixture_command(
+        call: &WorkspaceCall,
+        identity: &std::path::Path,
+        sink: &mut impl WorkspaceOutputSink,
+        stop: WorkspaceStop<'_>,
+        lifetime: Instant,
+    ) -> Result<WorkspaceResult, LaneError> {
+        let (input, mut output, _child) = process_fixture(identity, Duration::from_secs(10));
+        let mut first_frame_seen = false;
+        run_stream(
+            call,
+            input,
+            &mut output,
+            sink,
+            stop,
+            DriverBounds {
+                lifetime,
+                acknowledgement: ACK_BOUND,
+                heartbeat_interval: HEARTBEAT_INTERVAL,
+                output_limit: crate::workspace_node::MAX_OUTPUT_BYTES,
+            },
+            &mut first_frame_seen,
+        )
+    }
 
     #[derive(Default)]
     struct Collected {

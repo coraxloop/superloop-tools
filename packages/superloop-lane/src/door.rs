@@ -2678,6 +2678,49 @@ struct WorkspaceSocketContext<'a> {
     wire: &'a [u8],
 }
 
+struct WorkspaceWorkerSink<'a> {
+    wait: &'a RequestWait,
+    stdout: usize,
+    stderr: usize,
+}
+
+impl workspace_adapter::WorkspaceOutputSink for WorkspaceWorkerSink<'_> {
+    fn forward(
+        &mut self,
+        channel: workspace_adapter::OutputChannel,
+        bytes: &[u8],
+        deadline: Instant,
+    ) -> Result<(), LaneError> {
+        let mut writer = self
+            .wait
+            .writer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if writer.sealed {
+            return Err(LaneError::input(
+                "door-workspace-protocol-refusal",
+                "worker output route has closed",
+            ));
+        }
+        let kind = match channel {
+            workspace_adapter::OutputChannel::Stdout => "stdout",
+            workspace_adapter::OutputChannel::Stderr => "stderr",
+        };
+        frame_write_until(
+            &mut writer.stream,
+            &json!({"schema":3,"type":kind,"bytes":bytes}),
+            deadline,
+        )
+        .map_err(|error| LaneError::input("door-workspace-protocol-refusal", error.to_string()))?;
+        drop(writer);
+        match channel {
+            workspace_adapter::OutputChannel::Stdout => self.stdout += bytes.len(),
+            workspace_adapter::OutputChannel::Stderr => self.stderr += bytes.len(),
+        }
+        Ok(())
+    }
+}
+
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn serve_request_with_agent_at_context(
     stream: &mut UnixStream,
@@ -2795,7 +2838,17 @@ fn serve_request_with_agent_at_context(
         )
     };
     if is_workspace_request {
+        let mut completed_reply = None;
         let answer = (|| -> Result<String, LaneError> {
+            if let Some(error) = &admission_error {
+                return Err(LaneError::input("door-request-refusal", error.to_string()));
+            }
+            if request_guard.is_none() {
+                return Err(LaneError::input(
+                    "door-caller-authority-refusal",
+                    "workspace request has no box admission guard",
+                ));
+            }
             let context = workspace.ok_or_else(|| {
                 LaneError::input(
                     "door-workspace-protocol-refusal",
@@ -2862,7 +2915,11 @@ fn serve_request_with_agent_at_context(
                     execute_command::workspace::Classification::Deny(denial) => {
                         let evidence = denial.evidence();
                         (
-                            json!({"decision":"refuse","reason":format!("blacklist {}", evidence["blacklist_rule"])}),
+                            json!({"decision":"refuse","reason":format!(
+                                "blacklist {}: {}",
+                                evidence["blacklist_rule"].as_str().unwrap_or_default(),
+                                evidence["reason"].as_str().unwrap_or_default()
+                            )}),
                             None,
                         )
                     }
@@ -2889,29 +2946,234 @@ fn serve_request_with_agent_at_context(
                     value["matched_rule"] = json!({"rule":evidence["rule"],
                         "policy_digest":request.grant().quick_policy_digest});
                     record = RequestRecord::decode(value)?;
+                } else if disposition == execute_command::workspace::Disposition::Immediate
+                    && let Some(allowance) = learned.as_ref().and_then(WorkspaceLearned::allowance)
+                {
+                    let mut value = record.into_value();
+                    value["matched_rule"] = allowance.evidence()["rule"].clone();
+                    record = RequestRecord::decode(value)?;
                 }
                 let id = record.id().to_owned();
                 let mut effect = record.value()["effect"].clone();
                 effect["state"] = json!("refused");
-                effect["reason"] = json!("door-workspace-protocol-refusal");
+                effect["reason"] = json!(if disposition
+                    == execute_command::workspace::Disposition::Block
+                {
+                    "door-request-refusal"
+                } else {
+                    "door-workspace-protocol-refusal"
+                });
                 effect["ref_check"] = json!("not-applicable");
                 let ending = crate::requests::unobserved_ending();
                 effect["ending"] = ending.clone();
                 let mut check = record.value().clone();
                 check["effect"] = effect.clone();
                 RequestRecord::decode(check)?;
-                let lease = store.file_active_workspace_claim(record, &request)?;
+                if disposition == execute_command::workspace::Disposition::Immediate {
+                    let admission = match &classification {
+                        execute_command::workspace::Classification::QuickAllow(allow) => {
+                            workspace_adapter::WorkspaceAdmission::QuickRule(allow)
+                        }
+                        _ => workspace_adapter::WorkspaceAdmission::Allowance(
+                            learned
+                                .as_ref()
+                                .and_then(WorkspaceLearned::allowance)
+                                .ok_or_else(|| {
+                                    LaneError::input(
+                                        "door-workspace-context-differs",
+                                        "learned allowance is absent",
+                                    )
+                                })?,
+                        ),
+                    };
+                    if let Some(stop) = wait.stop(admission_deadline) {
+                        return Err(LaneError::input(
+                            stop.reason(),
+                            "request ended before its workspace claim",
+                        ));
+                    }
+                    let lease = store.file_active_workspace_claim(record, &request)?;
+                    if let Some(stop) = wait.stop(admission_deadline) {
+                        effect["reason"] = json!(stop.reason());
+                        let mut stopped_ending = ending;
+                        stopped_ending["cause"] = json!(stop.name());
+                        stopped_ending["wall_clock"] = json!("monotonic-awake");
+                        stopped_ending["local_child"] = json!("not-started");
+                        stopped_ending["remote"]["state"] = json!("not-started");
+                        effect["ending"] = stopped_ending.clone();
+                        let finished = store.finish_request(&id, Some(effect), &stopped_ending);
+                        drop(lease);
+                        finished?;
+                        return Err(LaneError::input(
+                            stop.reason(),
+                            "request ended before the executor call; nothing was run",
+                        ));
+                    }
+                    let deadline_ms = request.envelope().deadline_ms;
+                    let deadline = started + Duration::from_millis(deadline_ms);
+                    let announcement = json!({"schema":3,"type":"compute-deadline",
+                        "registered_deadline_ms":deadline_ms,"request_deadline_ms":deadline_ms,
+                        "judgement_wait_ms":30_000,
+                        "remaining_ms":deadline.saturating_duration_since(Instant::now()).as_millis()});
+                    let announced = frame_write_until(stream, &announcement, admission_deadline);
+                    if let Err(error) = announced {
+                        let mut failed_ending = ending;
+                        failed_ending["cause"] = json!("transport");
+                        failed_ending["wall_clock"] = json!("monotonic-awake");
+                        failed_ending["local_child"] = json!("not-started");
+                        failed_ending["remote"]["state"] = json!("not-started");
+                        effect["ending"] = failed_ending.clone();
+                        let finished = store.finish_request(&id, Some(effect), &failed_ending);
+                        drop(lease);
+                        finished?;
+                        return Err(LaneError::input(
+                            "door-workspace-protocol-refusal",
+                            error.to_string(),
+                        ));
+                    }
+                    let stop_flag = Arc::new(AtomicBool::new(false));
+                    let done = Arc::new(AtomicBool::new(false));
+                    let watched_wait = Arc::clone(&wait);
+                    let watched_flag = Arc::clone(&stop_flag);
+                    let watched_done = Arc::clone(&done);
+                    let watcher = thread::spawn(move || {
+                        while !watched_done.load(Ordering::Acquire) {
+                            if watched_wait.stop(deadline).is_some() {
+                                watched_flag.store(true, Ordering::Release);
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                    });
+                    let mut sink = WorkspaceWorkerSink {
+                        wait: &wait,
+                        stdout: 0,
+                        stderr: 0,
+                    };
+                    let result = route.run_workspace(
+                        &request,
+                        admission,
+                        &id,
+                        &mut sink,
+                        workspace_adapter::WorkspaceStop {
+                            flag: &stop_flag,
+                            cause: "worker-disconnected",
+                        },
+                        deadline + Duration::from_secs(245),
+                    );
+                    done.store(true, Ordering::Release);
+                    let _joined = watcher.join();
+                    let mut reply =
+                        transport::refusal(registration, peer, "door-workspace-unknown", started);
+                    reply["schema"] = json!(3);
+                    reply["stdout_bytes"] = json!(sink.stdout);
+                    reply["stderr_bytes"] = json!(sink.stderr);
+                    if let Ok(result) = &result {
+                        let evidence = result.evidence();
+                        let status = result.command_status().unwrap_or_else(|| {
+                            match &result.result.outcome {
+                                execute_command::workspace::Outcome::Exited { code } => *code,
+                                execute_command::workspace::Outcome::Signalled { signal } => {
+                                    i32::try_from(*signal).unwrap_or(0).saturating_add(128)
+                                }
+                                execute_command::workspace::Outcome::TimedOut => 124,
+                                execute_command::workspace::Outcome::Unknown => 125,
+                            }
+                        });
+                        let reason = match result.ending {
+                            workspace_adapter::Ending::Complete
+                            | workspace_adapter::Ending::NodeDeadline => "door-complete",
+                            workspace_adapter::Ending::OutputIncomplete => {
+                                "door-workspace-incomplete"
+                            }
+                            workspace_adapter::Ending::OutputLimit => "door-output-limit-refusal",
+                            workspace_adapter::Ending::NothingRan(_) => {
+                                "door-workspace-not-started"
+                            }
+                            workspace_adapter::Ending::Incomplete => "door-workspace-unknown",
+                            workspace_adapter::Ending::Interrupted(_) => "door-disconnect-refusal",
+                        };
+                        reply["reason"] = json!(reason);
+                        reply["status"] = json!(status);
+                        reply["compute_exit_status"] = json!(status);
+                        effect["state"] = evidence["ending"].clone();
+                        effect["reason"] = json!(reason);
+                        effect["exit_status"] = match &result.result.outcome {
+                            execute_command::workspace::Outcome::Exited { code } => json!(code),
+                            _ => result
+                                .command_status()
+                                .map_or(Value::Null, |status| json!(status)),
+                        };
+                        effect["ref_check"] = json!("not-applicable");
+                        effect["stdout_bytes"] = json!(sink.stdout);
+                        effect["stderr_bytes"] = json!(sink.stderr);
+                        effect["mediation_wall_seconds"] = json!(started.elapsed().as_secs_f64());
+                        effect["compute_wall_seconds"] = json!(result.result.wall_seconds);
+                        effect["workspace"]["result"] = json!(result.result);
+                        effect["workspace"]["steps"] = json!(result.steps);
+                        effect["workspace_node"] = evidence;
+                        effect["ending"] = wait.ending_snapshot();
+                    } else if let Err(error) = &result {
+                        reply["request_record_error"] = json!(error.line());
+                        effect["state"] = json!("unknown");
+                        effect["reason"] = json!("door-workspace-unknown");
+                        effect["ref_check"] = json!("not-applicable");
+                        effect["stdout_bytes"] = json!(sink.stdout);
+                        effect["stderr_bytes"] = json!(sink.stderr);
+                        effect["mediation_wall_seconds"] = json!(started.elapsed().as_secs_f64());
+                        effect["ending"] = wait.ending_snapshot();
+                        effect["workspace_node"] = json!({
+                            "node_reason":"unobserved","entry_version":"unobserved",
+                            "entry_version_differs":false,"output_incomplete":true,
+                            "child_started":null,"start_failure":null,
+                            "output_bytes":sink.stdout + sink.stderr,
+                            "result":effect["workspace"]["result"],"steps":[],
+                            "ending":"unknown","cause":"route-incomplete","door_cause":null
+                        });
+                    }
+                    let recorded = store.finish_request(&id, Some(effect), &wait.ending_snapshot());
+                    if let Err(error) = recorded {
+                        reply["request_record_error"] = json!(error.line());
+                    } else if mode.as_str() == "enforce"
+                        && let Err(error) = store.publish_observed(&id)
+                    {
+                        reply["request_record_error"] = json!(error.line());
+                    }
+                    wait.report(&mut reply);
+                    let sent = wait.write_final(&reply, deadline + Duration::from_secs(245));
+                    let recorded_write = store.finish_request(&id, None, &wait.ending_snapshot());
+                    if let Err(error) = recorded_write {
+                        let _logged = writeln!(
+                            io::stderr().lock(),
+                            "door workspace final record: {}",
+                            error.line()
+                        );
+                    }
+                    drop(lease);
+                    sent.map_err(|error| {
+                        LaneError::input("door-workspace-protocol-refusal", error.to_string())
+                    })?;
+                    completed_reply = Some(reply);
+                    return Ok(String::new());
+                }
+                store.file(record)?;
                 let finished = store.finish_request(&id, Some(effect), &ending);
-                drop(lease);
                 finished?;
-                return Ok(format!(
-                    "{disposition:?}: refused before its effect; the executor is not yet served; nothing was run"
+                return Err(LaneError::input(
+                    "door-request-refusal",
+                    format!(
+                        "{}; nothing was run",
+                        would_do["reason"].as_str().unwrap_or_default()
+                    ),
                 ));
             }
             Ok(format!(
                 "{disposition:?}: this door does not yet run a workspace command without an exact rule; nothing was run"
             ))
         })();
+        if let Some(reply) = completed_reply {
+            return Ok((reply, Vec::new()));
+        }
         let (reason, detail) = match answer {
             Ok(detail) => ("door-workspace-protocol-refusal", detail),
             Err(error) => (error.kind, error.detail),
@@ -5236,6 +5498,297 @@ mod tests {
         store::{FixtureFault, Store, fixture_fault, fixture_file_cap, tests::Fixture},
         tests::waiting,
     };
+
+    /// ´test:unit:door-workspace-quick-rule-runs-from-stub-to-recorded-effect´
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn door_workspace_quick_rule_runs_from_stub_to_recorded_effect() {
+        use execute_command::workspace::{
+            Blacklist, BlacklistEntry, Execution, QuickPolicy, QuickRule, canonical_digest,
+        };
+        use std::fmt::Write as _;
+
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let node = crate::workspace_node::tests::Fixture::new();
+        let execution = Execution::Argv {
+            words: vec![b"/usr/bin/printf".to_vec(), b"fixture-ok".to_vec()],
+        };
+        let quick = QuickPolicy {
+            revision: "fixture-1".into(),
+            rules: vec![QuickRule {
+                id: "fixture-printf".into(),
+                execution,
+                path: "/usr/bin".into(),
+                programs: vec!["/usr/bin/printf".into()],
+                env_additions: Vec::new(),
+                workspace_operands: Vec::new(),
+            }],
+        };
+        let blacklist = Blacklist {
+            revision: "fixture-1".into(),
+            entries: vec![BlacklistEntry {
+                id: "fixture-blocked".into(),
+                execution_digest: canonical_digest(&Execution::Argv {
+                    words: vec![b"/usr/bin/printf".to_vec(), b"blocked".to_vec()],
+                })
+                .expect("blocked execution digest"),
+                reason: "fixture owner denies this command".into(),
+            }],
+        };
+        let mut grant = node.grant.clone();
+        grant.quick_policy_digest = canonical_digest(&quick).expect("quick digest");
+        grant.blacklist_digest = canonical_digest(&blacklist).expect("blacklist digest");
+        let mut placement = node.placement.clone();
+        placement["grant_digest"] = json!(grant.digest().expect("grant digest"));
+        let reservation = json!({"schema":1,"phase":"started","loop":"alpha",
+            "run":"R","worker_uid":3000,"door_scope":"work",
+            "plan":{"loop":"alpha","run":"R",
+                "compute_workspace":{"digest":grant.digest().expect("grant digest"),"grant":grant},
+                "compute_placement":placement}});
+        crate::launch::publish_reservation(
+            &crate::launch::reservation_path(&fixture.home.join("runs"), "R"),
+            &reservation,
+        )
+        .expect("protected workspace reservation");
+        let config = fixture.home.join(".config/loops/alpha");
+        for (file, value) in [
+            ("workspace-quick-policy.json", json!(quick)),
+            ("workspace-blacklist.json", json!(blacklist)),
+        ] {
+            let path = config.join(file);
+            fs::write(&path, serde_json::to_vec(&value).expect("policy JSON"))
+                .expect("policy file");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("policy mode");
+        }
+        let settings = config.join("workers.toml");
+        let mut contents = fs::read_to_string(&settings).unwrap_or_default();
+        let _written = write!(
+            contents,
+            "\n[workspace_policy]\nquick_policy_digest = \"{}\"\nblacklist_digest = \"{}\"\n",
+            grant.quick_policy_digest, grant.blacklist_digest
+        );
+        fs::write(&settings, contents).expect("published policy digests");
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o600))
+            .expect("workers settings mode");
+        let store = fixture.store();
+        for target in [
+            crate::requests::modes::ModeTarget::Loop,
+            crate::requests::modes::ModeTarget::class("compute").expect("class"),
+        ] {
+            store
+                .set_mode(
+                    &target,
+                    Mode::Enforce,
+                    "fixture owner",
+                    "fixture mode",
+                    "1",
+                    &[],
+                )
+                .expect("enforce compute mode");
+        }
+        let context = fixture.home.join("workspace-context.json");
+        fs::write(
+            &context,
+            serde_json::to_vec(&json!({"schema":1,"run":"R",
+                "worker_uid":nix::unistd::Uid::effective().as_raw(),
+                "node_alias":"fixture-node","grant_digest":grant.digest().expect("digest"),
+                "checkout":grant.workspace,"cwd":[],"shell":"/bin/sh"}))
+            .expect("context JSON"),
+        )
+        .expect("stub context");
+        let route = route_for(&fixture.home);
+        let registration = Registration {
+            loop_name: "alpha".into(),
+            run: "R".into(),
+            worker_uid: 3000,
+            loop_uid: 41001,
+            scope: Scope::Work,
+            mirror_ref: "refs/heads/lane/R".into(),
+        };
+        let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join("workspace.sock"));
+        let listener = UnixListener::bind(&socket).expect("workspace service socket");
+        let home = fixture.home.clone();
+        let identity = node.identity;
+        let server = thread::spawn(move || {
+            super::transport::WORKSPACE_FIXTURE_IDENTITY
+                .with(|slot| *slot.borrow_mut() = Some(identity));
+            let runs: std::os::fd::OwnedFd =
+                File::open(home.join("runs")).expect("held runs").into();
+            let config: std::os::fd::OwnedFd = File::open(home.join(".config/loops/alpha"))
+                .expect("held config")
+                .into();
+            let mut replies = Vec::new();
+            for ordinal in 0..5 {
+                let mut peer = FixtureServer::accept(&listener).expect("stub peer");
+                let request = fixture_request(&mut peer).expect("stub request");
+                let wire = serde_json::to_vec(&request).expect("request wire");
+                let started = Instant::now();
+                let reply = super::serve_request_with_agent_at_context(
+                    &mut peer,
+                    &registration,
+                    if ordinal == 4 { 3001 } else { 3000 },
+                    &request,
+                    Some(&route),
+                    Some(&route),
+                    Some(home.as_path()),
+                    None,
+                    Some(&store),
+                    None,
+                    None,
+                    started,
+                    super::lifetime::Start::at(started).expect("lifetime"),
+                    Some(super::WorkspaceSocketContext {
+                        runs: &runs,
+                        config_directory: &config,
+                        owner: nix::unistd::Uid::effective().as_raw(),
+                        wire: &wire,
+                    }),
+                )
+                .expect("workspace service")
+                .0;
+                replies.push(reply);
+            }
+            replies
+        });
+        super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(context));
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let reply = super::transport::stub_call_stream(
+            &socket,
+            &[
+                OsString::from("fixture-node"),
+                OsString::from("/usr/bin/printf fixture-ok"),
+            ],
+            io::empty(),
+            &mut stdout,
+            &mut stderr,
+        )
+        .expect("real stub call");
+        let mut second_stdout = Vec::new();
+        let second = super::transport::stub_call_stream(
+            &socket,
+            &[
+                OsString::from("fixture-node"),
+                OsString::from("/usr/bin/printf fixture-ok"),
+            ],
+            io::empty(),
+            &mut second_stdout,
+            io::sink(),
+        )
+        .expect("second stub call after first reply");
+        let missed = super::transport::stub_call_stream(
+            &socket,
+            &[
+                OsString::from("fixture-node"),
+                OsString::from("/usr/bin/printf other"),
+            ],
+            io::empty(),
+            io::sink(),
+            io::sink(),
+        )
+        .expect("miss refusal");
+        let blocked = super::transport::stub_call_stream(
+            &socket,
+            &[
+                OsString::from("fixture-node"),
+                OsString::from("/usr/bin/printf blocked"),
+            ],
+            io::empty(),
+            io::sink(),
+            io::sink(),
+        )
+        .expect("published blacklist refusal");
+        let foreign_peer = super::transport::stub_call_stream(
+            &socket,
+            &[
+                OsString::from("fixture-node"),
+                OsString::from("/usr/bin/printf fixture-ok"),
+            ],
+            io::empty(),
+            io::sink(),
+            io::sink(),
+        )
+        .expect("foreign mapped peer refusal");
+        super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
+        let server_replies = server.join().expect("service thread");
+        assert_eq!(
+            server_replies,
+            [
+                reply.clone(),
+                second.clone(),
+                missed.clone(),
+                blocked.clone(),
+                foreign_peer.clone()
+            ]
+        );
+        assert_eq!(reply["reason"], "door-complete", "{reply}");
+        assert_eq!(reply["status"], 0);
+        assert_eq!(stdout, b"fixture-ok");
+        assert_eq!(second["reason"], "door-complete");
+        assert_eq!(second_stdout, b"fixture-ok");
+        assert_eq!(stderr, b"");
+        assert_eq!(missed["reason"], "door-workspace-protocol-refusal");
+        assert!(missed["request_record_error"].as_str().is_some_and(|text| {
+            text.contains("without an exact rule") && text.contains("nothing was run")
+        }));
+        assert!(
+            super::final_line(
+                &[
+                    OsString::from("fixture-node"),
+                    OsString::from("/usr/bin/printf other")
+                ],
+                &missed
+            )
+            .is_some_and(
+                |line| line.contains("without an exact rule") && line.contains("nothing was run")
+            )
+        );
+        assert_eq!(blocked["reason"], "door-request-refusal");
+        assert_eq!(foreign_peer["reason"], "door-caller-authority-refusal");
+        assert!(
+            blocked["request_record_error"]
+                .as_str()
+                .is_some_and(
+                    |text| text.contains("fixture-blocked") && text.contains("nothing was run")
+                )
+        );
+        assert!(
+            super::final_line(
+                &[
+                    OsString::from("fixture-node"),
+                    OsString::from("/usr/bin/printf blocked")
+                ],
+                &blocked
+            )
+            .is_some_and(
+                |line| line.contains("fixture-blocked") && line.contains("nothing was run")
+            )
+        );
+        let rows = fixture.store().list().expect("request rows").0;
+        assert_eq!(rows.len(), 3);
+        for row in rows
+            .iter()
+            .filter(|row| row.value()["effect"]["state"] == "completed")
+        {
+            assert_eq!(row.value()["effect"]["state"], "completed");
+            assert_eq!(row.value()["matched_rule"]["rule"], "fixture-printf");
+            assert_eq!(
+                row.value()["matched_rule"]["policy_digest"],
+                grant.quick_policy_digest
+            );
+        }
+        let refused = rows
+            .iter()
+            .find(|row| row.value()["effect"]["state"] == "refused")
+            .expect("blacklist effect");
+        assert_eq!(refused.value()["effect"]["reason"], "door-request-refusal");
+        assert!(
+            refused.value()["would_do"]["reason"]
+                .as_str()
+                .is_some_and(|text| text.contains("fixture-blocked"))
+        );
+    }
 
     /// ´test:unit:unrecorded-ending-retains-observed-stop-cause´
     #[test]

@@ -65,6 +65,19 @@ impl QuickAllowance {
     pub fn evidence(&self) -> Value {
         json!({"rule":self.rule,"revision":self.revision,"bindings":self.bindings})
     }
+
+    /// Recheck the exact request context before an executor uses this table answer.
+    /// # Errors
+    /// Refuses an allowance carried to another envelope or protected grant.
+    pub fn check_context(&self, envelope: &Envelope, grant: &Grant) -> Result<(), Refusal> {
+        if self.context_key != learned_key("compute", envelope, grant, &grant.quick_policy_digest)?
+        {
+            return Err(context(
+                "quick allowance belongs to another workspace request",
+            ));
+        }
+        Ok(())
+    }
 }
 /// Neither caller nor quick table can manufacture the other's policy evidence.
 #[derive(Clone, Debug, PartialEq, Eq)]

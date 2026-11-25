@@ -27,6 +27,11 @@ use crate::error::LaneError;
 #[cfg(test)]
 thread_local! { pub(super) static STUB_TEST_BUDGET: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) }; }
 
+#[cfg(test)]
+thread_local! {
+    pub(super) static WORKSPACE_FIXTURE_IDENTITY: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+}
+
 const CHUNK: usize = 8192;
 #[cfg(test)]
 type FixtureDeadline = Box<dyn FnOnce() -> Instant + Send>;
@@ -473,7 +478,7 @@ struct ExplicitWorkspace {
 
 #[cfg(test)]
 thread_local! {
-    static STUB_CONTEXT_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
+    pub(super) static STUB_CONTEXT_PATH: std::cell::RefCell<Option<PathBuf>> = const { std::cell::RefCell::new(None) };
 }
 
 fn workspace_context_path() -> PathBuf {
@@ -1319,6 +1324,12 @@ impl HostRunner {
             self.authenticated_node(),
             request_id,
         )?;
+        #[cfg(test)]
+        if let Some(identity) = WORKSPACE_FIXTURE_IDENTITY.with(|slot| slot.borrow().clone()) {
+            return super::workspace_adapter::tests::run_fixture_command(
+                &call, &identity, sink, stop, lifetime,
+            );
+        }
         super::workspace_adapter::run_command(&call, self.workspace_command(), sink, stop, lifetime)
     }
 
