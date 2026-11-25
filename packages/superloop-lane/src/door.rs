@@ -3160,6 +3160,8 @@ fn serve_request_with_agent_at_context(
             if matches!(
                 disposition,
                 execute_command::workspace::Disposition::Immediate
+                    | execute_command::workspace::Disposition::ImmediateJudgeAlongside
+                    | execute_command::workspace::Disposition::ImmediateRecordRefusal
                     | execute_command::workspace::Disposition::Block
             ) {
                 let (would_do, quick_rule) = match &classification {
@@ -3181,10 +3183,20 @@ fn serve_request_with_agent_at_context(
                             None,
                         )
                     }
-                    execute_command::workspace::Classification::Miss { .. } => (
-                        json!({"decision":"allow","reason":"learned allowance"}),
-                        None,
-                    ),
+                    execute_command::workspace::Classification::Miss { .. } => match disposition {
+                        execute_command::workspace::Disposition::ImmediateJudgeAlongside => (
+                            json!({"decision":"undecided","reason":"workspace miss awaits judgement"}),
+                            None,
+                        ),
+                        execute_command::workspace::Disposition::ImmediateRecordRefusal => (
+                            json!({"decision":"refuse","reason":"learned refusal"}),
+                            None,
+                        ),
+                        _ => (
+                            json!({"decision":"allow","reason":"learned allowance"}),
+                            None,
+                        ),
+                    },
                 };
                 let mut record = workspace_record(
                     registration,
@@ -3227,23 +3239,12 @@ fn serve_request_with_agent_at_context(
                 let mut check = record.value().clone();
                 check["effect"] = effect.clone();
                 RequestRecord::decode(check)?;
-                if disposition == execute_command::workspace::Disposition::Immediate {
-                    let admission = match &classification {
-                        execute_command::workspace::Classification::QuickAllow(allow) => {
-                            workspace_adapter::WorkspaceAdmission::QuickRule(allow)
-                        }
-                        _ => workspace_adapter::WorkspaceAdmission::Allowance(
-                            learned
-                                .as_ref()
-                                .and_then(WorkspaceLearned::allowance)
-                                .ok_or_else(|| {
-                                    LaneError::input(
-                                        "door-workspace-context-differs",
-                                        "learned allowance is absent",
-                                    )
-                                })?,
-                        ),
-                    };
+                if matches!(
+                    disposition,
+                    execute_command::workspace::Disposition::Immediate
+                        | execute_command::workspace::Disposition::ImmediateJudgeAlongside
+                        | execute_command::workspace::Disposition::ImmediateRecordRefusal
+                ) {
                     if let Some(stop) = wait.stop(admission_deadline) {
                         return Err(LaneError::input(
                             stop.reason(),
@@ -3251,6 +3252,154 @@ fn serve_request_with_agent_at_context(
                         ));
                     }
                     let lease = store.file_active_workspace_claim(record, &request)?;
+                    let intent =
+                        if disposition == execute_command::workspace::Disposition::Immediate {
+                            None
+                        } else {
+                            Some(WorkspaceIntent::from_store(store, &id, &request)?)
+                        };
+                    let admission = match &classification {
+                        execute_command::workspace::Classification::QuickAllow(allow)
+                            if disposition
+                                == execute_command::workspace::Disposition::Immediate =>
+                        {
+                            workspace_adapter::WorkspaceAdmission::QuickRule(allow)
+                        }
+                        _ if disposition == execute_command::workspace::Disposition::Immediate => {
+                            workspace_adapter::WorkspaceAdmission::Allowance(
+                                learned
+                                    .as_ref()
+                                    .and_then(WorkspaceLearned::allowance)
+                                    .ok_or_else(|| {
+                                        LaneError::input(
+                                            "door-workspace-context-differs",
+                                            "learned allowance is absent",
+                                        )
+                                    })?,
+                            )
+                        }
+                        _ => workspace_adapter::WorkspaceAdmission::AllowModeIntent(
+                            intent.as_ref().ok_or_else(|| {
+                                LaneError::input(
+                                    "door-workspace-context-differs",
+                                    "allow-mode intent is absent",
+                                )
+                            })?,
+                        ),
+                    };
+                    if disposition
+                        == execute_command::workspace::Disposition::ImmediateJudgeAlongside
+                    {
+                        let reasons = match &classification {
+                            execute_command::workspace::Classification::Miss { reasons } => {
+                                reasons.as_slice()
+                            }
+                            _ => &[],
+                        };
+                        let prepared = agent
+                            .map(|runner| {
+                                let input = request.agent_input(reasons, "")?;
+                                let bytes = input.encode().map_err(|error| {
+                                    LaneError::input(
+                                        "door-workspace-protocol-refusal",
+                                        error.to_string(),
+                                    )
+                                })?;
+                                Ok::<_, LaneError>((runner, input, bytes))
+                            })
+                            .transpose();
+                        let binding_source = store.request(&id)?.into_value();
+                        let outcome = thread::scope(|scope| {
+                            let task = prepared.as_ref().ok().and_then(Option::as_ref).map(
+                                |(runner, _, bytes)| {
+                                    let identity = json!({"loop":registration.loop_name,
+                                        "run":registration.run,"request_id":id});
+                                    scope.spawn(move || {
+                                        runner.judge_request(
+                                            bytes,
+                                            Duration::from_millis(context.judgement_wait_ms),
+                                            &identity,
+                                        )
+                                    })
+                                },
+                            );
+                            let run = run_claimed_workspace(
+                                stream,
+                                registration,
+                                peer,
+                                &request,
+                                route,
+                                admission,
+                                store,
+                                &wait,
+                                &id,
+                                effect,
+                                ending,
+                                started,
+                                admission_deadline,
+                                &context,
+                                mode,
+                            );
+                            drop(request_guard.take());
+                            if run.is_ok()
+                                && let Err(error) = store.publish_after_reply(&id)
+                            {
+                                post_reply_failure(
+                                    store,
+                                    &registration.run,
+                                    &id,
+                                    "waiting-publication",
+                                    error.kind,
+                                );
+                            }
+                            match (task.map(std::thread::ScopedJoinHandle::join), &prepared) {
+                                (Some(Ok(mut result)), Ok(Some((_, input, _)))) => {
+                                    let _verdict = result.apply_judgement(&binding_source);
+                                    if let Err(error) = store.record_agent(
+                                        &id,
+                                        &result,
+                                        result.rubric_digest.as_deref(),
+                                        configured_model,
+                                        Some(&input.request),
+                                    ) {
+                                        post_reply_failure(
+                                            store,
+                                            &registration.run,
+                                            &id,
+                                            "agent-record",
+                                            error.kind,
+                                        );
+                                    }
+                                }
+                                (Some(Err(_)), _) => post_reply_failure(
+                                    store,
+                                    &registration.run,
+                                    &id,
+                                    "agent-join",
+                                    "door-agent-task-panicked",
+                                ),
+                                (None, Err(error)) => post_reply_failure(
+                                    store,
+                                    &registration.run,
+                                    &id,
+                                    "agent-input",
+                                    error.kind,
+                                ),
+                                (None, Ok(None)) => post_reply_failure(
+                                    store,
+                                    &registration.run,
+                                    &id,
+                                    "agent-config",
+                                    "door-agent-unconfigured",
+                                ),
+                                _ => {}
+                            }
+                            run
+                        });
+                        completed_reply = Some(outcome?);
+                        drop(lease);
+                        return Ok(String::new());
+                    }
                     completed_reply = Some(run_claimed_workspace(
                         stream,
                         registration,
@@ -6069,6 +6218,183 @@ mod tests {
                 .as_str()
                 .is_some_and(|text| text.contains("fixture-blocked"))
         );
+    }
+
+    /// ´test:unit:door-workspace-allow-miss-runs-before-its-agent-verdict´
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn door_workspace_allow_miss_runs_before_its_agent_verdict() {
+        use execute_command::workspace::{Blacklist, QuickPolicy, canonical_digest};
+        use std::fmt::Write as _;
+
+        struct Allows(Mutex<std::sync::mpsc::Receiver<()>>);
+        impl super::agent::AgentRunner for Allows {
+            fn judge(&self, _: &[u8], _: Duration) -> super::agent::RunnerOutcome {
+                self.0
+                    .lock()
+                    .expect("release lock")
+                    .recv_timeout(Duration::from_secs(120))
+                    .expect("test released the agent after the worker reply");
+                let mut answer = super::agent::RunnerOutcome::referral(
+                    "verdict",
+                    "fixture permits the miss",
+                    Instant::now(),
+                );
+                answer.verdict = "allow".into();
+                answer.scope = "loop".into();
+                answer
+            }
+        }
+
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        let store = fixture.store();
+        for target in [
+            crate::requests::modes::ModeTarget::Loop,
+            crate::requests::modes::ModeTarget::class("compute").expect("class"),
+        ] {
+            store
+                .set_mode(
+                    &target,
+                    Mode::Allow,
+                    "fixture owner",
+                    "fixture mode",
+                    "1",
+                    &[],
+                )
+                .expect("allow compute mode");
+        }
+        let node = crate::workspace_node::tests::Fixture::new();
+        let quick = QuickPolicy {
+            revision: "fixture-1".into(),
+            rules: vec![],
+        };
+        let blacklist = Blacklist {
+            revision: "fixture-1".into(),
+            entries: vec![],
+        };
+        let mut grant = node.grant.clone();
+        grant.quick_policy_digest = canonical_digest(&quick).expect("quick digest");
+        grant.blacklist_digest = canonical_digest(&blacklist).expect("blacklist digest");
+        let mut placement = node.placement.clone();
+        placement["grant_digest"] = json!(grant.digest().expect("grant digest"));
+        let reservation = json!({"schema":1,"phase":"started","loop":"alpha",
+            "run":"R","worker_uid":3000,"door_scope":"work",
+            "plan":{"loop":"alpha","run":"R",
+                "compute_workspace":{"digest":grant.digest().expect("grant digest"),
+                    "grant":grant},"compute_placement":placement}});
+        crate::launch::publish_reservation(
+            &crate::launch::reservation_path(&fixture.home.join("runs"), "R"),
+            &reservation,
+        )
+        .expect("protected reservation");
+        let config = fixture.home.join(".config/loops/alpha");
+        for (name, value) in [
+            ("workspace-quick-policy.json", json!(quick)),
+            ("workspace-blacklist.json", json!(blacklist)),
+        ] {
+            let path = config.join(name);
+            fs::write(&path, serde_json::to_vec(&value).expect("policy JSON"))
+                .expect("policy file");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o600)).expect("policy mode");
+        }
+        let settings = config.join("workers.toml");
+        let mut contents = fs::read_to_string(&settings).unwrap_or_default();
+        let _written = write!(
+            contents,
+            "\n[workspace_policy]\nquick_policy_digest = \"{}\"\nblacklist_digest = \"{}\"\n",
+            grant.quick_policy_digest, grant.blacklist_digest
+        );
+        fs::write(&settings, contents).expect("published policy digests");
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o600)).expect("settings mode");
+        let context = fixture.home.join("workspace-context.json");
+        fs::write(
+            &context,
+            serde_json::to_vec(&json!({"schema":1,"run":"R",
+                "worker_uid":nix::unistd::Uid::effective().as_raw(),
+                "node_alias":"fixture-node","grant_digest":grant.digest().expect("digest"),
+                "checkout":grant.workspace,"cwd":[],"shell":"/bin/sh"}))
+            .expect("context JSON"),
+        )
+        .expect("stub context");
+        let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join("allow-miss.sock"));
+        let listener = UnixListener::bind(&socket).expect("service socket");
+        let route = route_for(&fixture.home);
+        let (agent_release, agent_wait) = std::sync::mpsc::sync_channel(1);
+        let registration = Registration {
+            loop_name: "alpha".into(),
+            run: "R".into(),
+            worker_uid: 3000,
+            loop_uid: 41001,
+            scope: Scope::Work,
+            mirror_ref: "refs/heads/lane/R".into(),
+        };
+        let home = fixture.home.clone();
+        let server = thread::spawn(move || {
+            super::transport::WORKSPACE_FIXTURE_IDENTITY
+                .with(|slot| *slot.borrow_mut() = Some(node.identity));
+            let runs: std::os::fd::OwnedFd =
+                File::open(home.join("runs")).expect("held runs").into();
+            let config: std::os::fd::OwnedFd = File::open(home.join(".config/loops/alpha"))
+                .expect("held config")
+                .into();
+            let mut peer = FixtureServer::accept(&listener).expect("stub peer");
+            let allow_agent = Allows(Mutex::new(agent_wait));
+            let request = fixture_request(&mut peer).expect("stub request");
+            let wire = serde_json::to_vec(&request).expect("request wire");
+            let started = Instant::now();
+            super::serve_request_with_agent_at_context(
+                &mut peer,
+                &registration,
+                3000,
+                &request,
+                Some(&route),
+                Some(&route),
+                Some(home.as_path()),
+                None,
+                Some(&store),
+                Some(&allow_agent),
+                None,
+                started,
+                super::lifetime::Start::at(started).expect("lifetime"),
+                Some(super::WorkspaceSocketContext {
+                    runs: &runs,
+                    config_directory: &config,
+                    owner: nix::unistd::Uid::effective().as_raw(),
+                    wire: &wire,
+                    judgement_wait_ms: 30_000,
+                    deadline_ms: super::compute::DEADLINE_MS,
+                }),
+            )
+            .expect("workspace service")
+            .0
+        });
+        super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(context));
+        let mut stdout = Vec::new();
+        let reply = super::transport::stub_call_stream(
+            &socket,
+            &[
+                OsString::from("fixture-node"),
+                OsString::from("/usr/bin/printf other"),
+            ],
+            io::empty(),
+            &mut stdout,
+            io::sink(),
+        )
+        .expect("real stub call");
+        agent_release
+            .send(())
+            .expect("agent may finish after the worker reply");
+        super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
+        assert_eq!(server.join().expect("service thread"), reply);
+        assert_eq!(reply["reason"], "door-complete");
+        assert_eq!(stdout, b"other");
+        let rows = fixture.store().list_run("R").expect("request rows");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].value()["effect"]["state"], "completed");
+        assert_eq!(rows[0].value()["state"], "waiting");
+        assert_eq!(rows[0].value()["agent_verdict"], "allow");
+        assert_eq!(rows[0].value()["would_do_source"], "agent");
     }
 
     /// ´test:unit:unrecorded-ending-retains-observed-stop-cause´
