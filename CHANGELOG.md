@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-25
+
 ### Added
 
 - Print the strict canonical digests of the loop's protected `workspace-quick-policy.json` and `workspace-blacklist.json` with `superloop-lane workspace-digests LOOP`, ready for its `workers.toml` policy table. Let the loop set `workspace_deadline_ms` in `door.toml` from 60,000 through 86,400,000 milliseconds, defaulting to the ordinary 1,800,000-millisecond compute bound; `compute_deadlines` still serves legacy exact forms only. Compatibility: the command needs only this release's lane program, since it prints the same digests a 0.12.0 door already checks. Set the new key only on a door refreshed to this release, as the waiting entry below orders; a 0.12.0 door refuses it, so remove it from `door.toml` before the door step of a rollback to 0.12.0.
@@ -1221,7 +1223,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/coraxloop/superloop-tools/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/coraxloop/superloop-tools/compare/v0.11.0...v0.12.0
 [0.11.0]: https://github.com/coraxloop/superloop-tools/compare/v0.10.0...v0.11.0
 [0.10.0]: https://github.com/coraxloop/superloop-tools/compare/v0.9.0...v0.10.0
