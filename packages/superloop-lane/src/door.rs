@@ -3281,11 +3281,10 @@ fn serve_request_with_agent_at_context(
             let store = fixture_store.or(opened.as_ref()).ok_or_else(|| {
                 LaneError::input("door-workspace-unregistered", "request store is absent")
             })?;
-            let store = store
+            let mode_store = store
                 .for_request(admission_deadline)?
                 .with_wait_credit(std::sync::Arc::clone(&wait));
-            let store = &store;
-            let setting = store.ensure_first_mode("compute")?;
+            let setting = mode_store.ensure_first_mode("compute")?;
             let (learned, _fault) = WorkspaceAllowance::from_store_lookup(store, &request)?;
             let mode = execute_command::policy::DoorMode::from_record(setting["mode"].as_str())
                 .map_err(|error| LaneError::input(error.0, "workspace mode differs"))?;
