@@ -8,8 +8,14 @@ pub mod transaction;
 pub use model::{Collection, Decision, Kind, Request, State};
 pub use review::{Review, now_ns, utc_time};
 
-/// Inclusive byte limit for request-owner transport input.
-pub const OWNER_INPUT_CAP: u64 = 64 * 1024 * 1024;
+/// Inclusive byte limit for a stored request collection snapshot.
+pub const COLLECTION_STORAGE_CAP: u64 = 64 * 1024 * 1024;
+
+/// Space for door records and protocol fields beside two collection images.
+pub const OWNER_INPUT_ENVELOPE_ALLOWANCE: u64 = COLLECTION_STORAGE_CAP + 1024 * 1024;
+
+/// Inclusive byte limit for request-owner transport input and output.
+pub const OWNER_INPUT_CAP: u64 = 2 * COLLECTION_STORAGE_CAP + OWNER_INPUT_ENVELOPE_ALLOWANCE;
 
 /// A named request refusal, without implicit authority or recovery.
 #[derive(Clone, Debug, Eq, PartialEq)]

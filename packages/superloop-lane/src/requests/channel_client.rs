@@ -119,7 +119,10 @@ impl Client {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
         if bytes.len() as u64 > CAP {
-            return Err(failure("owner input exceeds cap"));
+            return Err(failure(format!(
+                "owner input bytes={} exceeds cap={CAP}",
+                bytes.len()
+            )));
         }
         let mut child = command
             .spawn()

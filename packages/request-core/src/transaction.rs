@@ -9,9 +9,9 @@ use nix::fcntl::{AtFlags, Flock, FlockArg, OFlag, openat, renameat};
 use nix::sys::stat::Mode;
 use nix::unistd::{UnlinkatFlags, unlinkat};
 
-use crate::Error;
+use crate::{COLLECTION_STORAGE_CAP, Error};
 
-const MAX_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_BYTES: u64 = COLLECTION_STORAGE_CAP;
 static SEQUENCE: AtomicU64 = AtomicU64::new(0);
 
 fn failure(error: impl std::fmt::Display) -> Error {
