@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Initialize the compute class and loop mode settings from the registry floor before a declared run's first workspace request, so a quick-ruled command no longer receives `door-mode-setting-refusal: class or loop first setting is absent` merely because legacy compute has never run. Read the node entry's standard input without a userspace buffer, so a coalesced `start` or heartbeat frame no longer leaves the command at `door-workspace-not-started` with `node-heartbeat-silence` (``rule:superlooplane:door-mode-initialization``, ``proto:superlooplane:workspace-executor-call``). Compatibility: rebuild and refresh each loop's door service and rebuild and reinstall `superloop-lane-node-exec` on each compute node. Their protocol and stored forms do not change, so either install order is safe; until both sides are refreshed, an affected request may still meet the old refusal. A loop that recorded its compute class mode by hand keeps that setting.
+
 ## [0.13.0] - 2026-11-25
 
 ### Added

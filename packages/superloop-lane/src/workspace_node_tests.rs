@@ -5,6 +5,7 @@ use std::net::Shutdown;
 use std::os::fd::FromRawFd as _;
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
+use std::os::unix::process::CommandExt as _;
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 
@@ -136,8 +137,6 @@ fn workspace_node_process_entry_fixture() {
     if std::env::var_os("SUPERLOOP_NODE_PROCESS_FIXTURE").is_none() {
         return;
     }
-    // SAFETY: the exact parent fixture passes two owned descriptors at these numbers.
-    let input = unsafe { File::from_raw_fd(3) };
     // SAFETY: descriptor 4 is distinct and owned by this child.
     let output = unsafe { File::from_raw_fd(4) };
     let identity = PathBuf::from(
@@ -152,6 +151,13 @@ fn workspace_node_process_entry_fixture() {
         .map_or(10_000, |value| {
             value.parse::<u64>().expect("fixture start milliseconds")
         });
+    if std::env::var_os("SUPERLOOP_NODE_PROCESS_STDIN").is_some() {
+        super::serve_standard_input(output, &identity, Fixture::owner())
+            .expect("installed entry input path");
+        return;
+    }
+    // SAFETY: the descriptor fixture passes a distinct owned input at this number.
+    let input = unsafe { File::from_raw_fd(3) };
     serve_with_limits(
         input,
         output,
@@ -166,6 +172,70 @@ fn workspace_node_process_entry_fixture() {
         },
     )
     .expect("real node serving function");
+}
+
+/// A single pipe write may hold both the call and start frames. The installed
+/// entry's input path must not poll behind bytes buffered by its first read.
+/// ´test:unit:workspace-node-entry-reads-coalesced-control-frames´
+#[test]
+#[allow(unsafe_code)]
+fn workspace_node_entry_reads_coalesced_control_frames() {
+    let fixture = Fixture::new();
+    let call = fixture.call(Execution::Argv {
+        words: vec![b"/bin/true".to_vec()],
+    });
+    let (node_output, mut output) = UnixStream::pair().expect("reply descriptors");
+    output
+        .set_read_timeout(Some(Duration::from_secs(15)))
+        .expect("reply bound");
+    let output_fd = node_output.as_raw_fd();
+    let mut command = Command::new(std::env::current_exe().expect("built entry test binary"));
+    command
+        .args([
+            "--exact",
+            "workspace_node::tests::workspace_node_process_entry_fixture",
+            "--nocapture",
+        ])
+        .env("SUPERLOOP_NODE_PROCESS_FIXTURE", "1")
+        .env("SUPERLOOP_NODE_PROCESS_STDIN", "1")
+        .env("SUPERLOOP_NODE_PROCESS_IDENTITY", &fixture.identity)
+        .env("SUPERLOOP_NODE_PROCESS_SILENCE_MS", "10000")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::inherit());
+    // SAFETY: only async-signal-safe descriptor operations run after fork.
+    unsafe {
+        command.pre_exec(move || {
+            let source = libc::fcntl(output_fd, libc::F_DUPFD_CLOEXEC, 10);
+            if source < 0 || libc::dup2(source, 4) < 0 {
+                return Err(io::Error::last_os_error());
+            }
+            libc::close(source);
+            Ok(())
+        });
+    }
+    let mut child = command.spawn().expect("built entry test process");
+    drop(node_output);
+    let mut input = child.stdin.take().expect("entry input");
+    let frame = |value: &Value| {
+        let body = serde_json::to_vec(value).expect("frame JSON");
+        let mut bytes = u32::try_from(body.len())
+            .expect("frame size")
+            .to_be_bytes()
+            .to_vec();
+        bytes.extend_from_slice(&body);
+        bytes
+    };
+    let mut bytes = frame(&json!(call));
+    bytes.extend_from_slice(&frame(&json!({"schema":1,"type":"start"})));
+    input.write_all(&bytes).expect("one call and control write");
+    let acknowledgement = read_frame(&mut output).expect("acknowledgement");
+    assert_eq!(acknowledgement["type"], "ack");
+    let terminal = read_frame(&mut output).expect("terminal after coalesced start");
+    assert_eq!(terminal["type"], "terminal");
+    assert_eq!(terminal["reason"], "node-complete");
+    drop(input);
+    assert!(child.wait().expect("entry exit").success());
 }
 
 /// ´test:unit:workspace-node-prestart-bound-is-not-renewed-by-heartbeat´
