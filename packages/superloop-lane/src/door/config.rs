@@ -62,6 +62,14 @@ pub(super) fn workspace_judgement_wait_ms(value: &Value) -> Result<u64, LaneErro
         .ok_or_else(|| refusal("workspace_judgement_wait_ms must be 5000..120000"))
 }
 
+pub(super) fn workspace_deadline_ms(value: &Value) -> Result<u64, LaneError> {
+    value
+        .get("workspace_deadline_ms")
+        .map_or(Some(super::compute::DEADLINE_MS), Value::as_u64)
+        .filter(|ms| (60_000..=super::compute::MAX_DEADLINE_MS).contains(ms))
+        .ok_or_else(|| refusal("workspace_deadline_ms must be 60000..86400000"))
+}
+
 fn refusal(detail: impl Into<String>) -> LaneError {
     LaneError::input("door-agent-configuration", detail)
 }
@@ -109,6 +117,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, LaneError> {
             "executable",
             "compute_deadlines",
             "workspace_judgement_wait_ms",
+            "workspace_deadline_ms",
         ]
         .contains(&key.as_str())
     }) {
@@ -171,8 +180,13 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<Value, LaneError> {
         result["workspace_judgement_wait_ms"] =
             serde_json::to_value(wait).map_err(|error| refusal(error.to_string()))?;
     }
+    if let Some(deadline) = table.get("workspace_deadline_ms") {
+        result["workspace_deadline_ms"] =
+            serde_json::to_value(deadline).map_err(|error| refusal(error.to_string()))?;
+    }
     let _validated = compute_deadlines(&result)?;
     let _validated = workspace_judgement_wait_ms(&result)?;
+    let _validated = workspace_deadline_ms(&result)?;
     Ok(result)
 }
 
@@ -203,6 +217,7 @@ pub fn runner(
             != KEYS.len()
                 + usize::from(object.contains_key("compute_deadlines"))
                 + usize::from(object.contains_key("workspace_judgement_wait_ms"))
+                + usize::from(object.contains_key("workspace_deadline_ms"))
             || KEYS.iter().any(|key| !object.contains_key(*key))
     }) {
         return Err(refusal(
@@ -211,6 +226,7 @@ pub fn runner(
     }
     let _validated = compute_deadlines(value)?;
     let _validated = workspace_judgement_wait_ms(value)?;
+    let _validated = workspace_deadline_ms(value)?;
     let path = |key: &str| {
         value[key]
             .as_str()
@@ -255,6 +271,25 @@ pub fn runner(
 mod tests {
     use super::*;
     use std::os::unix::fs::PermissionsExt as _;
+
+    /// ´test:unit:workspace-command-deadline-is-registered-and-bounded´
+    #[test]
+    fn workspace_command_deadline_is_registered_and_bounded() {
+        let prefix = "rubric_root = '/fixture'\nexecutable = '/fixture/codex'\nmodel = 'fixture'\n";
+        let ordinary = parse(prefix.as_bytes()).expect("ordinary config");
+        assert_eq!(workspace_deadline_ms(&ordinary).unwrap(), 1_800_000);
+        for bound in [60_000, 86_400_000] {
+            let value = parse(format!("{prefix}workspace_deadline_ms = {bound}\n").as_bytes())
+                .expect("registered bound");
+            assert_eq!(workspace_deadline_ms(&value).unwrap(), bound);
+        }
+        for bad in [0, 59_999, 86_400_001] {
+            let error = parse(format!("{prefix}workspace_deadline_ms = {bad}\n").as_bytes())
+                .expect_err("out-of-range bound");
+            assert_eq!(error.kind, "door-agent-configuration");
+            assert!(error.detail.contains("workspace_deadline_ms"));
+        }
+    }
 
     /// ´test:unit:workspace-judgement-window-is-registered-and-bounded´
     #[test]

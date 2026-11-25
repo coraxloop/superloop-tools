@@ -437,7 +437,7 @@ fn io_refusal(error: &io::Error) -> LaneError {
 const START_BOUND: Duration = Duration::from_secs(5);
 const ACK_BOUND: Duration = Duration::from_secs(30);
 const FIRST_FRAME_EXIT_BOUND: Duration = Duration::from_secs(5);
-const STOP_TERMINAL_BOUND: Duration = Duration::from_secs(5);
+pub(super) const STOP_TERMINAL_BOUND: Duration = Duration::from_secs(5);
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(30);
 const NODE_DRAIN_AND_WRITE: Duration = Duration::from_secs(240);
 const FINAL_BOUND: Duration = Duration::from_secs(5);

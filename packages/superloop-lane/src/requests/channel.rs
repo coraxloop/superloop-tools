@@ -551,6 +551,17 @@ impl Store {
                     row.body["record"] = record.into_value();
                     row
                 } else {
+                    // A guarded label can answer a live workspace wait before its
+                    // first collection import. The handler's lease and its store
+                    // claim protect that pending request; importing it now would
+                    // expose a second claim for the same start.
+                    if record.value()["operation"] == "compute-workspace"
+                        && record.value()["state"] == "adjudicated"
+                        && record.value()["effect"]["state"] == "pending"
+                        && self.try_publication_activity(record.id(), false)?.is_none()
+                    {
+                        continue;
+                    }
                     imported(&record, &self.loop_name)?
                 };
                 doors.push(row);
