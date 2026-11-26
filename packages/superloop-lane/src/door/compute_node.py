@@ -104,8 +104,8 @@ class PreparationHeld(Deadline):
 
 LIBC = ctypes.CDLL(None, use_errno=True)
 PREPARATION_GRACE = 2
-# An exited supervisor may close its pipes just after the short route poll.
-# Bound that final drain so an escaped writer still cannot hold the run lock.
+# Exit closes the supervisor's own pipe ends before it can be reaped: without another writer,
+# the drain reads only buffered output. Two seconds absorb load; a remaining writer is refused.
 PREPARATION_PIPE_DRAIN_SECONDS = 2
 
 

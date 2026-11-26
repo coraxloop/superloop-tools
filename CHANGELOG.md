@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Drain an exited compute preparation supervisor's pipes for a bounded interval before reporting that a surviving writer holds them. A healthy preparation whose supervisor ended just after the short pipe poll no longer refuses as `door-compute-refresh-refusal`; a writer that really retains the pipes still receives the same refusal and advice. Compatibility: reinstall `superloop-lane-node-exec` on each compute node to receive this repair; the door service, boxed stub, wire and stored records do not change.
+- Let a legacy compute request's node preparation read an exited step's remaining output for up to two seconds, within the request deadline, before it concludes that a surviving writer holds the step's pipes. A Git step or checkout removal that ended just after the 50-millisecond pipe poll no longer refuses a healthy request as `door-compute-refresh-refusal` with `preparation supervisor ended while its writer remains`; a writer that really keeps the pipes open still receives that refusal and advice, up to two seconds later, or `door-request-deadline` when the request's deadline comes first. Compatibility: the preparation program is embedded in the door service and sent with each legacy compute request, so a loop receives this repair with its door step (``rule:superlooplane:door-rebuild-rollout``); the node entry, the wire and stored records do not change.
 
 ## [0.13.2] - 2026-11-26
 
