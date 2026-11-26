@@ -4257,11 +4257,11 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
         let rotation = rotation_shape("R-rotation-1");
         let intent = json!({"index":1,"new_run":"R-rotation-1","reason":"host measurement","at_unix_ns":123,"letter_source":"/synthetic/handover.md","letter_sha256":"digest","round_count":1,"settled_step":"review","reply_sha256":"old-digest","rotation":rotation});
-        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"rounds":[{"step":"review","phase":"settled","reply":{"sha256":"old-digest"},"ended_by":"by-report-after-stop"}],"rotation_intent":intent});
+        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"rounds":[{"step":"review","phase":"settled","reply":{"sha256":"old-digest"},"ended_by":"by-report-after-stop","reply_designation":{"state":"unmeasured"}}],"rotation_intent":intent});
         super::publish_reservation(&super::reservation_path(root.path(), "R"), &old)
             .expect("old reservation");
         if with_new {
-            let new = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R-rotation-1","worker_uid":3001,"letter_source":"/synthetic/handover.md","initial_brief":{"step":"dispatch","name":"brief.txt","state":"placed","sha256":"digest"},"mail":[],"rounds":[{"step":"dispatch","phase":"settled","reply":{"sha256":"new-digest"}}]});
+            let new = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R-rotation-1","worker_uid":3001,"letter_source":"/synthetic/handover.md","initial_brief":{"step":"dispatch","name":"brief.txt","state":"placed","sha256":"digest"},"mail":[],"rounds":[{"step":"dispatch","phase":"settled","reply":{"sha256":"new-digest"},"reply_designation":{"state":"unmeasured"}}]});
             super::publish_reservation(&super::reservation_path(root.path(), "R-rotation-1"), &new)
                 .expect("new reservation");
         }
@@ -4284,6 +4284,10 @@ mod tests {
                 .expect("read")
                 .expect("reservation");
             assert_eq!(record["rotation"], linked);
+            assert_eq!(
+                record["rounds"][0]["reply_designation"],
+                json!({"state":"unmeasured"})
+            );
             if run == "R" {
                 assert!(record.get("rotation_intent").is_none());
             }

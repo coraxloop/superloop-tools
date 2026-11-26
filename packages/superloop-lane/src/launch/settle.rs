@@ -3932,7 +3932,7 @@ printf '{{"thread_id":null}}\n'
             .expect("active step")
             .to_owned();
         let directory = record["rounds"][0]["driver_dir"].clone();
-        record["rounds"] = json!([{"step":step,"budget_seconds":900,"letter":format!("{step}.md"),"phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[]}]);
+        record["rounds"] = json!([{"step":step,"budget_seconds":900,"letter":format!("{step}.md"),"phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[],"reply_designation":{"state":"unmeasured"}}]);
         let reply = plan.driver_dir.join(format!("reply-{step}.txt"));
         if reply.exists() {
             std::fs::remove_file(&reply).expect("absent reply");
