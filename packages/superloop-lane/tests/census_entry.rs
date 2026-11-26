@@ -1810,6 +1810,22 @@ fn reply_row_rewrite_entry_pauses_previews_applies_and_recounts() {
             json!({"state":"unmeasured"})
         );
     }
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut stranded: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    stranded["phase"] = json!("preparing");
+    write(&path, stranded.to_string());
+    let census = success(&fixture.command());
+    assert!(
+        census["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|row| row["kind"] == "preparing-without-launch"
+                && row["run"] == "R"
+                && row["next_command"]
+                    == "superloop-lane retire alpha R --confirm-missing-lease --dry-run")
+    );
 }
 
 /// ´test:integration:door-scope-entry-previews-applies-and-census-reads-current-scope´

@@ -75,6 +75,34 @@ struct DesignationCounts {
 }
 
 impl DesignationCounts {
+    fn preparing(&mut self, root: &Path, record: &Value, loop_name: &str, owner: u32) {
+        if record["phase"] != "preparing" {
+            return;
+        }
+        let run = record["run"].as_str().unwrap_or_default();
+        let lease = match super::retire::probe_retirement_lease(root, run, owner) {
+            Ok(Some(_)) => "unheld",
+            Ok(None) => "absent",
+            Err(error) if error.kind == "retire-busy" => return,
+            Err(error) => {
+                self.blockers.push(json!({"kind":"preparing-lease-unmeasured","run":run,
+                    "next_command":null,"clears_by":format!(
+                        "The preparation lease cannot be measured ({error}); inspect the run before retirement."
+                    )}));
+                return;
+            }
+        };
+        let flag = if lease == "absent" {
+            " --confirm-missing-lease"
+        } else {
+            ""
+        };
+        self.blockers.push(json!({"kind":"preparing-without-launch","run":run,
+            "lease":lease,
+            "next_command":format!("superloop-lane retire {loop_name} {run}{flag} --dry-run"),
+            "clears_by":"Inspect the recovery evidence and any confirmation flags in the retirement preview; apply its preview_sha256 with --expect-digest HEX, then run census rewrite-replies on the retired row."}));
+    }
+
     fn row(&mut self, record: &Value, retired: bool, loop_name: &str) {
         let run = record["run"].as_str().unwrap_or_default();
         let mut absent = 0;
@@ -620,6 +648,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                 )?);
             }
             designation_counts.row(&record, false, loop_name);
+            designation_counts.preparing(root, &record, loop_name, owner);
             let due = credential_refresh(&runs, run, owner)?;
             reservations.push(row(
                 loop_name,
@@ -1057,6 +1086,38 @@ mod tests {
                 "state":"unmeasured","reason":"historical-envelope:four-key-run-refusals",
                 "expires_unix":null,"refresh_due_unix":null,"evidence_state":"published","refused":null
             })
+        );
+        let live_path = reservation_path(&root, "R");
+        let mut stranded = read_reservation(&live_path)
+            .expect("reservation read")
+            .expect("reservation");
+        stranded["phase"] = json!("preparing");
+        stranded["launcher_pid"] = Value::Null;
+        stranded["launcher_start"] = Value::Null;
+        publish_reservation(&live_path, &stranded).expect("stranded preparation");
+        let absent = run(home, "alpha").expect("absent lease census");
+        assert!(
+            absent["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["kind"] == "preparing-without-launch"
+                    && row["run"] == "R"
+                    && row["next_command"]
+                        == "superloop-lane retire alpha R --confirm-missing-lease --dry-run")
+        );
+        let lease = root.join(".prepare-R.lock");
+        fs::write(&lease, b"").expect("unheld lease");
+        fs::set_permissions(&lease, fs::Permissions::from_mode(0o600)).expect("lease mode");
+        let unheld = run(home, "alpha").expect("unheld lease census");
+        assert!(
+            unheld["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["kind"] == "preparing-without-launch"
+                    && row["run"] == "R"
+                    && row["next_command"] == "superloop-lane retire alpha R --dry-run")
         );
         let rewrite = root.join(".retire-rewrite-R.json");
         publish_reservation(&rewrite, &json!({"schema":1,"phase":"unknown"}))

@@ -620,6 +620,8 @@ dependency_ledger += ['''
 
 dependency_ledger += ['''
 {"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:std :: env :: current_exe () . expect (\"test executable\")#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"std :: env :: current_exe () . expect (\"test executable\")","callee":"fixture:superloop-lane:self","lookup":"test-executable","contract":"Reexecute the installed-plan fixture for production runtime preparation, native creation and private exercise readers","binding":"current_exe"}
+{"kind":"call","site":"packages/superloop-lane/src/tests/reader_custody.rs:\"/usr/bin/cc\"#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"\"/usr/bin/cc\"","callee":"external:/usr/bin/cc","lookup":"test-executable","contract":"Compile the existing ancestry interposer for built checkpoint and checkout publication fixtures"}
+{"kind":"call","site":"packages/superloop-lane/src/tests/reader_custody.rs:& binary#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"& binary","callee":"bin/superloop-lane","lookup":"test-executable","binding":"CARGO_BIN_EXE_superloop-lane","contract":"Execute the built lane command after its Cargo source-age check to prove checkpoint and checkout retain every round designation"}
 {"kind":"call","site":"packages/superloop-lane/src/tests/runtime_preparation.rs:& request . argv [0]#1","caller":"superloop-lane","owner":"SUPERLOOPLANE","selector":"& request . argv [0]","callee":"external:/usr/bin/podman","lookup":"test-executable","contract":"Enter real rootless worker, runtime, creation and private reader production vectors with their descriptor frames"}
 ''']
 

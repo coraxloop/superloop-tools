@@ -1219,7 +1219,8 @@ fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
     let source: Value = serde_json::from_slice(&output.stdout).expect("measured seed identity");
     let object = source["seed"].as_str().expect("seed object").to_owned();
     record["phase"] = json!("settled");
-    record["rounds"] = json!([{"step":"dispatch","phase":"settled","ended_by":"by-report"}]);
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled","ended_by":"by-report",
+        "reply_designation":{"state":"unmeasured"}}]);
     record["declared_sources"] = json!([source]);
     for key in [
         "checkpoints",
@@ -1251,6 +1252,17 @@ fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
         );
         let report: Value = serde_json::from_slice(&output.stdout).expect("production report");
         assert_eq!(report["command"], operation);
+        if matches!(operation, "checkpoint" | "checkout") {
+            let saved: Value = serde_json::from_slice(
+                &fs::read(runs.join(".reservation-R.json")).expect("published reservation"),
+            )
+            .expect("reservation JSON");
+            assert_eq!(
+                saved["rounds"][0]["reply_designation"],
+                json!({"state":"unmeasured"}),
+                "{operation} dropped the member"
+            );
+        }
         if operation == "checkout" {
             assert_eq!(
                 fs::read(checkout_parent(home).join("checkout/letter")).expect("checkout"),
@@ -1265,6 +1277,84 @@ fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
     assert_eq!(record["checkpoints"][0]["bares"][0]["object"], object);
     assert_eq!(record["checkouts"][0]["object"], object);
     assert_eq!(record["imports"][0]["object"], object);
+    let library = home.join("report-custody.so");
+    let compiled = std::process::Command::new("/usr/bin/cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/report_custody.c"))
+        .arg("-ldl")
+        .output()
+        .expect("compile ancestry fixture");
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    for (operation, args) in [
+        (
+            "checkpoint",
+            vec!["checkpoint".to_owned(), "alpha".into(), "R".into()],
+        ),
+        (
+            "checkout",
+            vec![
+                "checkout".to_owned(),
+                "alpha".into(),
+                "R".into(),
+                "--repo".into(),
+                "tools".into(),
+                "--into".into(),
+                checkout_parent(home)
+                    .join("checkout-public")
+                    .display()
+                    .to_string(),
+            ],
+        ),
+    ] {
+        let binary = runtime_preparation::binary();
+        let member = if operation == "checkpoint" {
+            "checkpoints"
+        } else {
+            "checkouts"
+        };
+        let before: Value = serde_json::from_slice(
+            &fs::read(runs.join(".reservation-R.json")).expect("before public command"),
+        )
+        .expect("before JSON");
+        let prior = before[member].as_array().expect("prior rows").len();
+        // Model only the protected temporary ancestry. The named run is absent,
+        // so the command and its private child read the real reservation bytes.
+        let output = std::process::Command::new(&binary)
+            .args(&args)
+            .env("HOME", home)
+            .env("LD_PRELOAD", &library)
+            .env("REPORT_FIXTURE_RUN", runs.join("never-created"))
+            .env("REPORT_FIXTURE_READABLE", "1")
+            .output()
+            .expect("public command");
+        assert!(
+            output.status.success(),
+            "{operation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("public result");
+        assert_eq!(report["command"], operation);
+        let saved: Value = serde_json::from_slice(
+            &fs::read(runs.join(".reservation-R.json")).expect("public reservation"),
+        )
+        .expect("reservation JSON");
+        assert_eq!(
+            saved[member].as_array().expect("published rows").len(),
+            prior + 1
+        );
+        for round in saved["rounds"].as_array().expect("round rows") {
+            assert_eq!(
+                round["reply_designation"],
+                json!({"state":"unmeasured"}),
+                "{operation} dropped the member"
+            );
+        }
+    }
 }
 
 /// # Panics
