@@ -561,6 +561,7 @@ impl Store {
         only_pending: bool,
     ) -> Result<Vec<Request>, LaneError> {
         let mut doors = Vec::new();
+        let index = Self::channel_projection_index(collection);
         for (_, _, records) in runs {
             for record in records {
                 if !matches!(
@@ -570,9 +571,9 @@ impl Store {
                     continue;
                 }
                 let id = common_id(&self.loop_name, record.id());
-                let row = if let Some(saved) = collection.requests.iter().find(|row| row.id == id) {
+                let row = if let Some(saved) = index.get(id.as_str()) {
                     check_source(record, &source(saved)?)?;
-                    let mut row = saved.clone();
+                    let mut row = (*saved).clone();
                     row.body["record"] = record.value().clone();
                     row
                 } else {
@@ -1112,6 +1113,7 @@ mod tests {
             for selected in [None, Some(&collection)] {
                 assert_projection_equivalent(&store, &records, selected);
             }
+            assert_doors_equivalent(&store, &records, &collection);
             if count != 0 {
                 let mut actual = records.clone();
                 store
@@ -1123,8 +1125,10 @@ mod tests {
                 let duplicate = imported(&records[0], "alpha").unwrap();
                 collection.requests.push(duplicate);
                 assert_projection_equivalent(&store, &records, Some(&collection));
+                assert_doors_equivalent(&store, &records, &collection);
                 collection.requests.reverse();
                 assert_projection_equivalent(&store, &records, Some(&collection));
+                assert_doors_equivalent(&store, &records, &collection);
                 let mut reversed = records.clone();
                 store
                     .channel_project(&mut reversed, Some(&collection))
@@ -1135,6 +1139,41 @@ mod tests {
                     "first match {count}"
                 );
             }
+        }
+    }
+
+    fn assert_doors_equivalent(store: &Store, records: &[RequestRecord], collection: &Collection) {
+        let runs = vec![("R".to_owned(), 1, records.to_vec())];
+        for only_pending in [false, true] {
+            let mut expected = Vec::new();
+            for record in records {
+                let id = common_id(&store.loop_name, record.id());
+                let row = collection
+                    .requests
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map_or_else(
+                        || imported(record, &store.loop_name).expect("imported row"),
+                        |saved| {
+                            check_source(record, &source(saved).expect("source"))
+                                .expect("unchanged source");
+                            let mut row = saved.clone();
+                            row.body["record"] = record.value().clone();
+                            row
+                        },
+                    );
+                if !only_pending || row.state.pending() {
+                    expected.push(row);
+                }
+            }
+            let actual = store
+                .channel_doors(collection, &runs, only_pending)
+                .expect("indexed door rows");
+            assert_eq!(
+                serde_json::to_vec(&actual).expect("actual bytes"),
+                serde_json::to_vec(&expected).expect("linear bytes"),
+                "complete preview door bytes, pending={only_pending}"
+            );
         }
     }
 

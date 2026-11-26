@@ -4335,14 +4335,6 @@ fn serve_request_with_agent_at_context(
         }
     };
     let miss = would_do["decision"] == "undecided";
-    if miss && rubric.is_none() && !registered_receive {
-        let _reported = writeln!(
-            io::stderr().lock(),
-            "door learned lookup: {}",
-            json!({"class":class,"operation":operation.name(),"shape_key":shape_key,
-                "reason":would_do["reason"]})
-        );
-    }
     let agent_words: Vec<_> = args
         .as_deref()
         .unwrap_or_default()
@@ -4436,6 +4428,39 @@ fn serve_request_with_agent_at_context(
         return Ok((reply, Vec::new()));
     }
     let _publication_activity = activity.map_err(io::Error::other)?;
+    if miss && rubric.is_none() && !registered_receive {
+        let mut event = json!({"class":class,"operation":operation.name(),
+            "shape_key":shape_key,"reason":would_do["reason"],
+            "run":registration.run,"request_id":id});
+        if let Some(reason) = would_do["reason"].as_str() {
+            if reason.starts_with("requests-learned-index: index capacity exhausted") {
+                event["remedy"] = json!(format!(
+                    "superloop-lane requests status {}; rebuilding unchanged custody cannot reduce this limit",
+                    registration.loop_name
+                ));
+            } else if reason.starts_with("requests-learned-index: index rebuild refused") {
+                event["remedy"] = json!(format!(
+                    "superloop-lane requests status {}; correct the named custody or read failure before rebuilding",
+                    registration.loop_name
+                ));
+            } else if reason.starts_with("requests-learned-index: index unavailable")
+                || reason.starts_with("requests-learned-index: index damaged")
+            {
+                event["remedy"] = json!(format!(
+                    "stop the door service; superloop-lane requests rebuild-index {}",
+                    registration.loop_name
+                ));
+            }
+        }
+        let line = format!("door learned lookup: {event}");
+        let reported = writeln!(io::stderr().lock(), "{line}");
+        #[cfg(test)]
+        if reported.is_ok() {
+            LEGACY_MISS_JOURNAL.with(|slot| slot.borrow_mut().push(line));
+        }
+        #[cfg(not(test))]
+        drop(reported);
+    }
     let _ending = RequestEnding {
         store: &store,
         wait: &wait,
@@ -5493,6 +5518,7 @@ pub(crate) fn exercise_mode_fixture(
 #[cfg(test)]
 std::thread_local! {
     static EXERCISE_CAT_RUNNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LEGACY_MISS_JOURNAL: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     static FIXTURE_ABORT_AFTER_BIND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FIXTURE_ABORT_AFTER_RELAX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FIXTURE_FAIL_RESTORE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -10032,6 +10058,96 @@ mod tests {
             assert!(rows[0].value()["state"].is_null());
             assert_incomplete(&fixture, rows[0].id());
             assert_eq!(calls.load(Ordering::SeqCst), 0);
+        }
+    }
+
+    /// # Panics
+    /// Panics if a learned miss has the wrong journal remedy, leaks it into the worker frame, or fails to file the request.
+    /// ´test:unit:door-legacy-learned-miss-journals-filed-request´
+    #[test]
+    fn door_legacy_learned_miss_journals_filed_request() {
+        for (index_bytes, reason_prefix, remedy) in [
+            (
+                b"{\"unavailable\":true}".as_slice(),
+                "requests-learned-index: index unavailable",
+                "stop the door service; superloop-lane requests rebuild-index alpha",
+            ),
+            (
+                b"{\"unavailable\":true,\"reason\":\"shape index capacity\"}".as_slice(),
+                "requests-learned-index: index capacity exhausted (shape index capacity)",
+                "superloop-lane requests status alpha; rebuilding unchanged custody cannot reduce this limit",
+            ),
+            (
+                b"{\"unavailable\":true,\"reason\":\"index byte capacity\"}".as_slice(),
+                "requests-learned-index: index capacity exhausted (index byte capacity)",
+                "superloop-lane requests status alpha; rebuilding unchanged custody cannot reduce this limit",
+            ),
+            (
+                b"{\"unavailable\":true,\"reason\":\"index rebuild refused: requests-rewrite-refusal\"}".as_slice(),
+                "requests-learned-index: index rebuild refused: requests-rewrite-refusal",
+                "superloop-lane requests status alpha; correct the named custody or read failure before rebuilding",
+            ),
+            (
+                b"bad JSON".as_slice(),
+                "requests-learned-index: index damaged:",
+                "stop the door service; superloop-lane requests rebuild-index alpha",
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, Mode::Allow);
+            let registration = Registration::from_row(
+                &json!({"name":"alpha","uid":41001}),
+                "alpha",
+                "R",
+                3000,
+                Scope::Work,
+            )
+            .expect("registration");
+            let route = route_for(&fixture.home);
+            let (runner, _, _) = counting_runner(&fixture);
+            let index_path = fixture.home.join(".config/loops/alpha/door-learned.json");
+            fs::write(&index_path, index_bytes).expect("index fixture");
+            fs::set_permissions(&index_path, fs::Permissions::from_mode(0o600))
+                .expect("index mode");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
+            peer.shutdown(Shutdown::Write).expect("end input");
+            super::LEGACY_MISS_JOURNAL.with(|slot| slot.borrow_mut().clear());
+            let (reply, _) = super::serve_request_with_agent(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                None,
+                None,
+                Instant::now(),
+            )
+            .expect("service reply");
+            let frame = peer.answer();
+            let rows = store.list_run("R").expect("filed request");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(frame["reason"], reply["reason"]);
+            assert!(!frame.to_string().contains("door learned lookup"));
+            assert!(!frame.to_string().contains(remedy));
+            let events =
+                super::LEGACY_MISS_JOURNAL.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+            assert_eq!(events.len(), 1);
+            let event: Value = serde_json::from_str(
+                events[0]
+                    .strip_prefix("door learned lookup: ")
+                    .expect("journal prefix"),
+            )
+            .expect("journal JSON");
+            assert_eq!(event["run"], "R");
+            assert_eq!(event["request_id"], rows[0].id());
+            assert_eq!(event["remedy"], remedy);
+            assert!(event["reason"].as_str().expect("miss reason").starts_with(reason_prefix));
         }
     }
 

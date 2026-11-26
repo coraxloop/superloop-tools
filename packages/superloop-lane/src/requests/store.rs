@@ -2512,7 +2512,7 @@ impl Store {
             .as_deref()
             .map(serde_json::from_slice)
             .transpose()
-            .map_err(|error| problem("requests-learned-index", error.to_string()))?
+            .map_err(|error| problem("requests-learned-index", format!("index damaged: {error}")))?
             .unwrap_or(Value::Null);
         if index.is_null() || index["unavailable"] == true {
             return Ok(index);
@@ -2541,7 +2541,10 @@ impl Store {
                     })
             })
         {
-            return Err(problem("requests-learned-index", "index shape differs"));
+            return Err(problem(
+                "requests-learned-index",
+                "index damaged: shape differs",
+            ));
         }
         Ok(index)
     }
@@ -2626,7 +2629,46 @@ impl Store {
         shape: &str,
     ) -> Result<(Value, Value, Value), LaneError> {
         let _lock = self.lock(false)?;
-        let index = self.read_learned()?;
+        let index = self.read_learned().map_err(|error| {
+            if error.detail.starts_with("index damaged:") {
+                problem(
+                    "requests-learned-index",
+                    format!(
+                        "{}; stop the door service and run requests rebuild-index LOOP",
+                        error.detail
+                    ),
+                )
+            } else {
+                error
+            }
+        })?;
+        if index["unavailable"] == true
+            && matches!(
+                index["reason"].as_str(),
+                Some("shape index capacity" | "index byte capacity")
+            )
+        {
+            return Err(problem(
+                "requests-learned-index",
+                format!(
+                    "index capacity exhausted ({}); rebuilding unchanged custody cannot reduce this limit",
+                    index["reason"].as_str().unwrap_or_default()
+                ),
+            ));
+        }
+        if index["unavailable"] == true
+            && index["reason"]
+                .as_str()
+                .is_some_and(|reason| reason.starts_with("index rebuild refused"))
+        {
+            return Err(problem(
+                "requests-learned-index",
+                format!(
+                    "{}; correct the named custody or read failure before rebuilding",
+                    index["reason"].as_str().unwrap_or_default()
+                ),
+            ));
+        }
         if index["schema"] != 1 || !index["groups"].is_object() {
             return Err(problem(
                 "requests-learned-index",
