@@ -3200,6 +3200,44 @@ mod tests {
         crate::install::lock_loop_config(&config, false).expect("hold released after cleanup");
     }
 
+    /// ´test:unit:pending-rotation-retains-configuration-while-recovery-waits´
+    #[test]
+    fn pending_rotation_retains_configuration_while_recovery_waits() {
+        let (home, _unused_root, _old, _handover) = rotation_entry_fixture();
+        let (root, intent) = intent_fixture(true);
+        let config = home.path().join(".config/loops/alpha");
+        let mailbox = super::lock_mailbox(root.path(), "R", nix::unistd::Uid::effective().as_raw())
+            .expect("hold pending recovery's mailbox");
+        let (ready, observed) = std::sync::mpsc::channel();
+        let home_path = home.path().to_path_buf();
+        let root_path = root.path().to_path_buf();
+        let recovery = std::thread::spawn(move || {
+            let _configuration = super::configuration_hold(&home_path, &rotate_form(false, None))
+                .expect("changing hold");
+            ready.send(()).expect("signal held configuration");
+            recover_pending_rotation(
+                &root_path,
+                "R",
+                &intent,
+                false,
+                nix::unistd::Uid::effective().as_raw(),
+            )
+            .expect("reconcile pending intent")
+        });
+        observed
+            .recv()
+            .expect("recovery entered with configuration");
+        let error = crate::install::lock_loop_config(&config, false)
+            .expect_err("pending recovery excludes installer");
+        assert_eq!(error.kind, "install-busy");
+        drop(mailbox);
+        assert_eq!(
+            recovery.join().expect("recovery thread")["new_run"],
+            "R-rotation-1"
+        );
+        crate::install::lock_loop_config(&config, false).expect("released after recovery");
+    }
+
     fn entry_preview(
         home: &Path,
         root: &Path,
