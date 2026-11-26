@@ -3844,6 +3844,15 @@ fn refresh_during_changing_launch(
     let vendor = home.join(".var/loops/alpha/sockets/vendor/proxy.sock");
     let _vendor = std::os::unix::net::UnixListener::bind(&vendor).expect("vendor socket");
     fs::set_permissions(&vendor, fs::Permissions::from_mode(0o660)).expect("vendor mode");
+    let unit_dir = home.join(".config/systemd/user");
+    fs::create_dir_all(&unit_dir).expect("vendor unit directory");
+    fs::set_permissions(&unit_dir, fs::Permissions::from_mode(0o700)).expect("unit directory mode");
+    let unit = unit_dir.join("superloop-lane-vendor@alpha.service");
+    let unit_text = include_str!("../../data/vendor-proxy.service.in")
+        .replace("@LANE_BIN@", &lane_bin.to_string_lossy())
+        .replace("@PROXY_BIN@", &home.join("proxy-fixture").to_string_lossy());
+    fs::write(&unit, unit_text).expect("recognized vendor unit");
+    fs::set_permissions(&unit, fs::Permissions::from_mode(0o644)).expect("unit mode");
     let mut changing = LaunchRequest {
         backend: None,
         loop_name: launch.loop_name.clone(),

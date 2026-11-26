@@ -1944,7 +1944,7 @@ fn public_install_preflights_and_repeats_without_writing() {
     assert_eq!(
         conflict.detail,
         format!(
-            "{} differs from its pinned unit or report",
+            "{} differs from its pinned unit or report; preview install --pilot alpha --move-proxy --dry-run",
             vendor_unit.display()
         )
     );
@@ -2193,6 +2193,24 @@ fn public_install_preflights_and_repeats_without_writing() {
             .contains(&"c".repeat(64))
     );
     let unit = home.join(".config/systemd/user/superloop-lane-vendor@alpha.service");
+    let original_unit = fs::read_to_string(&unit).expect("recognized unit");
+    let other_proxy = home.join("proxy-other");
+    fs::write(
+        &unit,
+        original_unit.replace(
+            &format!("--proxy-bin {}", changing.proxy_bin.display()),
+            &format!("--proxy-bin {}", other_proxy.display()),
+        ),
+    )
+    .expect("other installed proxy path");
+    let move_refusal = run(home, &changing).expect_err("ordinary install does not move a path");
+    assert_eq!(move_refusal.kind, "install-conflict");
+    assert!(
+        move_refusal.detail.contains("--move-proxy --dry-run"),
+        "{}",
+        move_refusal.detail
+    );
+    fs::write(&unit, original_unit).expect("restore recognized unit");
     fs::write(&unit, "fixture conflict\n").expect("mutate unit");
     let refusal = run(home, &changing).expect_err("unit conflict");
     assert_eq!(refusal.status, 2);

@@ -192,6 +192,87 @@ pub struct InstallRequest {
     pub unit_dir: Option<PathBuf>,
 }
 
+/// Explicit path movement at an idle installation.
+#[derive(Clone, Debug)]
+pub struct ProxyMoveRequest {
+    pub loop_name: String,
+    pub proxy_bin: Option<PathBuf>,
+    pub dry_run: bool,
+    pub expect_digest: Option<String>,
+}
+
+impl ProxyMoveRequest {
+    /// Parse the move's two-phase command without changing ordinary install selection.
+    ///
+    /// # Errors
+    ///
+    /// Refuses missing, duplicate, and mixed options.
+    pub fn parse(args: &[String]) -> Result<Self, LaneError> {
+        let mut pilot = false;
+        let mut move_proxy = false;
+        let mut loop_name = None;
+        let mut proxy_bin = None;
+        let mut dry_run = false;
+        let mut expect_digest = None;
+        let mut words = args.iter();
+        while let Some(word) = words.next() {
+            match word.as_str() {
+                "--pilot" if !pilot => pilot = true,
+                "--move-proxy" if !move_proxy => move_proxy = true,
+                "--dry-run" if !dry_run => dry_run = true,
+                "--proxy-bin" if proxy_bin.is_none() => {
+                    proxy_bin =
+                        Some(PathBuf::from(words.next().ok_or_else(|| {
+                            LaneError::input("usage", "--proxy-bin needs a file")
+                        })?));
+                }
+                "--expect-digest" if expect_digest.is_none() => {
+                    expect_digest = Some(
+                        words
+                            .next()
+                            .ok_or_else(|| {
+                                LaneError::input("usage", "--expect-digest needs a digest")
+                            })?
+                            .clone(),
+                    );
+                }
+                word if !word.starts_with('-') && loop_name.is_none() => {
+                    loop_name = Some(word.to_owned());
+                }
+                _ => {
+                    return Err(LaneError::input(
+                        "usage",
+                        format!("unknown or duplicate move option {word}"),
+                    ));
+                }
+            }
+        }
+        let loop_name = loop_name.ok_or_else(|| LaneError::input("usage", "move needs a loop"))?;
+        loop_home::validate_name(&loop_name)
+            .map_err(|error| LaneError::input("usage", error.message()))?;
+        if !pilot || !move_proxy || dry_run == expect_digest.is_some() {
+            return Err(LaneError::input(
+                "usage",
+                "install --pilot LOOP --move-proxy needs exactly one of --dry-run and --expect-digest HEX",
+            ));
+        }
+        if expect_digest.as_ref().is_some_and(|digest: &String| {
+            digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+        }) {
+            return Err(LaneError::input(
+                "usage",
+                "--expect-digest needs 64 hex digits",
+            ));
+        }
+        Ok(Self {
+            loop_name,
+            proxy_bin,
+            dry_run,
+            expect_digest: expect_digest.map(|digest| digest.to_ascii_lowercase()),
+        })
+    }
+}
+
 fn default_proxy_bin(lane_bin: &Path, config: &Path) -> Result<PathBuf, LaneError> {
     let sibling = lane_bin.with_file_name("superloop-lane-vendor-proxy");
     match fs::symlink_metadata(&sibling) {
@@ -1345,6 +1426,639 @@ pub(crate) fn validate_generation(path: &Path, bytes: &[u8]) -> Result<Value, La
     Ok(record)
 }
 
+fn vendor_unit_path(
+    owner_home: &Path,
+    loop_name: &str,
+    generation: &Value,
+) -> Result<PathBuf, LaneError> {
+    loop_home::validate_name(loop_name)
+        .map_err(|error| LaneError::input("proxy-unit", error.message()))?;
+    let unit_dir = generation["unit_dir"]
+        .as_str()
+        .filter(|word| !word.is_empty())
+        .ok_or_else(|| LaneError::input("proxy-unit", "generation has no unit_dir"))?;
+    let unit_dir = Path::new(unit_dir);
+    if !unit_dir.is_absolute()
+        || !unit_dir.starts_with(owner_home.join(".config"))
+        || unit_dir.components().any(|part| {
+            matches!(
+                part,
+                std::path::Component::ParentDir | std::path::Component::CurDir
+            )
+        })
+    {
+        return Err(LaneError::input(
+            "proxy-unit",
+            "generation unit_dir is unsafe",
+        ));
+    }
+    Ok(unit_dir.join(format!("superloop-lane-vendor@{loop_name}.service")))
+}
+
+fn vendor_unit_bytes(
+    owner_home: &Path,
+    loop_name: &str,
+    generation: &Value,
+) -> Result<Option<Vec<u8>>, LaneError> {
+    let path = vendor_unit_path(owner_home, loop_name, generation)?;
+    let parent = path
+        .parent()
+        .ok_or_else(|| LaneError::input("proxy-unit", "vendor unit has no parent"))?;
+    match fs::symlink_metadata(parent) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(LaneError::input(
+                "proxy-unit",
+                format!("{}: {error}", parent.display()),
+            ));
+        }
+        Ok(_) => {}
+    }
+    crate::pinned::read_private_optional(
+        owner_home,
+        &path,
+        nix::unistd::Uid::effective().as_raw(),
+        0o644,
+        65_536,
+    )
+    .map_err(|error| LaneError::input("proxy-unit", error.detail))
+}
+
+fn vendor_exec_fields(text: &str) -> Option<(PathBuf, PathBuf)> {
+    let mut lines = text.lines().filter(|line| line.starts_with("ExecStart="));
+    let line = lines.next()?;
+    if lines.next().is_some() {
+        return None;
+    }
+    let (lane_program, proxy) = line
+        .strip_prefix("ExecStart=")
+        .and_then(|line| line.split_once(" _proxy %i --proxy-bin "))?;
+    let valid_word = |word: &str| {
+        Path::new(word).is_absolute()
+            && word
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || b"_./-".contains(&byte))
+    };
+    if !valid_word(lane_program) || !valid_word(proxy) {
+        return None;
+    }
+    Some((PathBuf::from(lane_program), PathBuf::from(proxy)))
+}
+
+/// Read the proxy argument only from the unit form this installer publishes.
+pub(crate) fn recognized_vendor_unit(
+    owner_home: &Path,
+    loop_name: &str,
+    generation: &Value,
+) -> Result<Option<(PathBuf, PathBuf)>, LaneError> {
+    let Some(bytes) = vendor_unit_bytes(owner_home, loop_name, generation)? else {
+        return Ok(None);
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Ok(None);
+    };
+    let Some((lane_program, proxy)) = vendor_exec_fields(text) else {
+        return Ok(None);
+    };
+    let expected = include_str!("../data/vendor-proxy.service.in")
+        .replace("@LANE_BIN@", &lane_program.to_string_lossy())
+        .replace("@PROXY_BIN@", &proxy.to_string_lossy());
+    if text != expected {
+        return Ok(None);
+    }
+    Ok(Some((lane_program, proxy)))
+}
+
+/// Repair can restore safe unit drift but must not erase a path disagreement.
+pub(crate) fn require_repair_proxy_unit_agreement(
+    owner_home: &Path,
+    loop_name: &str,
+    generation: &Value,
+) -> Result<(), LaneError> {
+    // Repair's own preflight owns refusal of a malformed unit directory.
+    if vendor_unit_path(owner_home, loop_name, generation).is_err() {
+        return Ok(());
+    }
+    let Ok(bytes) = vendor_unit_bytes(owner_home, loop_name, generation) else {
+        return Ok(());
+    };
+    let Some(bytes) = bytes else {
+        return Ok(());
+    };
+    // Only a readable proxy argument is path evidence, and a move publishes
+    // that form; repair restores any other unit text as it did before.
+    let text = std::str::from_utf8(&bytes).ok();
+    let Some((_, observed)) = text.and_then(vendor_exec_fields) else {
+        return Ok(());
+    };
+    let recorded = generation["proxy_bin"]
+        .as_str()
+        .ok_or_else(|| LaneError::input("proxy-unit", "generation has no proxy_bin"))?;
+    if observed == Path::new(recorded) {
+        Ok(())
+    } else {
+        Err(LaneError::input(
+            "proxy-unit",
+            format!(
+                "vendor unit proxy argument {} differs from generation proxy_bin {recorded}; preview install --pilot {loop_name} --move-proxy --dry-run",
+                observed.display()
+            ),
+        ))
+    }
+}
+
+pub(crate) fn require_proxy_unit_agreement(
+    owner_home: &Path,
+    loop_name: &str,
+    generation: &Value,
+) -> Result<(), LaneError> {
+    let recorded = generation["proxy_bin"]
+        .as_str()
+        .filter(|word| !word.is_empty())
+        .ok_or_else(|| LaneError::input("proxy-unit", "generation has no proxy_bin"))?;
+    let observed = recognized_vendor_unit(owner_home, loop_name, generation)?;
+    let Some((_, proxy)) = observed else {
+        return Err(LaneError::input(
+            "proxy-unit",
+            format!(
+                "vendor unit is absent or not in the installer's unedited form; run superloop-lane repair {loop_name}"
+            ),
+        ));
+    };
+    if proxy == Path::new(recorded) {
+        return Ok(());
+    }
+    Err(LaneError::input(
+        "proxy-unit",
+        format!(
+            "vendor unit proxy argument {} differs from generation proxy_bin {recorded}; preview install --pilot {loop_name} --move-proxy --dry-run",
+            proxy.display()
+        ),
+    ))
+}
+
+#[derive(Clone, Debug)]
+struct ProxyService {
+    state: String,
+    active: bool,
+    invocation: String,
+    bound_by: Vec<String>,
+    reload_pending: bool,
+}
+
+fn parse_proxy_service(text: &str, unit: &Path) -> Result<ProxyService, LaneError> {
+    let mut fields = std::collections::BTreeMap::new();
+    for line in text.lines() {
+        let (key, value) = line.split_once('=').ok_or_else(|| {
+            LaneError::input("proxy-unit", "system manager gave a malformed property")
+        })?;
+        if fields.insert(key, value).is_some() || line.len() > 65_536 {
+            return Err(LaneError::input(
+                "proxy-unit",
+                "system manager repeated or oversized a property",
+            ));
+        }
+    }
+    let field = |name: &str| {
+        fields
+            .get(name)
+            .copied()
+            .ok_or_else(|| LaneError::input("proxy-unit", format!("system manager omitted {name}")))
+    };
+    if fields.len() != 7
+        || field("LoadState")? != "loaded"
+        || field("FragmentPath")? != unit.to_string_lossy()
+        || !field("DropInPaths")?.is_empty()
+    {
+        return Err(LaneError::input(
+            "proxy-unit",
+            "vendor unit is not the recognized loaded file without overrides; preview install --pilot LOOP --move-proxy --dry-run",
+        ));
+    }
+    let state = field("ActiveState")?;
+    let active = match state {
+        "active" => true,
+        "inactive" | "failed" => false,
+        state => {
+            return Err(LaneError::input(
+                "proxy-unit",
+                format!("vendor service state {state} is not stable"),
+            ));
+        }
+    };
+    let invocation = field("InvocationID")?.to_owned();
+    let reload_pending = match field("NeedDaemonReload")? {
+        "yes" => true,
+        "no" => false,
+        _ => {
+            return Err(LaneError::input(
+                "proxy-unit",
+                "vendor unit reload state is unknown",
+            ));
+        }
+    };
+    if active
+        && (invocation.len() != 32 || !invocation.bytes().all(|byte| byte.is_ascii_hexdigit()))
+    {
+        return Err(LaneError::input(
+            "proxy-unit",
+            "active vendor service has no valid invocation",
+        ));
+    }
+    let bound_by = field("BoundBy")?
+        .split_ascii_whitespace()
+        .map(str::to_owned)
+        .collect();
+    Ok(ProxyService {
+        state: state.to_owned(),
+        active,
+        invocation,
+        bound_by,
+        reload_pending,
+    })
+}
+
+fn proxy_manager(owner_home: &Path, loop_name: &str, action: &str) -> Result<String, LaneError> {
+    let unit = format!("superloop-lane-vendor@{loop_name}.service");
+    let args = match action {
+        "show" => vec![
+            "--user".into(), "--no-pager".into(), "--full".into(), "--all".into(), "show".into(),
+            "--property=LoadState,ActiveState,InvocationID,BoundBy,FragmentPath,DropInPaths,NeedDaemonReload".into(),
+            unit,
+        ],
+        "reload" => vec!["--user".into(), "daemon-reload".into()],
+        "restart" => vec!["--user".into(), "restart".into(), unit],
+        _ => return Err(LaneError::input("proxy-unit", "unknown manager action")),
+    };
+    crate::pinned::owner_executable(
+        Path::new("/usr/bin/systemctl"),
+        nix::unistd::Uid::effective().as_raw(),
+    )?;
+    crate::build::run_checked(
+        Path::new("/usr/bin/systemctl"),
+        args,
+        &podman_environment(owner_home)?,
+        owner_home,
+        if action == "show" { 5 } else { 30 },
+        "proxy-unit",
+    )
+}
+
+fn probe_move_target(owner_home: &Path, target: &Path) -> Result<(), LaneError> {
+    let spec = child(
+        target,
+        vec!["--version".into()],
+        &podman_environment(owner_home)?,
+        owner_home,
+        5,
+        "proxy-program",
+    );
+    let result = crate::build::run_child(&spec, None)?;
+    let record: superloop_cli_common::ControlPlaneRecord = serde_json::from_slice(&result.stderr)
+        .map_err(|_| {
+        LaneError::input("proxy-program", "target has no structured version answer")
+    })?;
+    if !result.status.success()
+        || !result.stdout.is_empty()
+        || record.schema != 1
+        || record.command != "vendor-proxy"
+        || record.kind != superloop_cli_common::ControlPlaneRecordKind::Version
+        || !matches!(record.fields, Some(superloop_cli_common::ControlPlaneFields::Version { version, .. }) if version == format!("vendor-proxy {}", env!("CARGO_PKG_VERSION")))
+    {
+        return Err(LaneError::input(
+            "proxy-program",
+            "target differs from the lane's proxy version",
+        ));
+    }
+    Ok(())
+}
+
+#[derive(Debug)]
+struct ProxyMovePlan {
+    generation: Value,
+    generation_path: PathBuf,
+    unit_path: PathBuf,
+    lane_program: PathBuf,
+    target: PathBuf,
+    target_sha256: String,
+    unit_bytes: Vec<u8>,
+    service: ProxyService,
+    busy: Vec<String>,
+    preview_sha256: String,
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn proxy_move_plan(
+    owner_home: &Path,
+    request: &ProxyMoveRequest,
+    manager: &mut impl FnMut(&str) -> Result<String, LaneError>,
+    inventory: &mut impl FnMut() -> Result<Vec<String>, LaneError>,
+    version: &mut impl FnMut(&Path) -> Result<(), LaneError>,
+) -> Result<ProxyMovePlan, LaneError> {
+    let config = owner_home.join(".config/loops").join(&request.loop_name);
+    let generation_path = config.join("install-generation.json");
+    let generation_bytes = crate::pinned::read_private(
+        owner_home,
+        &generation_path,
+        nix::unistd::Uid::effective().as_raw(),
+        0o600,
+        65_536,
+    )?;
+    let generation = validate_generation(&generation_path, &generation_bytes)?;
+    if generation["phase"] != "complete" || generation["loop"] != request.loop_name {
+        return Err(LaneError::input(
+            "install-generation",
+            "move needs a complete generation of this loop",
+        ));
+    }
+    let recorded = generation["proxy_bin"]
+        .as_str()
+        .filter(|path| Path::new(path).is_absolute())
+        .ok_or_else(|| {
+            LaneError::input(
+                "install-generation",
+                "generation proxy_bin is absent or relative",
+            )
+        })?;
+    let recorded_digest = generation["proxy_sha256"].as_str().ok_or_else(|| {
+        LaneError::input("install-generation", "generation proxy_sha256 is absent")
+    })?;
+    if recorded_digest.len() != 64 || !recorded_digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(LaneError::input(
+            "install-generation",
+            "generation proxy_sha256 is malformed",
+        ));
+    }
+    let target = request
+        .proxy_bin
+        .clone()
+        .or_else(|| {
+            option_env!("SUPERLOOP_LANE_PROXY_BIN")
+                .filter(|path| !path.is_empty())
+                .map(PathBuf::from)
+        })
+        .ok_or_else(|| {
+            LaneError::input(
+                "proxy-program",
+                "no configured Meson proxy; supply --proxy-bin",
+            )
+        })?;
+    crate::pinned::owner_executable_word(&target, nix::unistd::Uid::effective().as_raw())?;
+    version(&target)?;
+    let target_sha256 = sha256(&target)?;
+    let unit_path = vendor_unit_path(owner_home, &request.loop_name, &generation)?;
+    let (lane_program, installed_proxy) =
+        recognized_vendor_unit(owner_home, &request.loop_name, &generation)?.ok_or_else(|| {
+            LaneError::input(
+                "proxy-unit",
+                format!(
+                    "installed vendor unit is absent or unrecognized; run superloop-lane repair {}",
+                    request.loop_name
+                ),
+            )
+        })?;
+    crate::pinned::owner_executable_word(&lane_program, nix::unistd::Uid::effective().as_raw())?;
+    let current_unit = crate::pinned::read_private(
+        owner_home,
+        &unit_path,
+        nix::unistd::Uid::effective().as_raw(),
+        0o644,
+        65_536,
+    )?;
+    let unit_bytes = include_str!("../data/vendor-proxy.service.in")
+        .replace("@LANE_BIN@", &lane_program.to_string_lossy())
+        .replace("@PROXY_BIN@", &target.to_string_lossy())
+        .into_bytes();
+    let service = parse_proxy_service(&manager("show")?, &unit_path)?;
+    let mut busy = inventory()?;
+    busy.extend(
+        service
+            .bound_by
+            .iter()
+            .map(|unit| format!("vendor BoundBy={unit}")),
+    );
+    busy.sort();
+    let evidence = json!({
+        "schema":1, "loop":request.loop_name,
+        "generation_sha256":crate::build::sha256_bytes(&generation_bytes, owner_home)?,
+        "recorded_proxy":recorded, "installed_proxy":installed_proxy,
+        "current_unit_sha256":crate::build::sha256_bytes(&current_unit, owner_home)?,
+        "proposed_unit_sha256":crate::build::sha256_bytes(&unit_bytes, owner_home)?,
+        "target":target, "target_sha256":target_sha256,
+        "service_state":service.state, "service_active":service.active, "invocation":service.invocation,
+        "reload_pending":service.reload_pending,
+        "busy":busy,
+    });
+    let preview_sha256 = crate::build::sha256_bytes(
+        &serde_json::to_vec(&evidence)
+            .map_err(|error| LaneError::operation("proxy-move", error.to_string()))?,
+        owner_home,
+    )?;
+    Ok(ProxyMovePlan {
+        generation,
+        generation_path,
+        unit_path,
+        lane_program,
+        target,
+        target_sha256,
+        unit_bytes,
+        service,
+        busy,
+        preview_sha256,
+    })
+}
+
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+fn run_proxy_move_with(
+    owner_home: &Path,
+    request: &ProxyMoveRequest,
+    manager: &mut impl FnMut(&str) -> Result<String, LaneError>,
+    inventory: &mut impl FnMut() -> Result<Vec<String>, LaneError>,
+    version: &mut impl FnMut(&Path) -> Result<(), LaneError>,
+    after: &mut impl FnMut(&str) -> Result<(), LaneError>,
+) -> Result<Value, LaneError> {
+    let started = Instant::now();
+    let config = owner_home.join(".config/loops").join(&request.loop_name);
+    let blocked_preview = |detail: String| json!({"schema":1,"command":"install","move_proxy":true,"dry_run":true,"blocked":true,"busy":[detail],"actions":[],"wall_seconds":started.elapsed().as_secs_f64()});
+    let (config_hold, generation_hold) = if request.dry_run {
+        // These probes do not create a lock file or reserve a future apply.
+        let exclusive = match lock_loop_config(&config, false) {
+            Ok(hold) => hold,
+            Err(error) if error.kind == "install-busy" => {
+                return Ok(blocked_preview(error.detail));
+            }
+            Err(error) => return Err(error),
+        };
+        let exclusive_generation = match lock_generation(&config, true, false) {
+            Err(error) if error.kind == "install-busy" => {
+                return Ok(blocked_preview(error.detail));
+            }
+            other => other?,
+        }
+        .ok_or_else(|| {
+            LaneError::input(
+                "install-generation-lock",
+                "complete generation has no lock file",
+            )
+        })?;
+        drop(exclusive_generation);
+        drop(exclusive);
+        let shared = match lock_loop_config(&config, true) {
+            Err(error) if error.kind == "install-busy" => {
+                return Ok(blocked_preview(error.detail));
+            }
+            other => other?,
+        };
+        let generation = match lock_generation(&config, false, false) {
+            Err(error) if error.kind == "install-busy" => {
+                return Ok(blocked_preview(error.detail));
+            }
+            other => other?,
+        }
+        .ok_or_else(|| {
+            LaneError::input(
+                "install-generation-lock",
+                "complete generation has no lock file",
+            )
+        })?;
+        (shared, generation)
+    } else {
+        let exclusive = lock_loop_config(&config, false)?;
+        let generation = lock_generation(&config, true, false)?.ok_or_else(|| {
+            LaneError::input(
+                "install-generation-lock",
+                "complete generation has no lock file",
+            )
+        })?;
+        (exclusive, generation)
+    };
+    let plan = proxy_move_plan(owner_home, request, manager, inventory, version)?;
+    if request.dry_run {
+        let blocked = !plan.busy.is_empty();
+        let proposed_unit = std::str::from_utf8(&plan.unit_bytes)
+            .map_err(|error| LaneError::operation("proxy-unit", error.to_string()))?;
+        let actions = if blocked {
+            Vec::new()
+        } else if plan.service.active {
+            vec![
+                "replace vendor unit",
+                "daemon-reload",
+                "restart vendor service",
+                "publish generation",
+            ]
+        } else {
+            vec!["replace vendor unit", "daemon-reload", "publish generation"]
+        };
+        return Ok(json!({
+            "schema":1,"command":"install","loop":request.loop_name,"move_proxy":true,
+            "dry_run":true,"blocked":blocked,"busy":plan.busy,"actions":actions,
+            "preview_sha256":plan.preview_sha256,"target":plan.target,
+            "target_sha256":plan.target_sha256,"service_state":plan.service.state,"service_active":plan.service.active,
+            "unit_path":plan.unit_path,"proposed_unit":proposed_unit,
+            "unit_activation_performed":false,"wall_seconds":started.elapsed().as_secs_f64(),
+        }));
+    }
+    let expected = request
+        .expect_digest
+        .as_deref()
+        .ok_or_else(|| LaneError::input("usage", "apply needs --expect-digest"))?;
+    if plan.preview_sha256 != expected {
+        return Err(LaneError::input(
+            "install-preview",
+            format!(
+                "move preview changed; repeat install --pilot {} --move-proxy --dry-run",
+                request.loop_name
+            ),
+        ));
+    }
+    if !plan.busy.is_empty() {
+        return Err(LaneError::input("install-busy", plan.busy.join("; ")));
+    }
+    let before_replace = parse_proxy_service(&manager("show")?, &plan.unit_path)?;
+    if !before_replace.bound_by.is_empty()
+        || before_replace.state != plan.service.state
+        || before_replace.invocation != plan.service.invocation
+    {
+        return Err(LaneError::input(
+            "install-busy",
+            "vendor service changed before unit replacement",
+        ));
+    }
+    let destination = FileDestination {
+        path: plan.unit_path.clone(),
+        bytes: plan.unit_bytes,
+        mode: 0o644,
+    };
+    replace_unit(&destination, &plan.lane_program)?;
+    after("unit")?;
+    manager("reload")?;
+    after("reload")?;
+    let after_reload = parse_proxy_service(&manager("show")?, &plan.unit_path)?;
+    if after_reload.reload_pending
+        || after_reload.state != plan.service.state
+        || after_reload.invocation != plan.service.invocation
+        || !after_reload.bound_by.is_empty()
+    {
+        return Err(LaneError::input(
+            "proxy-unit",
+            "vendor state or BoundBy changed after reload; repeat the move preview",
+        ));
+    }
+    if plan.service.active {
+        // The show above is the last idle proof before the single restart job.
+        manager("restart")?;
+        after("restart")?;
+        let renewed = parse_proxy_service(&manager("show")?, &plan.unit_path)?;
+        if renewed.reload_pending
+            || !renewed.active
+            || renewed.invocation == plan.service.invocation
+            || !renewed.bound_by.is_empty()
+        {
+            return Err(LaneError::input(
+                "proxy-unit",
+                "restart did not establish a new active vendor invocation",
+            ));
+        }
+    }
+    if sha256(&plan.target)? != plan.target_sha256 {
+        return Err(LaneError::input(
+            "proxy-program",
+            "target bytes changed before generation publication",
+        ));
+    }
+    let mut generation = plan.generation;
+    generation["proxy_bin"] = json!(plan.target);
+    generation["proxy_sha256"] = json!(plan.target_sha256);
+    publish_generation(&plan.generation_path, &generation)?;
+    after("generation")?;
+    drop(generation_hold);
+    drop(config_hold);
+    Ok(json!({
+        "schema":1,"command":"install","loop":request.loop_name,"move_proxy":true,
+        "dry_run":false,"blocked":false,"proxy_bin":generation["proxy_bin"],
+        "proxy_sha256":generation["proxy_sha256"],"unit_activation_performed":plan.service.active,
+        "service_state":plan.service.state,"service_active":plan.service.active,"inactive_start_remedy":if plan.service.active { Value::Null } else { json!("use the existing owner-controlled vendor start route") },
+        "wall_seconds":started.elapsed().as_secs_f64(),
+    }))
+}
+
+/// Preview or apply an explicit idle proxy path movement.
+///
+/// # Errors
+///
+/// Refuses missing installation evidence, busy work, changed preview inputs, or failed service actions.
+pub fn run_proxy_move(owner_home: &Path, request: &ProxyMoveRequest) -> Result<Value, LaneError> {
+    run_proxy_move_with(
+        owner_home,
+        request,
+        &mut |action| proxy_manager(owner_home, &request.loop_name, action),
+        &mut || crate::install_door::proxy_move_busy(owner_home, &request.loop_name),
+        &mut |target| probe_move_target(owner_home, target),
+        &mut |_| Ok(()),
+    )
+}
+
 fn vendor_generation_fields(
     record: &mut Value,
     payloads: &[crate::build::payload::InstallPayload],
@@ -1908,6 +2622,23 @@ fn run_with_lane_bin_inner(
                         "restore the named vendor unit or remove the conflicting unit while the loop is idle; an absent or preparing generation cannot be repaired".to_owned()
                     };
                     refresh_refusal(&format!("{}: {}; {remedy}, then retry the refresh; moving the proxy path requires separate vendor-unit replacement", error.kind, error.detail))
+                } else if !request.repair
+                    && error.kind == "install-conflict"
+                    && error.detail.ends_with("differs from its pinned unit or report")
+                    && prior_generation.as_ref().is_some_and(|generation| {
+                        recognized_vendor_unit(owner_home, &request.loop_name, generation)
+                            .ok()
+                            .flatten()
+                            .is_some_and(|(_, proxy)| proxy != remedy_proxy)
+                    })
+                {
+                    LaneError::input(
+                        "install-conflict",
+                        format!(
+                            "{}; preview install --pilot {} --move-proxy --dry-run",
+                            error.detail, request.loop_name
+                        ),
+                    )
                 } else {
                     error
                 }
@@ -2380,8 +3111,652 @@ mod tests {
     use crate::pinned::owner_executable;
     use std::collections::BTreeMap;
     use std::fs;
-    use std::os::unix::fs::{PermissionsExt as _, symlink};
+    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _, symlink};
     use std::path::Path;
+
+    /// ´test:unit:proxy-move-requires-one-preview-or-apply-choice´
+    #[test]
+    fn proxy_move_requires_one_preview_or_apply_choice() {
+        let parse = |words: &[&str]| {
+            super::ProxyMoveRequest::parse(
+                &words
+                    .iter()
+                    .map(|word| (*word).to_owned())
+                    .collect::<Vec<_>>(),
+            )
+        };
+        assert!(parse(&["--pilot", "alpha", "--move-proxy", "--dry-run"]).is_ok());
+        assert!(
+            parse(&[
+                "--pilot",
+                "alpha",
+                "--move-proxy",
+                "--expect-digest",
+                &"a".repeat(64)
+            ])
+            .is_ok()
+        );
+        for words in [
+            vec!["--pilot", "alpha", "--move-proxy"],
+            vec![
+                "--pilot",
+                "alpha",
+                "--move-proxy",
+                "--dry-run",
+                "--expect-digest",
+                "bad",
+            ],
+            vec!["alpha", "--move-proxy", "--dry-run"],
+        ] {
+            assert!(parse(&words).is_err());
+        }
+    }
+
+    /// ´test:unit:proxy-move-preview-reports-an-exclusive-holder-without-probing-the-manager´
+    #[test]
+    fn proxy_move_preview_reports_an_exclusive_holder_without_probing_the_manager() {
+        let (fixture, request, _) = move_fixture();
+        let home = fixture.path();
+        let config = home.join(".config/loops/alpha");
+        let _holder = super::lock_loop_config(&config, false).expect("exclusive holder");
+        let result = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut |_| panic!("manager must not be read"),
+            &mut || panic!("inventory must not be read"),
+            &mut |_| panic!("target must not be run"),
+            &mut |_| panic!("no mutation"),
+        )
+        .expect("blocked preview");
+        assert_eq!(result["blocked"], true);
+        assert_eq!(result["actions"], serde_json::json!([]));
+        assert!(result["busy"].to_string().contains("alpha"));
+    }
+
+    /// ´test:unit:proxy-move-preview-preserves-installed-files-and-absent-lock´
+    #[test]
+    fn proxy_move_preview_preserves_installed_files_and_absent_lock() {
+        let (fixture, request, unit) = move_fixture();
+        let home = fixture.path();
+        let generation = home.join(".config/loops/alpha/install-generation.json");
+        let lock = home.join(".config/loops/alpha/.install-generation.lock");
+        let before_unit = fs::read(&unit).expect("unit bytes");
+        let before_generation = fs::read(&generation).expect("generation bytes");
+        let before_lock = fs::metadata(&lock).expect("installed lock");
+        let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+            assert_eq!(action, "show");
+            Ok(manager_answer(&unit, false, "", "", false))
+        };
+        let mut inventory = || Ok(Vec::new());
+        let mut version = |_: &Path| Ok(());
+        super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("unblocked preview");
+        assert_eq!(fs::read(&unit).expect("unit unchanged"), before_unit);
+        assert_eq!(
+            fs::read(&generation).expect("generation unchanged"),
+            before_generation
+        );
+        assert_eq!(
+            fs::metadata(&lock).expect("lock unchanged").ino(),
+            before_lock.ino()
+        );
+        fs::remove_file(&lock).expect("remove fixture's installed lock");
+        let error = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect_err("missing generation lock refuses without creating one");
+        assert_eq!(error.kind, "install-generation-lock");
+        assert!(!lock.exists());
+    }
+
+    /// ´test:unit:repair-allows-safe-unit-drift-without-erasing-proxy-path-evidence´
+    #[test]
+    fn repair_allows_safe_unit_drift_without_erasing_proxy_path_evidence() {
+        let (fixture, _, unit) = move_fixture();
+        let home = fixture.path();
+        let generation =
+            super::read_generation(&home.join(".config/loops/alpha/install-generation.json"))
+                .expect("generation read")
+                .expect("generation");
+        let original = fs::read_to_string(&unit).expect("unit");
+        let safe_drift = original.replace("Description=Superloop", "Description=Updated Superloop");
+        fs::write(&unit, safe_drift).expect("safe drift");
+        super::require_repair_proxy_unit_agreement(home, "alpha", &generation)
+            .expect("description drift is repairable");
+        fs::write(
+            &unit,
+            original.replace("--proxy-bin /old/proxy", "--proxy-bin /new/proxy"),
+        )
+        .expect("path drift");
+        assert_eq!(
+            super::require_repair_proxy_unit_agreement(home, "alpha", &generation)
+                .expect_err("path drift refuses repair")
+                .kind,
+            "proxy-unit"
+        );
+    }
+
+    fn move_fixture() -> (
+        tempfile::TempDir,
+        super::ProxyMoveRequest,
+        std::path::PathBuf,
+    ) {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let home = fixture.path();
+        let config = home.join(".config/loops/alpha");
+        let unit_dir = home.join(".config/systemd/user");
+        let bin_dir = home.join("bin");
+        for dir in [&config, &unit_dir, &bin_dir] {
+            fs::create_dir_all(dir).expect("directory");
+            fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).expect("directory mode");
+        }
+        let lane = bin_dir.join("superloop-lane");
+        let target = bin_dir.join("proxy-new");
+        for path in [&lane, &target] {
+            fs::write(path, b"#!/bin/sh\nexit 0\n").expect("executable");
+            fs::set_permissions(path, fs::Permissions::from_mode(0o755)).expect("executable mode");
+        }
+        let unit = unit_dir.join("superloop-lane-vendor@alpha.service");
+        let text = include_str!("../data/vendor-proxy.service.in")
+            .replace("@LANE_BIN@", &lane.to_string_lossy())
+            .replace("@PROXY_BIN@", "/old/proxy");
+        fs::write(&unit, text).expect("unit");
+        fs::set_permissions(&unit, fs::Permissions::from_mode(0o644)).expect("unit mode");
+        let generation = serde_json::json!({
+            "schema":1,"phase":"complete","loop":"alpha","unit_dir":unit_dir,
+            "proxy_bin":"/old/proxy","proxy_sha256":"a".repeat(64), "unrelated_pin":"kept",
+        });
+        fs::write(
+            config.join("install-generation.json"),
+            generation.to_string(),
+        )
+        .expect("generation");
+        fs::set_permissions(
+            config.join("install-generation.json"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("generation mode");
+        fs::write(config.join(".install-generation.lock"), b"").expect("generation lock");
+        fs::set_permissions(
+            config.join(".install-generation.lock"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("lock mode");
+        let request = super::ProxyMoveRequest {
+            loop_name: "alpha".into(),
+            proxy_bin: Some(target),
+            dry_run: true,
+            expect_digest: None,
+        };
+        (fixture, request, unit)
+    }
+
+    fn manager_answer(
+        unit: &Path,
+        active: bool,
+        invocation: &str,
+        bound_by: &str,
+        reload_pending: bool,
+    ) -> String {
+        format!(
+            "LoadState=loaded\nActiveState={}\nInvocationID={invocation}\nBoundBy={bound_by}\nFragmentPath={}\nDropInPaths=\nNeedDaemonReload={}\n",
+            if active { "active" } else { "inactive" },
+            unit.display(),
+            if reload_pending { "yes" } else { "no" },
+        )
+    }
+
+    /// ´test:unit:proxy-move-retries-after-each-publication-boundary´
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn proxy_move_retries_after_each_publication_boundary() {
+        for interrupted in ["unit", "reload", "restart", "generation"] {
+            let (fixture, mut request, unit) = move_fixture();
+            let home = fixture.path();
+            let invocation = std::cell::Cell::new('a');
+            let reload_pending = std::cell::Cell::new(false);
+            let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+                match action {
+                    "show" => Ok(manager_answer(
+                        &unit,
+                        true,
+                        &invocation.get().to_string().repeat(32),
+                        "",
+                        reload_pending.get(),
+                    )),
+                    "reload" => {
+                        reload_pending.set(false);
+                        Ok(String::new())
+                    }
+                    "restart" => {
+                        invocation.set(if invocation.get() == 'a' { 'b' } else { 'c' });
+                        Ok(String::new())
+                    }
+                    _ => panic!("unexpected manager action"),
+                }
+            };
+            let mut inventory = || Ok(Vec::new());
+            let mut version = |_: &Path| Ok(());
+            let preview = super::run_proxy_move_with(
+                home,
+                &request,
+                &mut manager,
+                &mut inventory,
+                &mut version,
+                &mut |_| Ok(()),
+            )
+            .expect("preview");
+            assert_eq!(preview["blocked"], false);
+            request.dry_run = false;
+            request.expect_digest = preview["preview_sha256"].as_str().map(str::to_owned);
+            let failure = super::run_proxy_move_with(
+                home,
+                &request,
+                &mut manager,
+                &mut inventory,
+                &mut version,
+                &mut |stage| {
+                    if stage == "unit" {
+                        reload_pending.set(true);
+                    }
+                    if stage == interrupted {
+                        Err(crate::error::LaneError::operation("fixture-stop", stage))
+                    } else {
+                        Ok(())
+                    }
+                },
+            );
+            assert_eq!(
+                failure.expect_err("injected interruption").kind,
+                "fixture-stop"
+            );
+            let generation_path = home.join(".config/loops/alpha/install-generation.json");
+            let generation: serde_json::Value =
+                serde_json::from_slice(&fs::read(&generation_path).expect("generation"))
+                    .expect("record");
+            if interrupted != "generation" {
+                assert_eq!(generation["proxy_bin"], "/old/proxy");
+                assert_eq!(
+                    super::require_proxy_unit_agreement(home, "alpha", &generation)
+                        .expect_err("split refuses new work")
+                        .kind,
+                    "proxy-unit"
+                );
+            }
+            request.dry_run = true;
+            request.expect_digest = None;
+            let new_preview = super::run_proxy_move_with(
+                home,
+                &request,
+                &mut manager,
+                &mut inventory,
+                &mut version,
+                &mut |_| Ok(()),
+            )
+            .expect("retry preview");
+            request.dry_run = false;
+            request.expect_digest = new_preview["preview_sha256"].as_str().map(str::to_owned);
+            let result = super::run_proxy_move_with(
+                home,
+                &request,
+                &mut manager,
+                &mut inventory,
+                &mut version,
+                &mut |stage| {
+                    if stage == "unit" {
+                        reload_pending.set(true);
+                    }
+                    Ok(())
+                },
+            )
+            .expect("retry apply");
+            assert_eq!(result["unit_activation_performed"], true);
+            let completed: serde_json::Value =
+                serde_json::from_slice(&fs::read(generation_path).expect("generation"))
+                    .expect("record");
+            assert_eq!(
+                completed["proxy_bin"],
+                request
+                    .proxy_bin
+                    .as_ref()
+                    .expect("target")
+                    .display()
+                    .to_string()
+            );
+            assert_eq!(completed["unrelated_pin"], "kept");
+        }
+    }
+
+    /// ´test:unit:proxy-move-requires-idle-and-a-measured-activation´
+    #[test]
+    fn proxy_move_requires_idle_and_a_measured_activation() {
+        let (fixture, mut request, unit) = move_fixture();
+        let home = fixture.path();
+        let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+            match action {
+                "show" => Ok(manager_answer(
+                    &unit,
+                    true,
+                    &"a".repeat(32),
+                    "run@alpha.service",
+                    false,
+                )),
+                "reload" | "restart" => panic!("busy preview must not mutate"),
+                _ => panic!("unexpected manager action"),
+            }
+        };
+        let mut inventory = || Ok(Vec::new());
+        let mut version = |_: &Path| Ok(());
+        let blocked = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("blocked preview");
+        assert_eq!(blocked["blocked"], true);
+        assert_eq!(blocked["actions"], serde_json::json!([]));
+        assert!(blocked["busy"].to_string().contains("BoundBy"));
+        request.dry_run = false;
+        request.expect_digest = blocked["preview_sha256"].as_str().map(str::to_owned);
+        assert_eq!(
+            super::run_proxy_move_with(
+                home,
+                &request,
+                &mut manager,
+                &mut inventory,
+                &mut version,
+                &mut |_| Ok(())
+            )
+            .expect_err("busy apply")
+            .kind,
+            "install-busy"
+        );
+
+        let same_invocation = std::cell::Cell::new(true);
+        let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+            match action {
+                "show" => Ok(manager_answer(&unit, true, &"a".repeat(32), "", false)),
+                "reload" => Ok(String::new()),
+                "restart" => {
+                    same_invocation.set(false);
+                    Ok(String::new())
+                }
+                _ => panic!("unexpected manager action"),
+            }
+        };
+        request.dry_run = true;
+        request.expect_digest = None;
+        let preview = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("idle preview");
+        request.dry_run = false;
+        request.expect_digest = preview["preview_sha256"].as_str().map(str::to_owned);
+        assert_eq!(
+            super::run_proxy_move_with(
+                home,
+                &request,
+                &mut manager,
+                &mut inventory,
+                &mut version,
+                &mut |_| Ok(())
+            )
+            .expect_err("same invocation refuses")
+            .kind,
+            "proxy-unit"
+        );
+        assert!(!same_invocation.get());
+        let generation =
+            super::read_generation(&home.join(".config/loops/alpha/install-generation.json"))
+                .expect("generation read")
+                .expect("generation");
+        assert_eq!(generation["proxy_bin"], "/old/proxy");
+    }
+
+    /// ´test:unit:proxy-move-preview-binds-target-and-keeps-inactive-service-inactive´
+    #[test]
+    fn proxy_move_preview_binds_target_and_keeps_inactive_service_inactive() {
+        let (fixture, mut request, unit) = move_fixture();
+        let home = fixture.path();
+        let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+            match action {
+                "show" => Ok(manager_answer(&unit, false, "", "", false)),
+                "reload" => Ok(String::new()),
+                "restart" => panic!("inactive service must not restart"),
+                _ => panic!("unexpected manager action"),
+            }
+        };
+        let mut inventory = || Ok(Vec::new());
+        let mut version = |_: &Path| Ok(());
+        let preview = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("preview");
+        let proposed = preview["proposed_unit"]
+            .as_str()
+            .expect("proposed unit text");
+        assert_eq!(
+            proposed,
+            include_str!("../data/vendor-proxy.service.in")
+                .replace(
+                    "@LANE_BIN@",
+                    &home.join("bin/superloop-lane").to_string_lossy()
+                )
+                .replace(
+                    "@PROXY_BIN@",
+                    &request
+                        .proxy_bin
+                        .as_ref()
+                        .expect("target")
+                        .to_string_lossy()
+                )
+        );
+        let target = request.proxy_bin.as_ref().expect("target");
+        fs::write(target, b"#!/bin/sh\nexit 1\n").expect("changed target");
+        request.dry_run = false;
+        request.expect_digest = preview["preview_sha256"].as_str().map(str::to_owned);
+        assert_eq!(
+            super::run_proxy_move_with(
+                home,
+                &request,
+                &mut manager,
+                &mut inventory,
+                &mut version,
+                &mut |_| Ok(()),
+            )
+            .expect_err("changed preview refuses")
+            .kind,
+            "install-preview"
+        );
+        let unchanged = fs::read_to_string(&unit).expect("unchanged unit");
+        assert!(unchanged.contains("--proxy-bin /old/proxy"));
+        request.dry_run = true;
+        request.expect_digest = None;
+        let updated = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("new preview");
+        request.dry_run = false;
+        request.expect_digest = updated["preview_sha256"].as_str().map(str::to_owned);
+        let result = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("inactive apply");
+        assert_eq!(result["unit_activation_performed"], false);
+        assert_eq!(result["service_active"], false);
+        assert!(result["inactive_start_remedy"].as_str().is_some());
+    }
+
+    /// ´test:unit:proxy-move-failed-restart-leaves-generation-old-until-retry´
+    #[test]
+    fn proxy_move_failed_restart_leaves_generation_old_until_retry() {
+        let (fixture, mut request, unit) = move_fixture();
+        let home = fixture.path();
+        let failed = std::cell::Cell::new(false);
+        let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+            match action {
+                "show" => {
+                    let answer = manager_answer(&unit, !failed.get(), &"a".repeat(32), "", false);
+                    Ok(if failed.get() {
+                        answer.replace("ActiveState=inactive", "ActiveState=failed")
+                    } else {
+                        answer
+                    })
+                }
+                "reload" => Ok(String::new()),
+                "restart" => {
+                    failed.set(true);
+                    Err(crate::error::LaneError::operation(
+                        "proxy-unit",
+                        "restart failed",
+                    ))
+                }
+                _ => panic!("unexpected manager action"),
+            }
+        };
+        let mut inventory = || Ok(Vec::new());
+        let mut version = |_: &Path| Ok(());
+        let preview = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("preview");
+        request.dry_run = false;
+        request.expect_digest = preview["preview_sha256"].as_str().map(str::to_owned);
+        assert_eq!(
+            super::run_proxy_move_with(
+                home,
+                &request,
+                &mut manager,
+                &mut inventory,
+                &mut version,
+                &mut |_| Ok(()),
+            )
+            .expect_err("restart failed")
+            .kind,
+            "proxy-unit"
+        );
+        let generation_path = home.join(".config/loops/alpha/install-generation.json");
+        assert_eq!(
+            super::read_generation(&generation_path)
+                .expect("record")
+                .expect("record")["proxy_bin"],
+            "/old/proxy"
+        );
+        request.dry_run = true;
+        request.expect_digest = None;
+        let retry = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("retry preview");
+        request.dry_run = false;
+        request.expect_digest = retry["preview_sha256"].as_str().map(str::to_owned);
+        let result = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("retry apply");
+        assert_eq!(result["service_state"], "failed");
+        assert_eq!(result["unit_activation_performed"], false);
+        assert_eq!(
+            super::read_generation(&generation_path)
+                .expect("record")
+                .expect("record")["proxy_bin"],
+            request
+                .proxy_bin
+                .as_ref()
+                .expect("target")
+                .display()
+                .to_string()
+        );
+    }
+
+    /// ´test:unit:vendor-unit-path-agreement-refuses-an-interrupted-move´
+    #[test]
+    fn vendor_unit_path_agreement_refuses_an_interrupted_move() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let home = fixture.path();
+        let unit_dir = home.join(".config/systemd/user");
+        fs::create_dir_all(&unit_dir).expect("unit directory");
+        let unit = unit_dir.join("superloop-lane-vendor@alpha.service");
+        let generation = serde_json::json!({"unit_dir":unit_dir,"proxy_bin":"/old/proxy"});
+        let text = include_str!("../data/vendor-proxy.service.in")
+            .replace("@LANE_BIN@", "/lane/bin")
+            .replace("@PROXY_BIN@", "/old/proxy");
+        fs::write(&unit, text).expect("unit");
+        fs::set_permissions(&unit, fs::Permissions::from_mode(0o644)).expect("unit mode");
+        super::require_proxy_unit_agreement(home, "alpha", &generation)
+            .expect("matching unit and generation");
+        let moved = include_str!("../data/vendor-proxy.service.in")
+            .replace("@LANE_BIN@", "/lane/bin")
+            .replace("@PROXY_BIN@", "/new/proxy");
+        fs::write(&unit, moved).expect("moved unit");
+        let error = super::require_proxy_unit_agreement(home, "alpha", &generation)
+            .expect_err("an unpublished path refuses enforcing work");
+        assert_eq!(error.kind, "proxy-unit");
+        assert!(error.detail.contains("--move-proxy --dry-run"));
+        let repaired = serde_json::json!({"unit_dir":unit_dir,"proxy_bin":"/new/proxy"});
+        super::require_proxy_unit_agreement(home, "alpha", &repaired)
+            .expect("generation publication restores agreement");
+        fs::write(&unit, b"edited unit\n").expect("unrecognized unit");
+        let error = super::require_proxy_unit_agreement(home, "alpha", &repaired)
+            .expect_err("unrecognized unit refuses new work");
+        assert_eq!(error.kind, "proxy-unit");
+        assert!(error.detail.contains("repair alpha"), "{}", error.detail);
+        fs::remove_dir_all(&unit_dir).expect("remove unit parent");
+        let error = super::require_proxy_unit_agreement(home, "alpha", &repaired)
+            .expect_err("absent unit directory refuses new work");
+        assert_eq!(error.kind, "proxy-unit");
+        assert!(error.detail.contains("repair alpha"), "{}", error.detail);
+    }
 
     /// ´test:unit:install-lock-handoffs-validate-the-configuration-acl-mask´
     #[test]

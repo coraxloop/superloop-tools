@@ -4390,7 +4390,19 @@ fn run_with_program(
                 json!(workspace::declaration_digest(declaration)?);
         }
         preview_backend_gate(owner_home, &request.loop_name, selected_backend)?;
+        if !request.observe {
+            let generation = installed_generation(owner_home, &request.loop_name)?;
+            crate::install::require_proxy_unit_agreement(
+                owner_home,
+                &request.loop_name,
+                &generation,
+            )?;
+        }
         return Ok(report);
+    }
+    if !request.observe {
+        let generation = installed_generation(owner_home, &request.loop_name)?;
+        crate::install::require_proxy_unit_agreement(owner_home, &request.loop_name, &generation)?;
     }
     let _preparation_lease = lock_run_preparation(&root, &request.run, caller.0)?;
     if let Some(mut old) = read_reservation(&reservation)? {

@@ -1749,6 +1749,10 @@ fn resume_with_program(
         (&root, &verified_runs),
         lane_bin,
     )?;
+    if record["plan"]["vendor_mode"].is_null() {
+        let generation = super::installed_generation(owner_home, &request.loop_name)?;
+        crate::install::require_proxy_unit_agreement(owner_home, &request.loop_name, &generation)?;
+    }
     if request.dry_run {
         let saved_box = plan.document["runtime_argv"]
             .as_array()

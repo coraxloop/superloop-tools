@@ -3084,6 +3084,7 @@ else:
             dead_resume_fixture_in("started", parent.parent().expect("protected parent"));
         let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
         let h = fixture.path();
+        install_agreeing_vendor_unit(h);
         let owner = Uid::effective().as_raw();
         let root = File::open(h).expect("fixture root");
         let _guard = home::activate_handed_home(h, &root, owner).expect("private custody");
@@ -3481,10 +3482,35 @@ printf '{{"thread_id":null}}\n'
         .expect("fake container entry");
     }
 
+    fn install_agreeing_vendor_unit(home: &Path) {
+        let unit_dir = home.join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).expect("unit directory");
+        std::fs::set_permissions(&unit_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("unit directory mode");
+        let unit = unit_dir.join("superloop-lane-vendor@alpha.service");
+        let text = include_str!("../../data/vendor-proxy.service.in")
+            .replace("@LANE_BIN@", "/usr/bin/true")
+            .replace("@PROXY_BIN@", "/fixture/proxy");
+        std::fs::write(&unit, text).expect("recognized vendor unit");
+        std::fs::set_permissions(&unit, std::fs::Permissions::from_mode(0o644))
+            .expect("vendor unit mode");
+        let generation = home.join(".config/loops/alpha/install-generation.json");
+        std::fs::create_dir_all(generation.parent().expect("generation directory"))
+            .expect("create generation directory");
+        std::fs::write(
+            &generation,
+            json!({"schema":1,"phase":"complete","loop":"alpha","unit_dir":unit_dir,"proxy_bin":"/fixture/proxy"}).to_string(),
+        )
+        .expect("generation");
+        std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o600))
+            .expect("generation mode");
+    }
+
     fn resume_threadless_dispatch_through_entry() {
         let (fixture, plan, mut request) = dead_resume_fixture("started");
         let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
         let h = fixture.path();
+        install_agreeing_vendor_unit(h);
         let owner = Uid::effective().as_raw();
         let root = File::open(h).expect("root");
         let _guard = home::activate_handed_home(h, &root, owner).expect("private fixture");
@@ -3602,6 +3628,7 @@ printf '{{"thread_id":null}}\n'
     #[allow(clippy::too_many_lines)]
     fn recovered_threadless_continuation(recover_again: bool, failed_dispatch: bool) {
         let (fixture, plan, mut request) = recovery_fixture_in(&std::env::temp_dir());
+        install_agreeing_vendor_unit(fixture.path());
         let owner = Uid::effective().as_raw();
         let root = File::open(fixture.path()).expect("fixture root");
         let _guard = home::activate_handed_home(fixture.path(), &root, owner)
@@ -4295,6 +4322,7 @@ printf '{{"thread_id":null}}\n'
     }
 
     fn launch_after_public_settle(h: &Path, plan: &crate::plan::Plan, settled: &Value) {
+        install_agreeing_vendor_unit(h);
         let _mail_standin = crate::build::mail_standin::register(&h.join("runtime"));
         // Replace the container runtime, and with it the private _inspect-round and
         // _settle-evidence halves: launch still publishes the next round, starts and
