@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Align the lane guide's producing default with `gpt-6-sol` at medium effort while keeping the door's own model setting explicit (``setup:superlooplane:door-model-and-effort``).
+
 ## [0.13.3] - 2026-11-26
 
 ### Fixed
