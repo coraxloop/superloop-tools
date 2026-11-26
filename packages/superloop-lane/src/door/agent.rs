@@ -933,7 +933,7 @@ pub(super) mod tests {
         let terminated = root.path().join("term-observed");
         let release = root.path().join("cleanup-release");
         let vendor = format!(
-            "#!/usr/bin/python3\nfrom pathlib import Path\nimport os, time\nPath({}).write_text(str(os.getpid()))\ntime.sleep(120)\n",
+            "#!/usr/bin/python3\nfrom pathlib import Path\nimport os, time\nready = Path({})\npending = ready.with_name(ready.name + '.pending')\npending.write_text(str(os.getpid()))\nos.replace(pending, ready)\ntime.sleep(120)\n",
             json!(ready)
         );
         crate::fixture_exec::write_executable(&runner.executable, vendor.as_bytes())
@@ -979,12 +979,16 @@ pub(super) mod tests {
             },
         );
         CLEANUP_CLOCK.with(|slot| *slot.borrow_mut() = None);
-        let pid = std::fs::read_to_string(ready).expect("vendor readiness");
-        let reaped = !std::path::Path::new("/proc").join(&pid).exists();
+        let pid: i32 = std::fs::read_to_string(ready)
+            .expect("vendor readiness file")
+            .trim()
+            .parse()
+            .expect("vendor readiness must contain a complete pid");
+        let reaped = !std::path::Path::new("/proc").join(pid.to_string()).exists();
         if !reaped {
             // A forced failure must not leave the fixture's escaped vendor running.
             let _killed = nix::sys::signal::kill(
-                nix::unistd::Pid::from_raw(pid.parse().expect("fixture pid")),
+                nix::unistd::Pid::from_raw(pid),
                 nix::sys::signal::Signal::SIGKILL,
             );
         }

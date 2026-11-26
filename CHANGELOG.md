@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Fixed
+
+- Drain an exited compute preparation supervisor's pipes for a bounded interval before reporting that a surviving writer holds them. A healthy preparation whose supervisor ended just after the short pipe poll no longer refuses as `door-compute-refresh-refusal`; a writer that really retains the pipes still receives the same refusal and advice. Compatibility: reinstall `superloop-lane-node-exec` on each compute node to receive this repair; the door service, boxed stub, wire and stored records do not change.
+
 ## [0.13.2] - 2026-11-26
 
 ### Fixed
