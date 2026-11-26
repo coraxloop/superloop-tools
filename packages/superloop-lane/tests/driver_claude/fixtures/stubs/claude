@@ -38,8 +38,15 @@ case "$ORACLE_MODE" in
         printf '%s\n' '{"type":"result","is_error":false,"result":"recovered"}'
         ;;
     normal)
-        printf '%s\n' '{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}'
+        printf '%s\n' '{"type":"system","subtype":"init","cwd":"/x","session_id":"22222222-2222-4222-8222-222222222222","tools":[],"plugins":[],"mcp_servers":[],"model":"claude-haiku-4-5-20251001","permissionMode":"auto"}'
         printf '%s\n' '{"duration_api_ms":0,"stop_reason":"stop_sequence","session_id":"22222222-2222-4222-8222-222222222222","total_cost_usd":0,"type":"result","subtype":"success","is_error":false,"duration_ms":415,"num_turns":1,"result":"final text"}'
+        ;;
+    session-load)
+        printf '%s\n' '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222","plugins":[{"name":"bundled-one","path":"/built-in"},{"name":"other-one","path":"/synced"}],"mcp_servers":[{"name":"remote-one","status":"connected"}],"skills":[{"name":"local-skill"},"second-skill"]}'
+        printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"final text"}'
+        ;;
+    no-init)
+        printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"final text"}'
         ;;
     fallback)
         printf '%s\n' '{"type":"system","subtype":"init","session_id":"22222222-2222-4222-8222-222222222222"}'

@@ -442,4 +442,38 @@ mod tests {
             original
         );
     }
+
+    /// A long start list stays inside the boxed report reader's byte and field bounds.
+    /// # Panics
+    /// Panics only if the fixture cannot be written or the reader rejects the bounded report.
+    /// ´test:unit:boxed-report-accepts-bounded-session-load´
+    #[test]
+    fn boxed_report_accepts_bounded_session_load() {
+        let root = tempfile::tempdir().expect("fixture");
+        let directory = root.path().join("dispatch");
+        std::fs::create_dir(&directory).expect("directory");
+        let mut names = vec![String::new(), "x".repeat(100)];
+        names.extend((0..100).map(|index| format!("plugin-{index:03}")));
+        let evidence = json!({"state":"measured","plugins":names,"mcp_servers":["", "server-a", "server-b", "server-c"]});
+        let mut report = format!(
+            "RUN-REPORT lane=dispatch exit=0 verdict=SUCCESS dir={}\n",
+            directory.display()
+        )
+        .into_bytes();
+        lane_lifecycle::annotate_session_load(&mut report, &evidence, true);
+        assert!(report.len() <= 4096);
+        let line = String::from_utf8(report.clone()).expect("status UTF-8");
+        assert!(
+            line.contains(" loaded_plugins=plugin-000,plugin-001 "),
+            "{line}"
+        );
+        assert!(line.contains("loaded_plugins_omitted=100"), "{line}");
+        assert!(line.contains("loaded_mcp_servers_omitted=2"), "{line}");
+        assert!(!line.contains("loaded_mcp_servers=,"), "{line}");
+        std::fs::write(directory.join("run-report.txt"), report).expect("report");
+        let held: OwnedFd = File::open(&directory).expect("held directory").into();
+        let last = json!({"step":"dispatch","driver_dir":directory});
+        read_directory(&held, &directory, &last, Uid::effective().as_raw())
+            .expect("host reader accepts bounded report");
+    }
 }
