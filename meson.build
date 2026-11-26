@@ -779,6 +779,7 @@ dependency_ledger += ['''
 {"kind":"installation","route":"native","source":"source:docs/spec/build-contracts.md","destination":"@datadir@/superloop-tools/docs/spec/build-contracts.md","owner":"TOOLS"}
 {"kind":"installation","route":"native","source":"source:docs/spec/executable-contracts.md","destination":"@datadir@/superloop-tools/docs/spec/executable-contracts.md","owner":"TOOLS"}
 {"kind":"installation","route":"native","source":"source:docs/spec/collection-journal.md","destination":"@datadir@/superloop-tools/docs/spec/collection-journal.md","owner":"TOOLS"}
+{"kind":"installation","route":"native","source":"source:docs/spec/request-store-concurrency.md","destination":"@datadir@/superloop-tools/docs/spec/request-store-concurrency.md","owner":"TOOLS"}
 {"kind":"installation-inputs","owner":"TOOLS","maps":[],"document_roots":["docs/spec"]}
 {"kind":"admission","name":"clap","reason":"Typed argument grammar and help","owner":"SUPERLOOPCLICOMMON"}
 {"kind":"admission","name":"libc","reason":"Unix descriptors and identities","owner":"LOOPHOME"}

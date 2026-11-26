@@ -86,6 +86,9 @@ pattern = "docs/spec/build-contracts.md"
 pattern = "docs/spec/collection-journal.md"
 
 [[include.rows]]
+pattern = "docs/spec/request-store-concurrency.md"
+
+[[include.rows]]
 pattern = "docs/spec/command-contracts.md"
 
 [[include.rows]]

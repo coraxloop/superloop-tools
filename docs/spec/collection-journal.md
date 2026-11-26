@@ -228,18 +228,18 @@ Run retirement archives that run's rows through ``runs/RUN/`` (the work follows 
 
 - **Format:** additive to stage 3 (archive and tombstones).
 - **Operator-visible result:** archive counts in retirement reports.
-- **Saving:** no hot-path time after stage 3. It is what keeps storage, shard sizes and deduplication bounded.
+- **Saving:** no hot-path time after stage 3. It reduces hot payload storage; retained identity tombstones still grow with the number of identities, so perpetual deduplication has no bounded-total storage claim (`proposal:requeststore:retention`).
 
-## Stage 5: the door's own store · `sec:collectionjournal:stage-5`
+## Stage 5: the door's record projections · `sec:collectionjournal:stage-5`
 
 Implementation status and remaining work: (`prob:door:door-keeps-a-store-of-its-own-records`).
 
-- Each local run becomes one record per request plus run metadata, instead of ``door-requests.json`` rewritten whole per commit (``store.rs:1874``, cap ``MAX_RUN_BYTES`` at ``:49``).
+- One canonical record owns each request; local run records become projections instead of a separately authoritative store. This replaces ``door-requests.json`` rewritten whole per commit (``store.rs:1874``, cap ``MAX_RUN_BYTES`` at ``:49``); the concurrency model is (`proposal:requeststore:concurrent-custody`).
 - Shapes and the learned index are maintained by applying the changed record, not derived from every run on every commit (``:1838-1846``, ``repair_shapes`` at ``:1783``).
-- Capacity and per-class correction-pending become counters updated in the same commit.
-- The crossing is a one-time rewrite of the live runs during a door refresh. Live runs are capped, so its cost is stated and small. Retired records are untouched.
-- **Operator-visible result:** constant ``run_write``, ``shape_write`` and inventory phases.
-- **Saving:** the last inventories in proportion to the live population go, and a hold becomes proportional to its request plus its syncs.
+- Counts are versioned, possibly lagging projections, not capacity or granting authority; correction-pending authority is carried by the policy root reread after the durable request claim (`sec:requeststore:shared-decisions`).
+- The crossing belongs to the canonical-format release, with the registered root's writers stopped, followed by migration and restart; existing retired evidence stays in place as read-only evidence, and the identities and labels the crossing carries from it are verified (`sec:requeststore:crossing`).
+- **Operator-visible result:** request-sized publication and incremental projection work, measured separately.
+- **Saving:** the last live-population inventories leave the normal mutation path; the canonical commit holds no lock, and its durability sync precedes acknowledgement or effect.
 
 ## Stage 6: wake-ups and the policy snapshot · `sec:collectionjournal:stage-6`
 
@@ -256,8 +256,8 @@ Implementation status and remaining work: (`prob:door:door-parts-contend-for-the
 |B|the rest of the repeated reads (holds of about 6–8 s)|
 |2|about 2 s a hold, and triage's transports|
 |3|the collection's whole cost (a hold of about 1 s)|
-|4|bounded storage|
-|5|the local inventories (a hold proportional to its request)|
+|4|hot payload storage (identity tombstones still grow)|
+|5|the local inventories (request-sized publication without a commit lock)|
 |6|clock work and the snapshot's growth|
 
 A and B change no format. Stage 2 is the protocol; stage 3 is the storage behind it; 2 and 3 can be designed together and landed in that order.
