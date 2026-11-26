@@ -4081,7 +4081,8 @@ printf '{{"thread_id":null}}\n'
         )
         .expect("failed report");
         record["active_round"] = json!(step);
-        record["rounds"] = json!([{"driver_dir":directory}]);
+        record["rounds"] =
+            json!([{"driver_dir":directory,"reply_designation":{"state":"unmeasured"}}]);
         record["mail"] = json!([]);
         record["driver_end"] = json!({"state":"completed","successful":report_case});
         record["helper_end"] = json!({"state":"completed"});
@@ -4101,7 +4102,7 @@ printf '{{"thread_id":null}}\n'
             )
             .expect("retained thread event");
             record["rounds"].as_array_mut().expect("rounds").insert(0,
-                json!({"step":"dispatch","driver_dir":directory,"phase":"settled","ended_by":"by-report","reply":{"bytes":6},"settle_attempts":[]}));
+                json!({"step":"dispatch","driver_dir":directory,"phase":"settled","ended_by":"by-report","reply":{"bytes":6},"settle_attempts":[],"reply_designation":{"state":"unmeasured"}}));
             super::super::publish_reservation(&path, &record).expect("prior dispatch retained");
         }
         let owner = Uid::effective().as_raw();
@@ -4167,6 +4168,13 @@ printf '{{"thread_id":null}}\n'
             .expect("read")
             .expect("settled record");
         assert_eq!(saved["rounds"][round_index]["phase"], "failed");
+        assert!(
+            saved["rounds"]
+                .as_array()
+                .expect("settled rounds")
+                .iter()
+                .all(|round| round["reply_designation"] == json!({"state":"unmeasured"}))
+        );
         assert!(saved["rounds"][round_index]["reply"].is_null());
         assert_eq!(
             saved["rounds"][round_index]["settle_attempts"][0]["phase"],

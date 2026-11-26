@@ -2045,7 +2045,8 @@ os._exit(0)"
                 .kind,
             "checkout-record"
         );
-        let mut record = json!({"schema":1,"worker_uid":3000,"checkouts":[],"checkouts_omitted":0,"checkout_attempts":[],"checkout_next_index":1,"imports":[]});
+        let mut record = json!({"schema":1,"worker_uid":3000,"checkouts":[],"checkouts_omitted":0,"checkout_attempts":[],"checkout_next_index":1,"imports":[],
+            "rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]});
         super::append_checkout(
             &mut record,
             1,
@@ -2065,6 +2066,10 @@ os._exit(0)"
         )
         .expect("second source");
         assert_eq!(record["checkouts"].as_array().expect("checkouts").len(), 2);
+        assert_eq!(
+            record["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
         assert_eq!(record["checkouts_omitted"], 0);
         assert_eq!(
             super::append_checkout(

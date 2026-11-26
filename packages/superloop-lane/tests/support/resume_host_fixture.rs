@@ -360,7 +360,7 @@ print(json.dumps(sorted(rows)))
             "worker_uid":64010,"mail_birth":identity,"mail":[],"mail_replies":[],
             "plan":plan.document,"model_selection":model,"thread_id":"fixture-thread",
             "active_round":"dispatch","letter_source":home.join("first-letter"),
-            "rounds":[{"step":"dispatch","phase":"settled","driver_dir":home.join("runs/R/fixture-dispatch")}]});
+            "rounds":[{"step":"dispatch","phase":"settled","driver_dir":home.join("runs/R/fixture-dispatch"),"reply_designation":{"state":"unmeasured"}}]});
         write(
             home.join("runs/.reservation-R.json"),
             serde_json::to_vec(&record).expect("record"),

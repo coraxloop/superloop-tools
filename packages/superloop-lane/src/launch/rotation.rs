@@ -4836,7 +4836,7 @@ mod tests {
         let config = root.path().join("config");
         fs::create_dir(&config).expect("config");
         fs::set_permissions(&config, fs::Permissions::from_mode(0o700)).expect("config mode");
-        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"model_selection":{"model":"gpt-6-sol","effort":"high"},"rounds":[{"step":"dispatch","phase":"settled","reply":{"sha256":"digest"}}]});
+        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"model_selection":{"model":"gpt-6-sol","effort":"high"},"rounds":[{"step":"dispatch","phase":"settled","reply":{"sha256":"digest"},"reply_designation":{"state":"unmeasured"}}]});
         super::publish_reservation(&super::reservation_path(root.path(), "R"), &old)
             .expect("old reservation");
         let replies = json!({"replies":[{"step":"dispatch","outbox":"dispatch.md","sha256":"digest","bytes":8,"inbox":["dispatch.md"],"inbox_letters":[],"body":"A reply.","body_truncated":false}],"next_task":{"state":"absent","sha256":null,"bytes":null,"body":null,"body_truncated":false}});
@@ -4858,6 +4858,12 @@ mod tests {
         )
         .expect("expected digest and intent");
         assert_eq!(intent["letter_sha256"], digest);
+        assert_eq!(
+            super::read_reservation(&super::reservation_path(root.path(), "R"))
+                .expect("read old run")
+                .expect("old run")["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
         drop(mailbox);
         let source = publish_handover_source(&config, "R-rotation-1", &changing).expect("publish");
         assert_eq!(fs::read(source).expect("letter bytes"), preview.as_bytes());

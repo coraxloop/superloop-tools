@@ -325,7 +325,8 @@ fn rewrite_fixture(worker: u32, refused: bool) -> Fixture {
         "plan":{"driver_dir":fixture.runs.join("R"),"home":fixture.home.path().join(".cache/tmp/lane-alpha-R"),"runtime_argv":[runtime]},
         "launcher_pid":dead,"launcher_start":worker,"driver_entry_pid":dead,"driver_entry_start":worker,
         "helper_pid":dead,"helper_start":worker,"helper_parent_pid":dead,"helper_parent_start":worker,
-        "observer_state":"ended","observer_pid":dead,"observer_start":worker});
+        "observer_state":"ended","observer_pid":dead,"observer_start":worker,
+        "rounds":[{"step":"dispatch","phase":"settled","reply_designation":{"state":"unmeasured"}}]});
     write(
         &fixture.runs.join(".reservation-R.json"),
         record.to_string(),
@@ -697,8 +698,8 @@ fn retirement_after_report_rewrite_keeps_both_inode_generations() {
         record[format!("{role}_start")] = json!(1);
     }
     record["rounds"] = json!([
-        {"step":"work-1","phase":"settled","report":".report=R.json"},
-        {"step":"work-2","phase":"running"}
+        {"step":"work-1","phase":"settled","report":".report=R.json","reply_designation":{"state":"unmeasured"}},
+        {"step":"work-2","phase":"running","reply_designation":{"state":"unmeasured"}}
     ]);
     write(&reservation, record.to_string());
     let active = fixture.runs.join(".report=R.json");
@@ -708,6 +709,9 @@ fn retirement_after_report_rewrite_keeps_both_inode_generations() {
     let archive = PathBuf::from(first["retirement"]["record"].as_str().expect("archive"));
     let mut archived: Value =
         serde_json::from_slice(&fs::read(&archive).expect("archive bytes")).expect("archive JSON");
+    for round in archived["rounds"].as_array().expect("retired rounds") {
+        assert_eq!(round["reply_designation"], json!({"state":"unmeasured"}));
+    }
     let retired = PathBuf::from(
         archived["current_retirement"]["planned_paths"]
             .as_array()
@@ -1797,6 +1801,15 @@ fn reply_row_rewrite_entry_pauses_previews_applies_and_recounts() {
         census["reply_designation_readiness"]["rows_without_member"],
         json!({"live":0,"retired":0})
     );
+    for run in ["R", "S"] {
+        let path = fixture.runs.join(format!(".reservation-{run}.json"));
+        let saved: Value = serde_json::from_slice(&fs::read(path).expect("converted reservation"))
+            .expect("converted JSON");
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
+    }
 }
 
 /// ´test:integration:door-scope-entry-previews-applies-and-census-reads-current-scope´
@@ -2270,6 +2283,8 @@ fn retirement_root_rewrite_entry_precedes_reconciliation() {
     let path = fixture.runs.join(".retired-R-20-1-2");
     let mut record: Value =
         serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    record["rounds"] =
+        json!([{"step":"dispatch","phase":"settled","reply_designation":{"state":"unmeasured"}}]);
     record["node_retirement"] = json!({"schema":1,"plan":{
         "schema":1,"loop":"alpha","run":"R","deadline_seconds":120,
         "policy":"host-completes-node-owed","reason":"node-retirement-pending",
@@ -2304,6 +2319,12 @@ fn retirement_root_rewrite_entry_precedes_reconciliation() {
         "--expect-digest",
         preview["preview_sha256"].as_str().expect("digest"),
     ]));
+    let rewritten: Value = serde_json::from_slice(&fs::read(&path).expect("rewritten record"))
+        .expect("rewritten JSON");
+    assert_eq!(
+        rewritten["rounds"][0]["reply_designation"],
+        json!({"state":"unmeasured"})
+    );
     assert_eq!(applied["changed"], preview["changed"]);
     assert_eq!(applied["plan"], preview["plan"]);
     let converted: Value =
@@ -2420,6 +2441,14 @@ fn census_rewrite_entry_preserves_both_historical_shapes_and_identities() {
             assert_eq!(success(&apply(&fixture, digest))["complete"], true);
             let target = fs::read(fixture.path()).expect("rewritten evidence");
             let converted: Value = serde_json::from_slice(&target).expect("converted JSON");
+            let reservation: Value = serde_json::from_slice(
+                &fs::read(fixture.runs.join(".reservation-R.json")).expect("reservation"),
+            )
+            .expect("reservation JSON");
+            assert_eq!(
+                reservation["rounds"][0]["reply_designation"],
+                json!({"state":"unmeasured"})
+            );
             assert_eq!(
                 converted["credential_rewrite"]["original_bytes"]
                     .as_str()

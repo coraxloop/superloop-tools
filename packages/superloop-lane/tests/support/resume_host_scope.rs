@@ -141,6 +141,16 @@ pub(super) fn run(case: &str) {
     }
     let output = result.expect("bounded scoped command");
     assert!(output.status.success(), "{output:?}");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&scope.fixture.as_ref().expect("owned root").reservation())
+            .expect("saved reservation");
+    for round in saved["rounds"].as_array().expect("round rows") {
+        assert_eq!(
+            round["reply_designation"],
+            serde_json::json!({"state":"unmeasured"}),
+            "{case}: copied round lost its designation member"
+        );
+    }
     std::io::stdout()
         .lock()
         .write_all(&output.stdout)

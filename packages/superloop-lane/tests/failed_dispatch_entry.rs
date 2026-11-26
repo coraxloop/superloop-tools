@@ -390,7 +390,8 @@ impl ReportFixture {
         record["phase"] = json!("started");
         record["driver_end"] = Value::Null;
         record["helper_spawn_state"] = json!("started");
-        record["rounds"][0] = json!({"step":"dispatch","phase":"running","driver_dir":directory});
+        record["rounds"][0] = json!({"step":"dispatch","phase":"running","driver_dir":directory,
+            "reply_designation":{"state":"unmeasured"}});
         record["plan"]["door"]["stub_sha256"] = json!("b".repeat(64));
         fs::write(
             &fixture.reservation,
@@ -608,6 +609,10 @@ fn repin_and_recovery_read_loop_custody_through_private_entry() {
         *end,
         "{}",
         String::from_utf8_lossy(&applied.stderr)
+    );
+    assert_eq!(
+        saved["rounds"][0]["reply_designation"],
+        json!({"state":"unmeasured"})
     );
 }
 

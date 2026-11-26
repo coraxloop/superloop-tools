@@ -120,6 +120,16 @@ fn record_names(root: &Path) -> Result<Vec<(String, PathBuf, bool)>, LaneError> 
 }
 
 fn eligible(record: &Value, run: &str, retired: bool, loop_name: &str) -> Result<(), LaneError> {
+    eligible_with_presence(record, run, retired, loop_name, identity)
+}
+
+fn eligible_with_presence(
+    record: &Value,
+    run: &str,
+    retired: bool,
+    loop_name: &str,
+    presence_of: impl Fn(Result<Option<(u32, u64)>, LaneError>) -> Result<Value, LaneError>,
+) -> Result<(), LaneError> {
     if record["loop"] != loop_name || record["run"] != run {
         return Err(refusal(format!(
             "run {run}: reservation identity differs; repeat {}",
@@ -165,7 +175,7 @@ fn eligible(record: &Value, run: &str, retired: bool, loop_name: &str) -> Result
             helper_parent_identity(record),
             observer_identity(record),
         ] {
-            let presence = identity(observed)?["presence"]
+            let presence = presence_of(observed)?["presence"]
                 .as_str()
                 .unwrap_or_default()
                 .to_owned();
@@ -346,11 +356,16 @@ fn check_manifest(root: &Path, loop_name: &str, plan: &Value) -> Result<(), Lane
     Ok(())
 }
 
-fn check_journal_bound(journal: &Value, plan: &Value, loop_name: &str) -> Result<(), LaneError> {
+fn check_journal_bound(
+    journal: &Value,
+    plan: &Value,
+    loop_name: &str,
+    bound: u64,
+) -> Result<(), LaneError> {
     if serde_json::to_vec(journal)
         .map_err(|error| refusal(error.to_string()))?
         .len() as u64
-        <= MAX_RESERVATION_BYTES
+        <= bound
     {
         return Ok(());
     }
@@ -361,7 +376,7 @@ fn check_journal_bound(journal: &Value, plan: &Value, loop_name: &str) -> Result
             .join(", ")
     });
     Err(refusal(format!(
-        "runs {runs}: journal exceeds {MAX_RESERVATION_BYTES} bytes; reduce the retained inventory before repeating {}",
+        "runs {runs}: journal exceeds {bound} bytes; reduce the retained inventory before repeating {}",
         command(loop_name, None)
     )))
 }
@@ -370,8 +385,16 @@ fn check_journal_bound(journal: &Value, plan: &Value, loop_name: &str) -> Result
 ///
 /// # Errors
 /// Refuses changed inputs, live writers, pending rewrites, malformed members or unsafe custody.
-#[allow(clippy::too_many_lines)]
 pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
+    run_with_journal_bound(owner_home, args, MAX_RESERVATION_BYTES)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_with_journal_bound(
+    owner_home: &Path,
+    args: &[String],
+    journal_bound: u64,
+) -> Result<Value, LaneError> {
     let begun = Instant::now();
     let (loop_name, expected) = parse(args)?;
     let config = owner_home.join(".config/loops").join(loop_name);
@@ -452,7 +475,7 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
     let mut journal = json!({"schema":1,"phase":"pending","loop":loop_name,
         "plan":plan,"preview_sha256":digest,"published":0});
     journal["published"] = json!(plan["files"].as_array().map_or(0, Vec::len));
-    check_journal_bound(&journal, &plan, loop_name)?;
+    check_journal_bound(&journal, &plan, loop_name, journal_bound)?;
     journal["published"] = json!(0);
     if let Some(expected) = expected {
         if expected != digest {
@@ -832,6 +855,14 @@ mod tests {
         admission::set(home, "alpha", true).expect("pause again");
         let live = reservation_path(&root, "R");
         let mut record = read_reservation(&live).expect("read").expect("record");
+        assert!(
+            eligible_with_presence(&record, "R", false, "alpha", |_| {
+                Ok(json!({"presence":"unknown"}))
+            })
+            .expect_err("unknown writer")
+            .line()
+            .contains("unknown round writer")
+        );
         record["launcher_pid"] = json!(std::process::id());
         record["launcher_start"] =
             json!(crate::container_helper::process_start(std::process::id()).expect("start"));
@@ -933,10 +964,15 @@ mod tests {
         let plan = json!({"runs":["R"]});
         let journal = json!({"padding":"x".repeat(usize::try_from(MAX_RESERVATION_BYTES).expect("bound fits usize"))});
         assert!(
-            check_journal_bound(&journal, &plan, "alpha")
+            check_journal_bound(&journal, &plan, "alpha", MAX_RESERVATION_BYTES)
                 .expect_err("journal bound")
                 .line()
                 .contains("runs R: journal exceeds")
         );
+        let (fixture, _) = fixture();
+        let error =
+            run_with_journal_bound(fixture.path(), &["alpha".into(), "--dry-run".into()], 1)
+                .expect_err("run checks its journal before publishing");
+        assert!(error.line().contains("journal exceeds 1 bytes"));
     }
 }

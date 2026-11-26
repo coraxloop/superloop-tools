@@ -1177,8 +1177,8 @@ mod tests {
             document: json!({}),
         };
         let record = json!({"rounds":[
-            {"step":"dispatch","phase":"settled","driver_dir":"/runs/R/first-dispatch"},
-            {"step":"review","phase":"running","driver_dir":"/runs/R/second-review"}
+            {"step":"dispatch","phase":"settled","driver_dir":"/runs/R/first-dispatch","reply_designation":{"state":"unmeasured"}},
+            {"step":"review","phase":"running","driver_dir":"/runs/R/second-review","reply_designation":{"state":"unmeasured"}}
         ]});
         let mut calls = Vec::new();
         let mut all = Vec::new();

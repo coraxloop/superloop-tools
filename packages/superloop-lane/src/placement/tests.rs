@@ -177,7 +177,8 @@ fn placement_absent_keeps_legacy_byte_decoding() {
         serde_json::from_str(include_str!("../../tests/fixtures/plan.json")).unwrap();
     let mut values = vec![
         json!({"schema":1,"phase":"preparing","worker_uid":2001}),
-        json!({"schema":1,"phase":"settled","worker_uid":2001,"plan":fixture}),
+        json!({"schema":1,"phase":"settled","worker_uid":2001,"plan":fixture,
+            "rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]}),
     ];
     for phase in ["started", "failed", "retiring", "retired"] {
         values.push(json!({"schema":1,"phase":phase,"worker_uid":2001}));
@@ -322,7 +323,8 @@ fn placement_root_handle_survives_rename_not_recreation() {
 /// ´test:unit:placement-rewrite-journal-checks-embedded-reservations´
 #[test]
 fn placement_rewrite_journal_checks_embedded_reservations() {
-    let record = record();
+    let mut record = record();
+    record["rounds"] = json!([{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]);
     let journal = json!({"plan":{"files":[{"before":record,"after":record}]}});
     assert_eq!(
         journal_bytes(journal.to_string().as_bytes(), |e| refusal(e.to_string())).unwrap(),

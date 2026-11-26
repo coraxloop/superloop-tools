@@ -382,7 +382,8 @@ mod tests {
             "observer_state":"ended","observer_pid":u32::MAX-worker,"observer_start":worker,
             "harvest_agreement":{"checkpoint_index":1,"preserved_object":"a".repeat(40),"gate_object":"a".repeat(40),"instant_unix_ns":1},
             "collection":{"checkpoint_index":1,"state":"collected","instant_unix_ns":2,"planned":["."],"remaining":[],"refusal":null,"component":null,
-            "token":"a".repeat(32),"parent_identity":{"device":1,"inode":2},"home_identity":{"device":1,"inode":3}}});
+            "token":"a".repeat(32),"parent_identity":{"device":1,"inode":2},"home_identity":{"device":1,"inode":3}},
+            "rounds":[{"step":"dispatch","phase":"settled","reply_designation":{"state":"unmeasured"}}]});
         publish_reservation(&reservation_path(&root, "R"), &record).expect("predecessor");
         (home, root, request, record)
     }
@@ -430,6 +431,10 @@ mod tests {
                 .expect("read")
                 .expect("record");
             assert_eq!(
+                after["rounds"][0]["reply_designation"],
+                before["rounds"][0]["reply_designation"]
+            );
+            assert_eq!(
                 after["retirement_rewrite"]["original_collection"],
                 before["collection"]
             );
@@ -449,6 +454,10 @@ mod tests {
             .expect("reader")
             .expect("record");
             assert_eq!(archived["retirement_rewrite"], after["retirement_rewrite"]);
+            assert_eq!(
+                archived["rounds"][0]["reply_designation"],
+                before["rounds"][0]["reply_designation"]
+            );
         }
     }
 
