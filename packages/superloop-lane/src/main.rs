@@ -315,6 +315,7 @@ fn run(args: &[String]) -> Result<i32, LaneError> {
         )
         && !args.iter().any(|word| word == "--dry-run")
         && launch::reaping::reconciles_before_command(command)
+        && !(command == "retire" && loop_name == "rewrite")
         && !(command == "record-hosts" && args.iter().any(|word| word == "--list"))
         && superloop_lane::valid_run_name(run_name)
     {

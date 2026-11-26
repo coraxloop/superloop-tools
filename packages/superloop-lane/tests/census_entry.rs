@@ -25,6 +25,14 @@ struct Fixture {
     runs: PathBuf,
 }
 
+fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+    let mut digest = String::with_capacity(64);
+    for byte in sha2::Sha256::digest(bytes) {
+        write!(&mut digest, "{byte:02x}").expect("string write");
+    }
+    digest
+}
+
 /// ´test:integration:lane-retired-setting-names-the-driver-vector´
 #[test]
 fn lane_retired_setting_names_the_driver_vector() {
@@ -2553,6 +2561,71 @@ fn census_rewrite_entry_recovers_only_original_or_exact_target() {
     assert_eq!(
         fs::read(fixture.path()).expect("changed bytes retained"),
         changed.as_bytes()
+    );
+}
+
+/// # Panics
+/// Panics only if the fixture or the public rewrite loses its pending journal binding.
+/// ´test:integration:retirement-rewrite-entry-resumes-old-reply-rows´
+#[test]
+fn retirement_rewrite_entry_resumes_old_reply_rows() {
+    let fixture = rewrite_fixture(3000, false);
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("reservation")).expect("JSON");
+    record["imports"] = json!([]);
+    record["harvest_agreement"] = json!({"checkpoint_index":1,
+        "preserved_object":"a".repeat(40),"gate_object":"a".repeat(40),"instant_unix_ns":1});
+    record["collection"] = json!({"checkpoint_index":1,"state":"collected",
+        "instant_unix_ns":2,"planned":["."],"remaining":[],"refusal":null,
+        "component":null,"token":"a".repeat(32),
+        "parent_identity":{"device":1,"inode":2},"home_identity":{"device":1,"inode":3}});
+    write(&path, record.to_string());
+    let preview = success(&fixture.invoke(&["retire", "rewrite", "alpha", "R", "--dry-run"]));
+    record["rounds"][0]
+        .as_object_mut()
+        .expect("round")
+        .remove("reply_designation");
+    write(&path, record.to_string());
+    let hash = sha256_hex(fs::read(&path).expect("old bytes"));
+    let mut plan = preview["plan"].clone();
+    plan["files"][0]["before"] = record;
+    plan["files"][0]["before_sha256"] = json!(&hash);
+    plan["files"][0]["after"]["rounds"][0]
+        .as_object_mut()
+        .expect("round")
+        .remove("reply_designation");
+    plan["files"][0]["after"]["retirement_rewrite"]["before_sha256"] = json!(hash);
+    let digest = sha256_hex(plan.to_string());
+    write(
+        &fixture.runs.join(".retire-rewrite-R.json"),
+        json!({"schema":1,"phase":"pending","digest":digest,"plan":plan}).to_string(),
+    );
+    let resumed = success(&fixture.invoke(&["retire", "rewrite", "alpha", "R", "--dry-run"]));
+    assert_eq!(resumed["resuming"], true);
+    assert_eq!(resumed["preview_sha256"], digest);
+    success(&fixture.invoke(&[
+        "retire",
+        "rewrite",
+        "alpha",
+        "R",
+        "--expect-digest",
+        &digest,
+    ]));
+    fs::remove_file(fixture.runs.join(".reservation-S.json")).expect("remove unrelated peer");
+    success(&fixture.invoke(&["pause", "alpha"]));
+    let reply = success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+    success(&fixture.invoke(&[
+        "census",
+        "rewrite-replies",
+        "alpha",
+        "--expect-digest",
+        reply["preview_sha256"].as_str().expect("reply digest"),
+    ]));
+    let census = success(&fixture.command());
+    assert_eq!(
+        census["reply_designation_readiness"]["rows_without_member"]["live"],
+        0
     );
 }
 
