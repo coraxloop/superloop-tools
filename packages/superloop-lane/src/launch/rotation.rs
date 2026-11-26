@@ -3238,6 +3238,64 @@ mod tests {
         crate::install::lock_loop_config(&config, false).expect("released after recovery");
     }
 
+    /// ´test:unit:failed-rotation-retains-configuration-until-refusal-is-recorded´
+    #[test]
+    fn failed_rotation_retains_configuration_until_refusal_is_recorded() {
+        let (home, root, old, handover) = rotation_entry_fixture();
+        let preview = entry_preview(home.path(), &root, old.clone(), handover.clone());
+        let config = home.path().join(".config/loops/alpha");
+        let home_path = home.path().to_path_buf();
+        let root_path = root.clone();
+        let digest = preview["handover_sha256"]
+            .as_str()
+            .expect("digest")
+            .to_owned();
+        let (at_provision, provision_seen) = std::sync::mpsc::channel();
+        let (release_provision, continue_provision) = std::sync::mpsc::channel();
+        let rotation = std::thread::spawn(move || {
+            let mailbox =
+                super::lock_mailbox(&root_path, "R", nix::unistd::Uid::effective().as_raw())
+                    .expect("changing mailbox lock");
+            execute_rotation(
+                &home_path,
+                &root_path,
+                &rotate_form(false, Some(&digest)),
+                old,
+                handover,
+                None,
+                PathBuf::from("/usr/bin/podman"),
+                Some(mailbox),
+                |_| Ok(3001),
+                |_| Ok(()),
+                |_, _| {
+                    at_provision.send(()).expect("provision reached");
+                    continue_provision.recv().expect("release failed provision");
+                    Err(crate::error::LaneError::input("fixture-dispatch", "stop"))
+                },
+            )
+            .expect_err("dispatch fails")
+        });
+        provision_seen
+            .recv()
+            .expect("rotation reached provisioning");
+        let mailbox = super::lock_mailbox(&root, "R", nix::unistd::Uid::effective().as_raw())
+            .expect("hold failure recording");
+        release_provision.send(()).expect("fail the provision");
+        let error = crate::install::lock_loop_config(&config, false)
+            .expect_err("installer excluded while refusal recording waits");
+        assert_eq!(error.kind, "install-busy");
+        drop(mailbox);
+        assert_eq!(
+            rotation.join().expect("rotation thread").kind,
+            "fixture-dispatch"
+        );
+        let saved = super::read_reservation(&super::reservation_path(&root, "R"))
+            .expect("read refusal")
+            .expect("old reservation");
+        assert_eq!(saved["rotation_attempts"][0]["refusal"], "fixture-dispatch");
+        crate::install::lock_loop_config(&config, false).expect("released after refusal recording");
+    }
+
     fn entry_preview(
         home: &Path,
         root: &Path,
