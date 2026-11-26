@@ -650,6 +650,7 @@ pub struct Store {
     strict_writer_deadline: bool,
     request_id: Option<String>,
     wait_credit: Option<std::sync::Arc<crate::door::RequestWait>>,
+    stop_observer: Option<std::sync::Arc<crate::door::RequestWait>>,
 }
 
 impl Store {
@@ -677,6 +678,7 @@ impl Store {
             strict_writer_deadline: false,
             request_id: None,
             wait_credit: None,
+            stop_observer: None,
         })
     }
 
@@ -707,7 +709,17 @@ impl Store {
         mut self,
         wait: std::sync::Arc<crate::door::RequestWait>,
     ) -> Self {
+        self.stop_observer = Some(std::sync::Arc::clone(&wait));
         self.wait_credit = Some(wait);
+        self
+    }
+
+    /// Observe the request ending during a lock wait without sending credit frames.
+    pub(crate) fn with_stop_observer(
+        mut self,
+        wait: std::sync::Arc<crate::door::RequestWait>,
+    ) -> Self {
+        self.stop_observer = Some(wait);
         self
     }
 
@@ -810,6 +822,7 @@ impl Store {
             strict_writer_deadline: false,
             request_id: None,
             wait_credit: None,
+            stop_observer: None,
             runs,
             state,
             owner,
@@ -1313,7 +1326,7 @@ impl Store {
 
     fn request_stop(&self, waiting: Option<(Instant, Option<&str>)>) -> Option<ReadFailure> {
         let deadline = self.writer_deadline.or(self.reader_deadline)?;
-        let reason = self.wait_credit.as_ref()?.stop_reason(deadline)?;
+        let reason = self.stop_observer.as_ref()?.stop_reason(deadline)?;
         let detail = waiting.map_or_else(
             || reason.to_owned(),
             |(started, holder)| {

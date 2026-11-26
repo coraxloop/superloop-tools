@@ -927,6 +927,7 @@ fn concurrent_refusal(
     started: Instant,
     waited: Duration,
     deadline: Instant,
+    schema: u64,
 ) -> io::Result<(Value, Vec<u8>)> {
     let _logged = writeln!(
         io::stderr().lock(),
@@ -934,7 +935,27 @@ fn concurrent_refusal(
         registration.run
     );
     let mut reply = transport::refusal(registration, peer, "door-request-concurrent", started);
+    reply["schema"] = json!(schema);
     concurrent_fields(&mut reply, waited);
+    wait.write_final(&reply, deadline)?;
+    Ok((reply, Vec::new()))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn stopped_admission_refusal(
+    wait: &RequestWait,
+    registration: &Registration,
+    peer: u32,
+    started: Instant,
+    waited: Duration,
+    deadline: Instant,
+    cause: lifetime::Cause,
+    schema: u64,
+) -> io::Result<(Value, Vec<u8>)> {
+    let mut reply = transport::refusal(registration, peer, cause.reason(), started);
+    reply["schema"] = json!(schema);
+    reply["waited_seconds"] = json!(waited.as_secs_f64());
+    wait.report(&mut reply);
     wait.write_final(&reply, deadline)?;
     Ok((reply, Vec::new()))
 }
@@ -2473,7 +2494,7 @@ fn root_refusal_at(
         match RequestGuard::acquire_wait(owner_home, registration, request, None, started) {
             Ok((Some(guard), _)) => (Some(guard), None),
             Ok((None, waited)) => {
-                return concurrent_refusal(&wait, registration, peer, started, waited, deadline)
+                return concurrent_refusal(&wait, registration, peer, started, waited, deadline, 2)
                     .map(|_| ());
             }
             Err(error) => (None, Some(error)),
@@ -2841,7 +2862,7 @@ impl workspace_adapter::WorkspaceOutputSink for WorkspaceWorkerSink<'_> {
 
 #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 fn run_claimed_workspace(
-    stream: &mut UnixStream,
+    _stream: &mut UnixStream,
     registration: &Registration,
     peer: u32,
     request: &WorkspaceRequest,
@@ -2901,26 +2922,6 @@ fn run_claimed_workspace(
         return Err(LaneError::input(
             stop.reason(),
             "request ended before the executor call; nothing was run",
-        ));
-    }
-    let announced = if announcement_sent {
-        Ok(())
-    } else {
-        frame_write_until(stream, &announcement, admission_deadline)
-    };
-    if let Err(error) = announced {
-        let mut failed_ending = ending;
-        failed_ending["cause"] = json!("transport");
-        failed_ending["wall_clock"] = json!("monotonic-awake");
-        failed_ending["local_child"] = json!("not-started");
-        failed_ending["remote"]["state"] = json!("not-started");
-        effect["ending"] = failed_ending.clone();
-        wait.remember_effect(effect.clone());
-        let finished = store.finish_request(id, Some(effect), &failed_ending);
-        finished?;
-        return Err(LaneError::input(
-            "door-workspace-protocol-refusal",
-            error.to_string(),
         ));
     }
     let stop_flag = Arc::new(AtomicBool::new(false));
@@ -3164,48 +3165,66 @@ fn serve_request_with_agent_at_context(
     let wait = std::sync::Arc::new(
         RequestWait::new(stream)?.with_lifetime(acceptance, full_close, stream)?,
     );
+    if is_workspace_request
+        && peer == registration.worker_uid
+        && let Some(context) = workspace.as_ref()
+        && let Some(requested_ms) = request["deadline_ms"].as_u64().filter(|ms| *ms > 0)
+    {
+        let (_, announcement) = workspace_deadline_announcement(
+            started,
+            requested_ms,
+            context.deadline_ms,
+            context.judgement_wait_ms,
+        );
+        frame_write_until(stream, &announcement, started + PEER_DEADLINE)?;
+    }
     // Claim the authenticated box before any preflight or intent record write,
     // and retain it through the durable effect and sent final reply.
-    let (mut request_guard, admission_error) = if let Some(home) =
-        owner_home.filter(|_| peer == registration.worker_uid)
-    {
-        let clock: &dyn AdmissionClock = &RealAdmissionClock;
-        #[cfg(test)]
-        let fixture_clock = ADMISSION_CLOCK.with(|slot| slot.borrow().clone());
-        #[cfg(test)]
-        let clock = fixture_clock.as_deref().unwrap_or(clock);
-        match RequestGuard::acquire_controlled(
-            home,
-            registration,
-            request,
-            admission_operation,
-            started,
-            clock,
-            Some((&wait, admission_deadline)),
-        ) {
-            Ok((Some(guard), _)) => (Some(guard), None),
-            Ok((None, waited)) => {
-                if let Some(stop) = wait.stop(admission_deadline) {
-                    let mut reply = transport::refusal(registration, peer, stop.reason(), started);
-                    reply["waited_seconds"] = json!(waited.as_secs_f64());
-                    wait.report(&mut reply);
-                    wait.write_final(&reply, admission_deadline)?;
-                    return Ok((reply, Vec::new()));
+    let (mut request_guard, admission_error) =
+        if let Some(home) = owner_home.filter(|_| peer == registration.worker_uid) {
+            let clock: &dyn AdmissionClock = &RealAdmissionClock;
+            #[cfg(test)]
+            let fixture_clock = ADMISSION_CLOCK.with(|slot| slot.borrow().clone());
+            #[cfg(test)]
+            let clock = fixture_clock.as_deref().unwrap_or(clock);
+            match RequestGuard::acquire_controlled(
+                home,
+                registration,
+                request,
+                admission_operation,
+                started,
+                clock,
+                Some((&wait, admission_deadline)),
+            ) {
+                Ok((Some(guard), _)) => (Some(guard), None),
+                Ok((None, waited)) => {
+                    if let Some(stop) = wait.stop(admission_deadline) {
+                        return stopped_admission_refusal(
+                            &wait,
+                            registration,
+                            peer,
+                            started,
+                            waited,
+                            admission_deadline,
+                            stop,
+                            if is_workspace_request { 3 } else { 2 },
+                        );
+                    }
+                    return concurrent_refusal(
+                        &wait,
+                        registration,
+                        peer,
+                        started,
+                        waited,
+                        admission_deadline,
+                        if is_workspace_request { 3 } else { 2 },
+                    );
                 }
-                return concurrent_refusal(
-                    &wait,
-                    registration,
-                    peer,
-                    started,
-                    waited,
-                    admission_deadline,
-                );
+                Err(error) => (None, Some(error)),
             }
-            Err(error) => (None, Some(error)),
-        }
-    } else {
-        (None, None)
-    };
+        } else {
+            (None, None)
+        };
     let refuse = |reason| {
         // Preserve preflight evidence when custody cannot be opened, but never
         // attempt a record write without owning this box's admission lock.
@@ -3281,7 +3300,9 @@ fn serve_request_with_agent_at_context(
             let store = fixture_store.or(opened.as_ref()).ok_or_else(|| {
                 LaneError::input("door-workspace-unregistered", "request store is absent")
             })?;
-            let mode_store = store.for_request(admission_deadline)?;
+            let mode_store = store
+                .for_request(admission_deadline)?
+                .with_stop_observer(Arc::clone(&wait));
             let setting = mode_store.ensure_first_mode("compute")?;
             let (learned, _fault) = WorkspaceAllowance::from_store_lookup(store, &request)?;
             let mode = execute_command::policy::DoorMode::from_record(setting["mode"].as_str())
@@ -3337,15 +3358,12 @@ fn serve_request_with_agent_at_context(
                     wait: wait.as_ref(),
                     id: &id,
                 };
-                let (command_deadline, announcement) = workspace_deadline_announcement(
+                let (command_deadline, _) = workspace_deadline_announcement(
                     started,
                     request.envelope().deadline_ms,
                     context.deadline_ms,
                     context.judgement_wait_ms,
                 );
-                frame_write_until(stream, &announcement, admission_deadline).map_err(|error| {
-                    LaneError::input("door-workspace-protocol-refusal", error.to_string())
-                })?;
                 frame_write_until(
                     stream,
                     &json!({"schema":3,"type":"waiting","request_id":id,
@@ -6314,17 +6332,136 @@ mod tests {
     #[test]
     #[allow(clippy::too_many_lines)]
     fn door_workspace_quick_rule_runs_from_stub_to_recorded_effect() {
-        quick_rule_fixture(false);
+        quick_rule_fixture(false, false);
     }
 
     /// ´test:unit:door-workspace-first-mode-lock-wait-keeps-schema-three´
     #[test]
     fn door_workspace_first_mode_lock_wait_keeps_schema_three() {
-        quick_rule_fixture(true);
+        quick_rule_fixture(true, false);
+    }
+
+    /// ´test:unit:door-workspace-first-mode-wait-ends-with-its-peer´
+    #[test]
+    #[allow(clippy::too_many_lines)]
+    fn door_workspace_first_mode_wait_ends_with_its_peer() {
+        let fixture = Fixture::new();
+        fixture.set_floor("allow");
+        fixture
+            .store()
+            .set_mode(
+                &crate::requests::modes::ModeTarget::Loop,
+                Mode::Enforce,
+                "fixture owner",
+                "fixture mode",
+                "1",
+                &[],
+            )
+            .expect("loop setting only");
+        let context = fixture.home.join("workspace-context.json");
+        fs::write(
+            &context,
+            serde_json::to_vec(&json!({"schema":1,"run":"R",
+                "worker_uid":nix::unistd::Uid::effective().as_raw(),
+                "node_alias":"fixture-node","grant_digest":"a".repeat(64),
+                "checkout":"/tmp/checkout","cwd":[],"shell":"/bin/sh"}))
+            .expect("context bytes"),
+        )
+        .expect("context file");
+        let socket = crate::fixture_exec::fixture_socket_path(fixture.home.join("mode-wait.sock"));
+        let listener = UnixListener::bind(&socket).expect("fixture socket");
+        let (held_tx, held_rx) = std::sync::mpsc::sync_channel(1);
+        let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let home = fixture.home.clone();
+        let holder = thread::spawn(move || {
+            let held = Store::open(&home, "alpha", true)
+                .expect("holder store")
+                .fixture_exclusive_lock()
+                .expect("held mode lock");
+            held_tx.send(()).expect("lock held");
+            release_rx.recv().expect("release holder");
+            drop(held);
+        });
+        held_rx.recv().expect("exclusive mode lock held");
+        let (retry_tx, retry_rx) = std::sync::mpsc::sync_channel(1);
+        let (socket_tx, socket_rx) = std::sync::mpsc::sync_channel(1);
+        let stopper = thread::spawn(move || {
+            let socket: UnixStream = socket_rx.recv().expect("stub socket");
+            retry_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("mode lock was retried");
+            socket.shutdown(Shutdown::Both).expect("peer leaves");
+        });
+        let (result_tx, result_rx) = std::sync::mpsc::sync_channel(1);
+        let home = fixture.home;
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub peer");
+            let request =
+                super::frame_read_until(&mut peer, Instant::now() + Duration::from_secs(5))
+                    .expect("workspace request");
+            assert_eq!(request["schema"], 3);
+            let started = Instant::now();
+            let wait = Arc::new(
+                super::RequestWait::new(&peer)
+                    .expect("request wait")
+                    .with_lifetime(
+                        super::lifetime::Start::at(started).expect("lifetime start"),
+                        true,
+                        &peer,
+                    )
+                    .expect("request lifetime"),
+            );
+            let mut retries = 0;
+            crate::requests::store::AFTER_WRITER_LOCK_RETRY.with(|slot| {
+                *slot.borrow_mut() = Some(Box::new(move || {
+                    retries += 1;
+                    if retries == 8 {
+                        retry_tx.send(()).expect("close peer after retries");
+                    }
+                }));
+            });
+            let store = Store::open(&home, "alpha", true).expect("mode store");
+            let result = store
+                .for_request(started + Duration::from_secs(30))
+                .expect("bounded store")
+                .with_stop_observer(wait)
+                .ensure_first_mode("compute");
+            result_tx.send(result).expect("mode result");
+        });
+        super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(context));
+        super::transport::STUB_REQUEST_SENT.with(|slot| *slot.borrow_mut() = Some(socket_tx));
+        let stub = super::transport::stub_call_stream(
+            &socket,
+            &[
+                OsString::from("fixture-node"),
+                OsString::from("/usr/bin/true"),
+            ],
+            io::empty(),
+            io::sink(),
+            io::sink(),
+        );
+        assert!(stub.is_err(), "a closed peer cannot receive a final frame");
+        let result = result_rx.recv_timeout(Duration::from_secs(5));
+        release_tx.send(()).expect("release lock on every result");
+        let result = result.expect("mode view ended while the lock was still held");
+        assert!(
+            result.is_err_and(|error| error.detail.contains("disconnect")),
+            "the store wait observed the peer's close"
+        );
+        server.join().expect("mode handler");
+        stopper.join().expect("peer stopper");
+        holder.join().expect("lock holder");
+        super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = None);
+    }
+
+    /// ´test:unit:door-workspace-announces-before-box-admission´
+    #[test]
+    fn door_workspace_announces_before_box_admission() {
+        quick_rule_fixture(false, true);
     }
 
     #[allow(clippy::too_many_lines)]
-    fn quick_rule_fixture(contend_first_mode: bool) {
+    fn quick_rule_fixture(contend_first_mode: bool, contend_admission: bool) {
         use execute_command::workspace::{
             Blacklist, BlacklistEntry, Execution, QuickPolicy, QuickRule, canonical_digest,
         };
@@ -6478,6 +6615,29 @@ mod tests {
         let listener = UnixListener::bind(&socket).expect("workspace service socket");
         let (ready_tx, ready_rx) = std::sync::mpsc::sync_channel(1);
         let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+        let (first_frame_tx, first_frame_rx) = std::sync::mpsc::sync_channel(1);
+        let (admission_ready_tx, admission_ready_rx) = std::sync::mpsc::sync_channel(1);
+        let admission_holder = contend_admission.then(|| {
+            let home = fixture.home.clone();
+            let registration = registration.clone();
+            thread::spawn(move || {
+                let held = super::RequestGuard::acquire_operation(
+                    &home,
+                    &registration,
+                    Some(super::transport::Operation::Compute),
+                )
+                .expect("hold compute admission")
+                .expect("compute admission free");
+                admission_ready_tx.send(()).expect("admission held");
+                first_frame_rx
+                    .recv_timeout(Duration::from_secs(30))
+                    .expect("stub received the first frame while admission was held");
+                drop(held);
+            })
+        });
+        if admission_holder.is_some() {
+            admission_ready_rx.recv().expect("compute guard held");
+        }
         let holder = contend_first_mode.then(|| {
             let home = fixture.home.clone();
             thread::spawn(move || {
@@ -6583,6 +6743,10 @@ mod tests {
             replies
         });
         super::transport::STUB_CONTEXT_PATH.with(|slot| *slot.borrow_mut() = Some(context));
+        if contend_admission {
+            super::transport::STUB_FIRST_FRAME_OBSERVED
+                .with(|slot| *slot.borrow_mut() = Some(first_frame_tx));
+        }
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
         let reply = super::transport::stub_call_stream(
@@ -6680,6 +6844,9 @@ mod tests {
         let server_replies = server.join().expect("service thread");
         if let Some(holder) = holder {
             holder.join().expect("lock holder");
+        }
+        if let Some(holder) = admission_holder {
+            holder.join().expect("admission holder");
         }
         assert_eq!(
             server_replies,
@@ -11325,6 +11492,9 @@ mod tests {
             peers.push((client, server));
         }
         let (mut client, mut server) = FixtureClient::pair().expect("overflow peer");
+        client
+            .send(&json!({"schema":2,"argv":[],"deadline_ms":1000}))
+            .expect("overflow request");
         assert!(admit_peer(&active, &mut server).is_none());
         let reply = client.answer();
         assert_eq!(reply["reason"], "door-capacity-refusal");
@@ -11375,6 +11545,35 @@ mod tests {
         drop(grants);
         drop(peers);
         assert_eq!(active.load(Ordering::Relaxed), 0);
+    }
+
+    /// ´test:unit:door-capacity-silent-peer-does-not-hold-accept-loop´
+    #[test]
+    fn door_capacity_silent_peer_does_not_hold_accept_loop() {
+        let temp = tempfile::tempdir().expect("socket directory");
+        let socket = temp.path().join("door.sock");
+        let listener = UnixListener::bind(&socket).expect("capacity listener");
+        let active = Arc::new(AtomicUsize::new(MAX_PEERS));
+        let (progress, observed) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().expect("silent excess peer");
+            assert!(admit_peer(&active, &mut first).is_none());
+            let (mut second, _) = listener.accept().expect("next excess peer");
+            assert!(admit_peer(&active, &mut second).is_none());
+            progress.send(()).expect("next peer answered");
+        });
+        let first = UnixStream::connect(&socket).expect("silent peer connection");
+        let second = UnixStream::connect(&socket).expect("next peer connection");
+        let next_answered = observed.recv_timeout(Duration::from_secs(5));
+        first
+            .shutdown(std::net::Shutdown::Both)
+            .expect("release silent peer even on failure");
+        drop(second);
+        server.join().expect("capacity server");
+        assert!(
+            next_answered.is_ok(),
+            "next peer did not receive an immediate answer"
+        );
     }
 
     fn call_fixture_socket_when_ready(
