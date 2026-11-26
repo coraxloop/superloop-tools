@@ -168,7 +168,7 @@ Owner commits declare their scope (door or gateway). The helper refuses a commit
 
 ## Stage 3: per-identity storage · `sec:collectionjournal:stage-3`
 
-Implementation status and remaining work: (`prob:door:collection-journal-becomes-one-file-per-row`). Under the loop's registered permission root, ``requests.d/`` holds:
+Implementation status and remaining work: (`prob:door:collection-journal-becomes-one-file-per-row`). The publication, recovery and crossing model in (`proposal:requeststore:concurrent-custody`) supersedes this stage's global revision, single log and exclusive row creation; the earlier layout below is not the implementation plan. Under the loop's registered permission root, that layout's ``requests.d/`` holds:
 
 - one current row per identity, at ``rows/AB/CD/ID.json`` (two hex shard levels, opened by identity, never listed);
 - memberships: ``runs/RUN/ID``, ``pending/ID``, ``claims/ID``, ``approvals/KEY/ID``;
@@ -243,7 +243,7 @@ Implementation status and remaining work: (`prob:door:door-keeps-a-store-of-its-
 
 ## Stage 6: wake-ups and the policy snapshot · `sec:collectionjournal:stage-6`
 
-Implementation status and remaining work: (`prob:door:door-parts-contend-for-the-request-lock-within-one-request`).
+Implementation status and remaining work: (`prob:door:door-parts-contend-for-the-request-lock-within-one-request`). The directory watch/read/recheck model in (`sec:requeststore:states-and-views`) supersedes watching a replaced row file; implement notification through that concept.
 
 - ``wait_answer`` and any waiter on an answer watch that request's row file with inotify instead of polling on a clock. A probe of 2026-11-14 measured a sub-millisecond wake-up with one watch per directory and no idle cost; acceptance repeats that measurement and verifies that idle polling is absent.
 - The policy snapshot stops embedding the learned index whole. At the measurement baseline it rewrites the learned index twice per commit, which is small in the baseline but grows with groups. It is published by parts or referenced by digest. That is a consumer-floor change for execute-command.
