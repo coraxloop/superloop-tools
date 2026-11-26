@@ -1,0 +1,10 @@
+[Unit]
+Description=Schedule one daily compute-node storage observation
+
+[Timer]
+OnCalendar=*-*-* 03:00:00 UTC
+Persistent=true
+Unit=superloop-node-storage.service
+
+[Install]
+WantedBy=timers.target

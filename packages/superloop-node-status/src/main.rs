@@ -1,7 +1,8 @@
 use std::os::unix::process::ExitStatusExt as _;
 mod ssh;
+mod storage;
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use std::io::{self, Write as _};
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -13,12 +14,40 @@ use std::time::Instant;
     about = "Compare loads of NODES through the selected loop's SSH aliases"
 )]
 struct Args {
+    #[command(subcommand)]
+    command: Option<Command>,
     #[arg(long)]
     ssh_config: Option<PathBuf>,
     #[arg(long)]
-    known_hosts: PathBuf,
+    known_hosts: Option<PathBuf>,
     #[arg(value_name = "LOOP")]
-    loop_name: String,
+    loop_name: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Storage {
+        #[command(subcommand)]
+        command: StorageCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum StorageCommand {
+    Sample {
+        #[arg(long)]
+        config: PathBuf,
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
+    Export {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, default_value_t = 0)]
+        after_sequence: u64,
+        #[arg(long, default_value_t = 16)]
+        limit: usize,
+    },
 }
 
 struct Load {
@@ -50,10 +79,15 @@ fn parse(bytes: &[u8]) -> Option<Load> {
 }
 
 fn run(args: Args, out: &mut impl io::Write) -> io::Result<()> {
-    if !ssh::name(&args.loop_name) {
+    let loop_name = args
+        .loop_name
+        .ok_or_else(|| io::Error::other("LOOP is required"))?;
+    let known_hosts = args
+        .known_hosts
+        .ok_or_else(|| io::Error::other("--known-hosts is required"))?;
+    if !ssh::name(&loop_name) {
         return Err(io::Error::other(format!(
-            "configuration invalid loop {:?}",
-            args.loop_name
+            "configuration invalid loop {loop_name:?}"
         )));
     }
     let raw =
@@ -66,9 +100,9 @@ fn run(args: Args, out: &mut impl io::Write) -> io::Result<()> {
     }
     let aliases: Vec<_> = nodes
         .iter()
-        .map(|node| format!("{node}-{}", args.loop_name))
+        .map(|node| format!("{node}-{loop_name}"))
         .collect();
-    let transport = ssh::Transport::new(args.ssh_config, args.known_hosts, &aliases)?;
+    let transport = ssh::Transport::new(args.ssh_config, known_hosts, &aliases)?;
     let timeout = ssh::milliseconds("NODE_STATUS_TIMEOUT_MS", 8_000, true)
         .map_err(|error| io::Error::other(format!("configuration {error}")))?;
     let mut best: Option<(&str, f64)> = None;
@@ -138,6 +172,28 @@ fn main() -> ExitCode {
             return ExitCode::from(u8::try_from(code).unwrap_or(2));
         }
     };
+    if let Some(Command::Storage { command }) = &args.command {
+        let result = match command {
+            StorageCommand::Sample { config, state_dir } => storage::sample(config, state_dir)
+                .and_then(|row| serde_json::to_vec(&row).map_err(io::Error::other)),
+            StorageCommand::Export {
+                state_dir,
+                after_sequence,
+                limit,
+            } => storage::export_page(state_dir, *after_sequence, *limit),
+        };
+        return match result.and_then(|bytes| {
+            let mut out = io::stdout().lock();
+            out.write_all(&bytes)?;
+            out.write_all(b"\n")
+        }) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(error) => {
+                let _printed = writeln!(io::stderr().lock(), "STORAGE-FAILED {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     let result = run(args, &mut io::stdout().lock());
     let wall = writeln!(
         io::stdout().lock(),

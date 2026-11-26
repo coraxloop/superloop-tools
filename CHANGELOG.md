@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+### Added
+
+- Add a daily compute-node volume sampler with immutable, sequenced JSON records and a bounded export of kept samples and unfinished reservations. It verifies a directory descriptor before reading volume counters, refuses unknown project inheritance, and names a replacement state directory with a new nonce. Compatibility: installation ships the program and unit templates but activates no timer, samples no volume and changes no stored request or worker form; provisioning must supply a root-owned, non-writable-by-others configuration, reviewed volume identities, reader-group access and unit activation before observations begin. The load reading's output is unchanged, but a missing `--known-hosts` or loop now fails with status 1 instead of as a usage error.
+
 ### Changed
 
 - A changing `rotate` now holds the loop's shared configuration lock from before it reconciles the old run and reads the plan and old reservation, through handover, pending-intent recovery, the new run's dispatch and failure recording. An installation holding the lock exclusively makes rotation refuse `install-busy`, including with `--force`; an installation arriving during rotation likewise finds the loop busy, and its refusal names a changing rotation among the possible holders. Preview remains read-only without this rotation-wide hold. Compatibility: only the host `superloop-lane` program's behaviour changes; other programs of the release can relink, and `install-door LOOP --dry-run` shows whether a door step is owed (``rule:superlooplane:door-rebuild-rollout``). A rotation started by an earlier lane program does not hold this lock, so an installer's idle check does not see it; let such a rotation finish before an installation that relies on that check. Stored reservation and generation forms do not change.
