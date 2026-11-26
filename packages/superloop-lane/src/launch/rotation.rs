@@ -2248,6 +2248,17 @@ pub fn run(owner_home: &Path, request: &RotateRequest) -> Result<Value, LaneErro
     run_with_host_root(owner_home, request, Path::new("/"), 0)
 }
 
+fn configuration_hold(
+    owner_home: &Path,
+    request: &RotateRequest,
+) -> Result<Option<crate::install::InstallGuard>, LaneError> {
+    if request.dry_run {
+        return Ok(None);
+    }
+    let config = owner_home.join(".config/loops").join(&request.loop_name);
+    crate::install::lock_loop_config(&config, true).map(Some)
+}
+
 #[allow(clippy::too_many_lines)]
 pub(crate) fn run_with_host_root(
     owner_home: &Path,
@@ -2255,6 +2266,10 @@ pub(crate) fn run_with_host_root(
     host_root: &Path,
     root_uid: u32,
 ) -> Result<Value, LaneError> {
+    // A changing rotation can launch vendor-bound work. Exclude an installation
+    // before reading either the plan or the old reservation, and retain the
+    // hold through recovery, dispatch, and failure recording.
+    let _configuration = configuration_hold(owner_home, request)?;
     let caller = Uid::effective().as_raw();
     let (plan, settings) = crate::load_plan_for_record_with_door(
         owner_home,
@@ -2671,6 +2686,7 @@ fn execute_rotation(
     after_publication: impl FnOnce(&Path) -> Result<(), LaneError>,
     provision: impl FnOnce(&Path, &LaunchRequest) -> Result<Value, LaneError>,
 ) -> Result<Value, LaneError> {
+    let _configuration = configuration_hold(owner_home, request)?;
     with_test_store(root, |store| {
         let identity = store.identity(&request.run)?;
         let verified_home: OwnedFd = File::open(owner_home)
@@ -3124,6 +3140,64 @@ mod tests {
             expect_digest: expected.map(str::to_owned),
             next: None,
         }
+    }
+
+    /// ´test:unit:changing-rotation-refuses-an-exclusive-configuration-holder´
+    #[test]
+    fn changing_rotation_refuses_an_exclusive_configuration_holder() {
+        let (home, _root, _old, _handover) = rotation_entry_fixture();
+        let config = home.path().join(".config/loops/alpha");
+        let exclusive = crate::install::lock_loop_config(&config, false).expect("installer hold");
+        for force in [None, Some("override".to_owned())] {
+            let mut request = rotate_form(false, None);
+            request.force = force;
+            let error = super::run_with_host_root(home.path(), &request, Path::new("/"), 0)
+                .expect_err("rotation must refuse before plan and reservation reads");
+            assert_eq!(error.kind, "install-busy");
+        }
+        drop(exclusive);
+        crate::install::lock_loop_config(&config, false).expect("installer still owns directory");
+    }
+
+    /// ´test:unit:changing-rotation-retains-configuration-through-failed-dispatch´
+    #[test]
+    fn changing_rotation_retains_configuration_through_failed_dispatch() {
+        let (home, root, old, handover) = rotation_entry_fixture();
+        let preview = entry_preview(home.path(), &root, old.clone(), handover.clone());
+        let config = home.path().join(".config/loops/alpha");
+        let mailbox = super::lock_mailbox(&root, "R", nix::unistd::Uid::effective().as_raw())
+            .expect("changing mailbox lock");
+        let check_exclusive = || {
+            let error = crate::install::lock_loop_config(&config, false)
+                .expect_err("changing rotation excludes installer");
+            assert_eq!(error.kind, "install-busy");
+        };
+        let error = execute_rotation(
+            home.path(),
+            &root,
+            &rotate_form(false, preview["handover_sha256"].as_str()),
+            old,
+            handover,
+            None,
+            PathBuf::from("/usr/bin/podman"),
+            Some(mailbox),
+            |_| Ok(3001),
+            |_| {
+                check_exclusive();
+                Ok(())
+            },
+            |_, _| {
+                check_exclusive();
+                Err(crate::error::LaneError::input("fixture-dispatch", "stop"))
+            },
+        )
+        .expect_err("fixture stops dispatch");
+        assert_eq!(error.kind, "fixture-dispatch");
+        let saved = super::read_reservation(&super::reservation_path(&root, "R"))
+            .expect("read refusal")
+            .expect("old reservation");
+        assert_eq!(saved["rotation_attempts"][0]["refusal"], "fixture-dispatch");
+        crate::install::lock_loop_config(&config, false).expect("hold released after cleanup");
     }
 
     fn entry_preview(
