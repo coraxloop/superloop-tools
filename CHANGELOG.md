@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.13.2] - 2026-11-26
+
 ### Fixed
 
 - Let simultaneous door judgements of one loop wait for the owner refresh guard within each call's existing budget, so the second request can receive its own agent verdict instead of an immediate `door-agent-refresh-busy` referral. The wait ends when the request stops or the call's cleanup allowance begins; a guard still held then refers `door-agent-refresh-busy` without starting the vendor, and the vendor never runs under the guard. Compatibility: the change is in the door service's agent runner, so a loop receives it with the one door step the next entry orders for this release (``rule:superlooplane:door-rebuild-rollout``), and until then keeps the immediate referral; the boxed stub, the node entry, the wire and stored records do not change.
@@ -1237,7 +1239,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.13.2...HEAD
+[0.13.2]: https://github.com/coraxloop/superloop-tools/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/coraxloop/superloop-tools/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/coraxloop/superloop-tools/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/coraxloop/superloop-tools/compare/v0.11.0...v0.12.0
