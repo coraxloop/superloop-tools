@@ -23,6 +23,39 @@ exec(source, namespace)
 ticks = itertools.count()
 namespace["time"] = types.SimpleNamespace(monotonic=lambda: next(ticks) / 1000)
 namespace["route_ended"] = lambda: False
+
+# The first pipe poll expires at the same instant the supervisor exits. Its
+# writer-free pipes then close: the next drain must return the command result.
+class ExitedBeforePipeEof:
+    returncode = 0
+
+    def __init__(self):
+        self.timeouts = []
+
+    def communicate(self, timeout):
+        self.timeouts.append(timeout)
+        if len(self.timeouts) == 1:
+            raise subprocess.TimeoutExpired("supervisor", timeout)
+        return b"finished", b""
+
+    def poll(self):
+        return self.returncode
+
+
+exited = ExitedBeforePipeEof()
+
+
+@contextlib.contextmanager
+def exit_inside_poll_window(*_args, **_kwargs):
+    yield exited
+
+
+with patch.dict(namespace, supervised_process=exit_inside_poll_window):
+    drained = namespace["run_preparation"](["/usr/bin/true"], 30, None)
+assert drained.returncode == 0 and drained.stdout == b"finished"
+assert exited.timeouts == [0.05, namespace["PREPARATION_PIPE_DRAIN_SECONDS"]]
+print("node preparation exit-before-EOF case=1: finished pipes return their result")
+
 root = Path(temporary)
 mirror = root / "mirrors" / "R.git"
 mirror.parent.mkdir()
@@ -703,6 +736,7 @@ try:
     supervisor_handle = None
     code, errors = finish_route(child)
     assert code == 125, errors
+    assert b"preparation supervisor ended while its writer remains" in errors
     with lock_path.open("a") as held:
         try:
             fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -104,6 +104,9 @@ class PreparationHeld(Deadline):
 
 LIBC = ctypes.CDLL(None, use_errno=True)
 PREPARATION_GRACE = 2
+# Exit closes the supervisor's own pipe ends before it can be reaped: without another writer,
+# the drain reads only buffered output. Two seconds absorb load; a remaining writer is refused.
+PREPARATION_PIPE_DRAIN_SECONDS = 2
 
 
 def parent_death_signal(parent):
@@ -150,18 +153,30 @@ def run_preparation(command, deadline, lock, **kwargs):
                     raise Deadline("node preparation deadline")
                 try:
                     stdout, stderr = child.communicate(timeout=0.05)
-                    if child.returncode in (124, 137, -signal.SIGKILL):
-                        raise Deadline("node preparation deadline")
-                    result = subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
-                    result.check_returncode()
-                    return result
                 except subprocess.TimeoutExpired:
                     if child.poll() is not None:
-                        # A surviving writer may retain the supervisor's output
-                        # pipes. Its lock remains held, but this script must end.
-                        child.stdout.close()
-                        child.stderr.close()
-                        raise OSError("preparation supervisor ended while its writer remains; retry after that writer exits")
+                        # Poll can see exit before the pipe readers see EOF.
+                        remaining = deadline - time.monotonic()
+                        if remaining <= 0:
+                            raise Deadline("node preparation deadline")
+                        try:
+                            stdout, stderr = child.communicate(
+                                timeout=min(PREPARATION_PIPE_DRAIN_SECONDS, remaining))
+                        except subprocess.TimeoutExpired:
+                            if time.monotonic() >= deadline:
+                                raise Deadline("node preparation deadline")
+                            # A surviving writer may retain the supervisor's
+                            # pipes and lock. End this script rather than wait.
+                            child.stdout.close()
+                            child.stderr.close()
+                            raise OSError("preparation supervisor ended while its writer remains; retry after that writer exits")
+                    else:
+                        continue
+                if child.returncode in (124, 137, -signal.SIGKILL):
+                    raise Deadline("node preparation deadline")
+                result = subprocess.CompletedProcess(command, child.returncode, stdout, stderr)
+                result.check_returncode()
+                return result
         except (RouteClosed, Deadline):
             stop_supervisor(child)
             raise

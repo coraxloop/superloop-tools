@@ -26,9 +26,11 @@ Design records in ``docs/design/`` preserve reasoning and open choices without d
 
 The contracts live in ``docs/spec/``; the contributing guide describes the build and verification workflow (`sec:contributing:verification`).
 
+The concurrent request-store concept (`proposal:requeststore:concurrent-custody`) derives proposed custody properties and separates per-request publication from the cross-request decisions needed to replace collection-wide locking.
+
 ## Versioning · `sec:publictools:versioning`
 
-This is version 0.13.2; before 1.0 backwards compatibility is explicitly excluded, every release may change any interface, file format or command, and compatibility code (a reader that accepts an older form, a shim, a deprecated alias) is a defect to be reported, not a courtesy.
+This is version 0.13.3; before 1.0 backwards compatibility is explicitly excluded, every release may change any interface, file format or command, and compatibility code (a reader that accepts an older form, a shim, a deprecated alias) is a defect to be reported, not a courtesy.
 
 ## Public releases · `sec:publictools:public-releases`
 
