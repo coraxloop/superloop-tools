@@ -1252,17 +1252,15 @@ fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
         );
         let report: Value = serde_json::from_slice(&output.stdout).expect("production report");
         assert_eq!(report["command"], operation);
-        if matches!(operation, "checkpoint" | "checkout") {
-            let saved: Value = serde_json::from_slice(
-                &fs::read(runs.join(".reservation-R.json")).expect("published reservation"),
-            )
-            .expect("reservation JSON");
-            assert_eq!(
-                saved["rounds"][0]["reply_designation"],
-                json!({"state":"unmeasured"}),
-                "{operation} dropped the member"
-            );
-        }
+        let saved: Value = serde_json::from_slice(
+            &fs::read(runs.join(".reservation-R.json")).expect("published reservation"),
+        )
+        .expect("reservation JSON");
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"}),
+            "{operation} dropped the member"
+        );
         if operation == "checkout" {
             assert_eq!(
                 fs::read(checkout_parent(home).join("checkout/letter")).expect("checkout"),
@@ -1277,6 +1275,12 @@ fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
     assert_eq!(record["checkpoints"][0]["bares"][0]["object"], object);
     assert_eq!(record["checkouts"][0]["object"], object);
     assert_eq!(record["imports"][0]["object"], object);
+    public_settled_readers(home, runs);
+}
+
+/// # Panics
+/// Panics if the public checkpoint or checkout fails to retain the reply member.
+fn public_settled_readers(home: &Path, runs: &Path) {
     let library = home.join("report-custody.so");
     let compiled = std::process::Command::new("/usr/bin/cc")
         .args(["-shared", "-fPIC", "-o"])

@@ -100,7 +100,7 @@ impl DesignationCounts {
         self.blockers.push(json!({"kind":"preparing-without-launch","run":run,
             "lease":lease,
             "next_command":format!("superloop-lane retire {loop_name} {run}{flag} --dry-run"),
-            "clears_by":"Inspect the recovery evidence and any confirmation flags in the retirement preview; apply its preview_sha256 with --expect-digest HEX, then run census rewrite-replies on the retired row."}));
+            "clears_by":format!("Inspect the recovery evidence and confirmation flags in the retirement preview; apply with superloop-lane retire {loop_name} {run}{flag} --expect-digest HEX, carrying before --expect-digest any other confirmation flag that preview needed. Then run superloop-lane census rewrite-replies {loop_name} --dry-run and apply its preview_sha256 with superloop-lane census rewrite-replies {loop_name} --expect-digest HEX.")}));
     }
 
     fn row(&mut self, record: &Value, retired: bool, loop_name: &str) {
@@ -1104,7 +1104,10 @@ mod tests {
                 .any(|row| row["kind"] == "preparing-without-launch"
                     && row["run"] == "R"
                     && row["next_command"]
-                        == "superloop-lane retire alpha R --confirm-missing-lease --dry-run")
+                        == "superloop-lane retire alpha R --confirm-missing-lease --dry-run"
+                    && row["clears_by"].as_str().is_some_and(|text| text.contains(
+                        "superloop-lane census rewrite-replies alpha --expect-digest HEX"
+                    )))
         );
         let lease = root.join(".prepare-R.lock");
         fs::write(&lease, b"").expect("unheld lease");
@@ -1118,6 +1121,35 @@ mod tests {
                 .any(|row| row["kind"] == "preparing-without-launch"
                     && row["run"] == "R"
                     && row["next_command"] == "superloop-lane retire alpha R --dry-run")
+        );
+        let held = super::retire::probe_retirement_lease(&root, "R", Uid::effective().as_raw())
+            .expect("probe lease")
+            .expect("lease");
+        let busy = run(home, "alpha").expect("held lease census");
+        assert!(
+            !busy["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["run"] == "R" && row["kind"] == "preparing-without-launch")
+        );
+        drop(held);
+        fs::set_permissions(&lease, fs::Permissions::from_mode(0o644))
+            .expect("unmeasurable lease mode");
+        let unmeasured = run(home, "alpha").expect("unmeasurable lease census");
+        assert!(
+            unmeasured["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["run"] == "R" && row["kind"] == "preparing-lease-unmeasured")
+        );
+        assert!(
+            !unmeasured["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["run"] == "R" && row["kind"] == "preparing-without-launch")
         );
         let rewrite = root.join(".retire-rewrite-R.json");
         publish_reservation(&rewrite, &json!({"schema":1,"phase":"unknown"}))
