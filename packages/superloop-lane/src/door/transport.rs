@@ -103,12 +103,14 @@ mod workspace_stub_tests {
                 if case == 0 {
                     super::super::concurrent_refusal(
                         &wait,
+                        None,
                         &registration,
                         uid,
                         Instant::now(),
                         Duration::from_secs(30),
                         deadline,
                         3,
+                        Some(super::super::transport::Operation::Compute),
                     )
                     .expect("concurrent reply");
                 } else {

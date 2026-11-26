@@ -48,6 +48,26 @@ mod tests {
 
     use super::final_line;
 
+    /// ´test:unit:door-ssh-completed-compute-counts-follow-verified-final´
+    #[test]
+    fn door_ssh_completed_compute_counts_follow_verified_final() {
+        let reply = json!({"reason":"door-complete","status":0,
+            "stdout_bytes":1536,"stderr_bytes":7});
+        let expected = Some("door-complete stdout_bytes=1536 stderr_bytes=7".to_owned());
+        assert_eq!(
+            final_line(&["node".into(), "printf hello".into()], &reply),
+            expected
+        );
+        assert_eq!(
+            final_line(&["--workspace-json".into(), "{}".into()], &reply),
+            expected
+        );
+        assert_eq!(
+            final_line(&["node".into(), "git-upload-pack repo".into()], &reply),
+            None
+        );
+    }
+
     /// ´test:unit:door-output-limit-diagnostic-names-budget-and-observation´
     #[test]
     fn door_output_limit_diagnostic_names_budget_and_observation() {
