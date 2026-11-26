@@ -60,9 +60,9 @@ fn run_inner(
         store
     };
     let result = match (action.as_str(), rest) {
-        ("status" | "list", []) => read(&store, action, loop_name, false)?,
+        ("status" | "list", []) => read(&store, action, loop_name, false, None)?,
         ("status" | "list", [flag]) if flag == "--pending" => {
-            read(&store, action, loop_name, true)?
+            read(&store, action, loop_name, true, None)?
         }
         ("triage" | "adjudicate", []) => {
             store.collection_command(action, Some(&document(input)?), None, false)?
@@ -101,49 +101,64 @@ fn run_inner(
                     "waiting" | "observed" | "marked" | "adjudicated"
                 ) =>
         {
-            store.collection_command("list", None, None, false)?;
-            let (records, _, shape_stale) = store.list_with_status()?;
-            let records = records
-                .into_iter()
-                .filter(|row| row.value()["state"] == *state)
-                .collect::<Vec<_>>();
-            super::list_response(&store, loop_name, &records, shape_stale)?
+            read(&store, "list", loop_name, false, Some(state))?
         }
         _ => return Err(super::usage()),
     };
     super::emit(output, &result)
 }
 
-fn read(store: &Store, action: &str, loop_name: &str, pending: bool) -> Result<Value, LaneError> {
-    let mut result = store.collection_command(action, None, None, pending)?;
-    let (records, shapes, stale) = store.list_with_status()?;
-    result["loop"] = json!(loop_name);
-    result["shape_record"] = json!(if stale { "stale" } else { "current" });
-    result["schema"] = json!(2);
-    let native = super::list_response(store, loop_name, &records, stale)?;
-    result["decisions"] = native["decisions"].clone();
-    result["request_endings"] = native["request_endings"].clone();
-    result["door_judgements"] = native["door_judgements"].clone();
-    result["preflight_refusals"] = json!(
-        records
-            .iter()
-            .filter(|row| row.value()["state"] == "preflight-refused")
-            .map(crate::requests::RequestRecord::value)
-            .collect::<Vec<_>>()
-    );
-    if action == "status" {
-        result["incomplete_attempt"] = store.incomplete_attempt()?;
-        result["unpublished_effects"] = json!(
+fn read(
+    store: &Store,
+    action: &str,
+    loop_name: &str,
+    pending: bool,
+    state: Option<&str>,
+) -> Result<Value, LaneError> {
+    store.collection_command_with_read(action, None, None, pending, |mut result, snapshot| {
+        let (mut records, shapes, shape_stale) = snapshot;
+        if pending && action == "list" {
+            let ids = result["requests"].as_array().ok_or_else(|| {
+                LaneError::input("requests-channel-refusal", "pending owner rows absent")
+            })?;
+            let ids = ids
+                .iter()
+                .filter_map(|row| row["id"].as_str())
+                .collect::<std::collections::HashSet<_>>();
+            records.retain(|row| ids.contains(store.collection_id(row.id()).as_str()));
+        }
+        if let Some(state) = state {
+            records.retain(|row| row.value()["state"] == state);
+            return super::list_response(store, loop_name, &records, shape_stale);
+        }
+        result["loop"] = json!(loop_name);
+        result["shape_record"] = json!(if shape_stale { "stale" } else { "current" });
+        result["schema"] = json!(2);
+        let native = super::list_response(store, loop_name, &records, shape_stale)?;
+        result["decisions"] = native["decisions"].clone();
+        result["request_endings"] = native["request_endings"].clone();
+        result["door_judgements"] = native["door_judgements"].clone();
+        result["preflight_refusals"] = json!(
             records
                 .iter()
-                .filter(|row| row.publication_pending())
-                .map(|row| store.unpublished_status(row))
+                .filter(|row| row.value()["state"] == "preflight-refused")
+                .map(crate::requests::RequestRecord::value)
                 .collect::<Vec<_>>()
         );
-        result["door_floor"] = json!(store.floor().as_str());
-        result["shape_path"] = json!(store.shape_path());
-        result["shapes"] = shapes;
-        result["learned_index"] = store.learned_status();
-    }
-    Ok(result)
+        if action == "status" {
+            result["incomplete_attempt"] = store.incomplete_attempt()?;
+            result["unpublished_effects"] = json!(
+                records
+                    .iter()
+                    .filter(|row| row.publication_pending())
+                    .map(|row| store.unpublished_status(row))
+                    .collect::<Vec<_>>()
+            );
+            result["door_floor"] = json!(store.floor().as_str());
+            result["shape_path"] = json!(store.shape_path());
+            result["shapes"] = shapes;
+            result["learned_index"] = store.learned_status();
+        }
+        Ok(result)
+    })
 }

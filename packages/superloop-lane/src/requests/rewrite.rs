@@ -177,8 +177,11 @@ impl Store {
             .socket_dir
             .ok_or_else(|| problem("requests-rebuild-idle", "socket directory absent"))?;
         let door = crate::home::pin_parent(&socket.join("door"), self.owner)?;
-        // Same directory flock as the service and rewrite. Acquire it before
-        // the store lock: a live service must never wait behind this scan.
+        // Same directory flock as the service and rewrite, taken before the
+        // store lock as the service takes them. Refusing while the service
+        // runs keeps this whole-store scan from holding the store lock under
+        // live requests; a live service waits only behind its own rebuild
+        // after an index loss.
         let _stopped = nix::fcntl::Flock::lock(
             File::from(door),
             nix::fcntl::FlockArg::LockExclusiveNonblock,
@@ -242,6 +245,7 @@ impl Store {
     }
 
     fn rebuild_learned_from_custody(&self) -> Result<Value, LaneError> {
+        let _phase = super::hold::phase(super::hold::Phase::Learned);
         let mut directory = Dir::openat(
             &self.runs,
             ".",
@@ -252,6 +256,7 @@ impl Store {
         let mut index = json!({"schema":1,"groups":{}});
         let mut seen = BTreeMap::new();
         let collection = self.channel_read()?;
+        let projection = collection.as_deref().map(Self::channel_projection_index);
         for entry in directory.iter() {
             let entry = entry.map_err(|e| problem("requests-learned-index", e.to_string()))?;
             let Ok(name) = entry.file_name().to_str() else {
@@ -284,7 +289,7 @@ impl Store {
                 .filter(|run| crate::valid_run_name(run))
                 .ok_or_else(|| problem("requests-learned-index", "invalid custody run"))?;
             let (_, mut rows) = decode_run(Some(&bytes), run)?;
-            self.channel_project(&mut rows, collection.as_deref())?;
+            self.channel_project_indexed(&mut rows, projection.as_ref())?;
             for row in rows {
                 if row.value()["loop"] != self.loop_name
                     || row.value()["worker_uid"] == self.owner

@@ -360,6 +360,7 @@ thread_local! {
     pub(crate) static AFTER_READER_LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_READER_LOCK_TIMEOUT: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     static AFTER_READER_LOCK_ACQUIRED: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
+    static READ_ACQUISITIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     static AFTER_WRITER_POLL: std::cell::RefCell<Option<WriterPollHook>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_CONTENTION: std::cell::RefCell<Option<Box<dyn FnOnce()>>> = const { std::cell::RefCell::new(None) };
     pub(crate) static AFTER_WRITER_LOCK_RETRY: std::cell::RefCell<Option<Box<dyn FnMut()>>> = const { std::cell::RefCell::new(None) };
@@ -477,6 +478,7 @@ fn after_reader_lock_timeout() {
 
 #[cfg(test)]
 fn after_reader_lock_acquired() {
+    READ_ACQUISITIONS.with(|count| count.set(count.get() + 1));
     AFTER_READER_LOCK_ACQUIRED.with(|hook| {
         if let Some(action) = hook.borrow_mut().take() {
             action();
@@ -1729,8 +1731,17 @@ impl Store {
         run: &str,
         collection: Option<&request_core::Collection>,
     ) -> Result<RunSnapshot, LaneError> {
+        let index = collection.map(Self::channel_projection_index);
+        self.read_run_with_index(run, index.as_ref())
+    }
+
+    fn read_run_with_index(
+        &self,
+        run: &str,
+        index: Option<&channel::ProjectionIndex<'_>>,
+    ) -> Result<RunSnapshot, LaneError> {
         let custody = self.custody(run)?;
-        self.read_run_from_custody(run, &custody, collection)
+        self.read_run_from_custody_indexed(run, &custody, index)
     }
 
     fn read_run_from_custody(
@@ -1738,6 +1749,16 @@ impl Store {
         run: &str,
         custody: &OwnedFd,
         collection: Option<&request_core::Collection>,
+    ) -> Result<RunSnapshot, LaneError> {
+        let index = collection.map(Self::channel_projection_index);
+        self.read_run_from_custody_indexed(run, custody, index.as_ref())
+    }
+
+    fn read_run_from_custody_indexed(
+        &self,
+        run: &str,
+        custody: &OwnedFd,
+        index: Option<&channel::ProjectionIndex<'_>>,
     ) -> Result<RunSnapshot, LaneError> {
         checked_dir(custody, self.owner)?;
         let bytes = read_leaf(custody, RUN_FILE, self.owner, MAX_RUN_BYTES)?;
@@ -1750,13 +1771,22 @@ impl Store {
                 return Err(problem("requests-record-refusal", "request grant differs"));
             }
         }
-        self.channel_project(&mut requests, collection)?;
+        self.channel_project_indexed(&mut requests, index)?;
         Ok((bytes, revision, requests))
     }
 
     fn all_runs(
         &self,
         candidate: Option<(&str, u64, &[RequestRecord])>,
+    ) -> Result<Vec<(String, u64, Vec<RequestRecord>)>, LaneError> {
+        let collection = self.channel_read()?;
+        self.all_runs_with_collection(candidate, collection.as_deref())
+    }
+
+    fn all_runs_with_collection(
+        &self,
+        candidate: Option<(&str, u64, &[RequestRecord])>,
+        collection: Option<&request_core::Collection>,
     ) -> Result<Vec<(String, u64, Vec<RequestRecord>)>, LaneError> {
         let _phase = hold::inventory();
         let mut directory = Dir::openat(
@@ -1768,7 +1798,7 @@ impl Store {
         .map_err(|error| problem("requests-record-refusal", error.to_string()))?;
         let mut runs = Vec::new();
         let mut candidate_found = false;
-        let collection = self.channel_read()?;
+        let index = collection.map(Self::channel_projection_index);
         for entry in directory.iter() {
             let entry =
                 entry.map_err(|error| problem("requests-record-refusal", error.to_string()))?;
@@ -1784,7 +1814,7 @@ impl Store {
                     "custody name is invalid",
                 ));
             }
-            let (_, revision, requests) = self.read_run_with_channel(run, collection.as_deref())?;
+            let (_, revision, requests) = self.read_run_with_index(run, index.as_ref())?;
             if let Some((wanted, next_revision, next_requests)) = candidate
                 && run == wanted
             {
@@ -2944,14 +2974,21 @@ impl Store {
         #[cfg(test)]
         stretch_shared_hold();
         let runs = self.all_runs(None)?;
-        let stale = self.shape_status(&runs)?;
-        let shapes = Self::shapes(&runs)?;
-        Ok((
-            runs.into_iter().flat_map(|(_, _, rows)| rows).collect(),
-            shapes,
-            stale,
-            started.elapsed(),
-        ))
+        let (rows, shapes, stale) = self.list_with_status_from_runs(&runs)?;
+        Ok((rows, shapes, stale, started.elapsed()))
+    }
+
+    fn list_with_status_from_runs(
+        &self,
+        runs: &[(String, u64, Vec<RequestRecord>)],
+    ) -> Result<(Vec<RequestRecord>, Value, bool), LaneError> {
+        let stale = self.shape_status(runs)?;
+        let shapes = Self::shapes(runs)?;
+        let records = runs
+            .iter()
+            .flat_map(|(_, _, rows)| rows.iter().cloned())
+            .collect();
+        Ok((records, shapes, stale))
     }
 
     /// Apply one validated batch to one run, with no write on any refusal.
@@ -3439,7 +3476,8 @@ pub(crate) mod tests {
     use super::{
         AFTER_FIRST_LOCK_MISS, AFTER_READER_LOCK_ACQUIRED, AFTER_READER_LOCK_CONTENTION,
         AFTER_READER_LOCK_TIMEOUT, AFTER_READER_RECORDS, ATTEMPT_FILE, FAIL_MODE_WRITE,
-        FAIL_SHAPE_WRITE, LOCK_FILE, LOOP_CAP, LOOP_CAP_REMEDY, RUN_FILE, SHAPES_FILE, Store,
+        FAIL_SHAPE_WRITE, LOCK_FILE, LOOP_CAP, LOOP_CAP_REMEDY, READ_ACQUISITIONS, RUN_FILE,
+        SHAPES_FILE, Store,
     };
     use crate::requests::{Mode, RequestRecord, modes::ModeTarget, tests::waiting};
 
@@ -4981,6 +5019,62 @@ pub(crate) mod tests {
         );
     }
 
+    /// ´test:unit:fixture-rebuild-projection-cost´
+    #[test]
+    #[ignore = "measurement fixture for the owner projection"]
+    fn fixture_rebuild_projection_cost() {
+        use sha2::Digest as _;
+        use std::io::Write;
+        let fixture = Fixture::new();
+        fixture.configure_door();
+        let store = fixture.store();
+        let rows = (0..1024)
+            .map(|number| waiting("R", &format!("{number:04x}"), 3000, Mode::Audit))
+            .collect::<Vec<_>>();
+        store
+            .fixture_replace_run_bytes("R", &super::encode_run("R", 1, &rows).expect("custody"))
+            .expect("fixture custody");
+        let document = json!([{"id":"R:0000","action":"mark","reason":"measurement"}]);
+        fixture
+            .command(
+                &["triage", "alpha", "R"],
+                &serde_json::to_vec(&document).expect("decision"),
+            )
+            .expect("bind common collection");
+        assert_eq!(
+            store
+                .channel_read()
+                .expect("collection")
+                .expect("bound")
+                .requests
+                .len(),
+            1024
+        );
+        let rebuilt = fixture
+            .command(&["rebuild-index", "alpha"], b"")
+            .expect("rebuild");
+        let bytes = serde_json::to_vec(&store.read_learned().expect("index")).expect("index JSON");
+        std::io::stderr()
+            .write_all(
+                format!(
+                    "REBUILD_MEASURE rows=1024 wall_ms={} index_sha256={:?}\n",
+                    rebuilt["wall_ms"],
+                    sha2::Sha256::digest(&bytes)
+                )
+                .as_bytes(),
+            )
+            .expect("measurement output");
+        fixture
+            .command(&["rebuild-index", "alpha"], b"")
+            .expect("repeat rebuild");
+        assert_eq!(
+            fs::read(fixture.home.join(".config/loops/alpha/door-learned.json"))
+                .expect("published index"),
+            bytes,
+            "unchanged custody gives byte-identical index"
+        );
+    }
+
     /// ´test:unit:rebuild-and-rewrite-accept-retirement-mixed-root´
     #[test]
     #[allow(clippy::too_many_lines)]
@@ -6498,6 +6592,47 @@ pub(crate) mod tests {
         fixture
     }
 
+    /// ´test:unit:owner-read-holds-one-store-snapshot-and-pending-narrows-rows´
+    #[test]
+    fn owner_read_holds_one_store_snapshot_and_pending_narrows_rows() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        let waiting_row = waiting("R", "1a", 3000, Mode::Audit);
+        let finished_row = waiting("R", "2b", 3000, Mode::Audit);
+        let mut effect = finished_row.value()["effect"].clone();
+        effect["state"] = json!("completed");
+        effect["reason"] = json!("door-complete");
+        effect["exit_status"] = json!(0);
+        effect["ref_check"] = json!("not-applicable");
+        store.file(waiting_row).expect("pending row");
+        store.file(finished_row).expect("finished row");
+        store
+            .triage(
+                "R",
+                &[json!({"id":"R:2b","action":"adjudicate",
+            "treatment":"allow","reason":"known"})],
+                "superloop",
+                "2",
+            )
+            .expect("label");
+        store.record_effect("R:2b", effect).expect("effect");
+        for args in [
+            &["status", "alpha"][..],
+            &["list", "alpha"][..],
+            &["list", "alpha", "--pending"][..],
+            &["list", "alpha", "--state", "waiting"][..],
+        ] {
+            READ_ACQUISITIONS.with(|count| count.set(0));
+            let result = fixture.command(args, b"").expect("owner read");
+            assert_eq!(READ_ACQUISITIONS.with(std::cell::Cell::get), 1, "{args:?}");
+            if args.ends_with(&["--pending"]) {
+                assert_eq!(result["requests"].as_array().expect("rows").len(), 1);
+                assert_eq!(result["door_judgements"][0]["source_id"], "R:1a");
+                assert_eq!(result["decisions"].as_array().expect("decisions").len(), 1);
+            }
+        }
+    }
+
     /// ´test:unit:request-listings-expose-admitted-judgements-without-mutation´
     #[test]
     fn request_listings_expose_admitted_judgements_without_mutation() {
@@ -6933,112 +7068,6 @@ pub(crate) mod tests {
                 assert_eq!(files(snapshot_root), before);
             }
         }
-    }
-
-    /// # Panics
-    /// Panics if a second acquisition renews a listing's deadline or loses total elapsed time.
-    /// ´test:unit:requests-list-shares-deadline-across-acquisitions´
-    #[test]
-    fn requests_list_shares_deadline_across_acquisitions() {
-        use std::cell::{Cell, RefCell};
-        use std::rc::Rc;
-        use std::time::Instant;
-        std::thread::scope(|scope| {
-            for suffix in [vec![], vec!["--pending"], vec!["--state", "waiting"]] {
-                scope.spawn(move || {
-                    let fixture = Fixture::new();
-                    let store = fixture.store();
-                    store
-                        .file(waiting("R", "1a", 3000, Mode::Audit))
-                        .expect("request");
-                    let acquired = Rc::new(Cell::new(0));
-                    let held = Rc::new(RefCell::new(None));
-                    let observations = Rc::clone(&acquired);
-                    let holder = Rc::clone(&held);
-                    let bound = super::READER_LOCK_WAIT;
-                    super::READER_LOCK_WAIT_OVERRIDE.set(Some(bound));
-                    super::BEFORE_READER_LOCK_ATTEMPT.with(|slot| {
-                        *slot.borrow_mut() = Some(Box::new(move |first| {
-                            let first = first.expect("listing has an absolute deadline");
-                            observations.set(observations.get() + 1);
-                            AFTER_READER_LOCK_ACQUIRED.with(|hook| {
-                                *hook.borrow_mut() = Some(Box::new(move || {
-                                    std::thread::sleep(
-                                        first.saturating_duration_since(Instant::now()),
-                                    );
-                                }));
-                            });
-                            super::BEFORE_READER_LOCK_ATTEMPT.with(|next| {
-                                *next.borrow_mut() = Some(Box::new(move |second| {
-                                    observations.set(observations.get() + 1);
-                                    assert_eq!(
-                                        second,
-                                        Some(first),
-                                        "the second read must share the deadline"
-                                    );
-                                    assert!(
-                                        Instant::now() >= first,
-                                        "first read consumed the allowance"
-                                    );
-                                    *holder.borrow_mut() = Some(
-                                        store.fixture_exclusive_lock().expect("second-read writer"),
-                                    );
-                                    super::BEFORE_READER_LOCK_SLEEP.with(|sleep| {
-                                        *sleep.borrow_mut() = Some(Box::new(|| {
-                                            panic!("expired second read must not wait again")
-                                        }));
-                                    });
-                                }));
-                            });
-                        }));
-                    });
-                    let args: Vec<_> = ["list", "alpha"]
-                        .into_iter()
-                        .chain(suffix)
-                        .map(str::to_owned)
-                        .collect();
-                    let mut output = Vec::new();
-                    let error = super::channel::with_test_client(
-                        super::test_helper::binary(),
-                        &fixture.permission_registry,
-                        || {
-                            crate::requests::commands::run(
-                                &fixture.home,
-                                &args,
-                                &mut &b""[..],
-                                &mut output,
-                            )
-                        },
-                    )
-                    .expect_err("second read refuses on its exhausted shared deadline");
-                    super::READER_LOCK_WAIT_OVERRIDE.set(None);
-                    assert_eq!(acquired.get(), 2, "{error:?}");
-                    super::BEFORE_READER_LOCK_SLEEP
-                        .with(|hook| assert!(hook.borrow_mut().take().is_some()));
-                    assert!(super::is_lock_contention(&error));
-                    assert!(error.detail.contains("holder_request_id=unknown"));
-                    assert!(error.detail.contains("retry requests list"));
-                    let figure = |key: &str| -> f64 {
-                        error
-                            .detail
-                            .split(';')
-                            .map(str::trim)
-                            .find_map(|part| part.strip_prefix(key))
-                            .expect("elapsed figure")
-                            .parse()
-                            .expect("numeric elapsed figure")
-                    };
-                    let listing = figure("listing_elapsed_seconds=");
-                    let last_read = figure("total_wait_seconds=");
-                    assert!(
-                        listing - last_read >= bound.as_secs_f64() - 0.002,
-                        "listing={listing} last={last_read}"
-                    );
-                    assert_eq!(output, Vec::<u8>::new());
-                    drop(held.borrow_mut().take());
-                });
-            }
-        });
     }
 
     /// # Panics
