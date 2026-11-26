@@ -2041,19 +2041,11 @@ impl Store {
         run: &str,
         old: Option<&[u8]>,
         requests: &[RequestRecord],
-        prior_runs: &[(String, u64, Vec<RequestRecord>)],
     ) -> Result<Value, LaneError> {
         let index = hold::phase(hold::Phase::Learned);
-        let mut learned = self
-            .read_learned()
-            .unwrap_or_else(|_| json!({"unavailable":true}));
-        if learned.is_null() {
-            learned = if prior_runs.is_empty() && !self.has_retired_custody().unwrap_or(true) {
-                json!({"schema":1,"groups":{}})
-            } else {
-                json!({"unavailable":true})
-            };
-        }
+        let mut learned = self.learned_for_write_locked().unwrap_or_else(|error| {
+            json!({"unavailable":true,"reason":format!("index rebuild refused: {}", error.kind)})
+        });
         let old_rows = decode_run(old, run)?.1;
         for row in requests {
             let prior = old_rows.iter().find(|old| old.id() == row.id());
@@ -2115,7 +2107,7 @@ impl Store {
             self.all_runs(None)?
         };
         self.repair_shapes(&prior_runs)?;
-        let learned = self.updated_learned(run, old, requests, &prior_runs)?;
+        let learned = self.updated_learned(run, old, requests)?;
         let prior_shapes = read_leaf(self.state_dir(), SHAPES_FILE, self.owner, MAX_SHAPES_BYTES)?;
         let next = encode_run(run, revision, requests)?;
         let runs = {
@@ -4926,12 +4918,14 @@ pub(crate) mod tests {
             .expect("filing remains available");
         assert_eq!(
             fixture.command(&["status", "alpha"], b"").expect("status")["learned_index"]["state"],
-            "unavailable"
+            "current"
         );
-        assert!(
+        assert_eq!(
             store
                 .learned_judgement("git", "git-upload", "git:upload")
-                .is_err()
+                .expect("retired label restored by filing")
+                .0["decision"],
+            "refuse"
         );
         assert_eq!(
             fixture
@@ -5266,6 +5260,26 @@ pub(crate) mod tests {
             assert_eq!(status["learned_index"]["limit"], limit);
             assert!(status["learned_index"]["rebuild"].is_null());
         }
+    }
+
+    /// ´test:unit:refused-learned-rebuild-is-not-rescanned-on-each-write´
+    #[test]
+    fn refused_learned_rebuild_is_not_rescanned_on_each_write() {
+        let fixture = Fixture::new();
+        let store = fixture.store();
+        store
+            .file(waiting("R", "1a", 3000, Mode::Audit))
+            .expect("first");
+        store
+            .write_learned(&json!({"unavailable":true,"reason":"index rebuild refused: fixture"}))
+            .expect("refused fixture");
+        store
+            .file(waiting("R", "2b", 3001, Mode::Audit))
+            .expect("filing keeps the named miss");
+        assert_eq!(
+            store.learned_status()["reason"],
+            "index rebuild refused: fixture"
+        );
     }
 
     /// ´test:unit:rebuild-requires-idle-and-measures-retired-scan´
@@ -7596,6 +7610,7 @@ pub(crate) mod tests {
             "requests-record-refusal"
         );
         assert_eq!(fs::read(fixture.run_file("R")).expect("restored"), before);
+        assert_eq!(store.learned_status()["state"], "unavailable");
         let attempt: serde_json::Value = serde_json::from_slice(
             &fs::read(
                 fixture
@@ -7606,6 +7621,10 @@ pub(crate) mod tests {
         )
         .expect("JSON");
         assert_eq!(attempt["latest"]["withdrawn"]["phase"], "withdrawn");
+        store
+            .file(waiting("R", "2b", 3001, Mode::Audit))
+            .expect("next filing repairs the interrupted index");
+        assert_eq!(store.learned_status()["state"], "current");
     }
 
     /// ´test:unit:stored-floor-is-history-and-owner-worker-grants-refuse´

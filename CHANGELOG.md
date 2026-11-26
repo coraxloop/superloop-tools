@@ -8,6 +8,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Rebuild a door's absent, damaged or interrupted learned index before the door service binds its socket, and under the store lock on a later request write or owner `triage` or `adjudicate` that finds it so, so that a publication that once stopped between its tombstone and its index no longer sends every later request to the agent. A rebuild that cannot complete records `index rebuild refused` with its cause and keeps the named miss, without another scan on each write, until the next service start or a stopped-service `requests rebuild-index`; a capacity limit remains a named miss. A learned miss on the legacy route now journals `door learned lookup` with its class, operation, shape and reason. Compatibility: install the lane program on the host and run each door's step at an idle boundary, repinning the runs `install-door` names (``rule:superlooplane:door-rebuild-rollout``); the service's first start rebuilds an unavailable index before it accepts connections, so on a large store a request is refused by its stub without dispatch for the rebuild's length, which the service journals as `door learned index startup` with its wall. Request records and the index's form do not change, so either install order is safe and no rollback floor arises.
+
 - Align the lane guide's producing default with `gpt-6-sol` at medium effort while keeping the door's own model setting explicit (``setup:superlooplane:door-model-and-effort``).
 
 ## [0.13.3] - 2026-11-26

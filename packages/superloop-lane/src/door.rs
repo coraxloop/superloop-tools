@@ -4180,6 +4180,14 @@ fn serve_request_with_agent_at_context(
         }
     };
     let miss = would_do["decision"] == "undecided";
+    if miss && rubric.is_none() && !registered_receive {
+        let _reported = writeln!(
+            io::stderr().lock(),
+            "door learned lookup: {}",
+            json!({"class":class,"operation":operation.name(),"shape_key":shape_key,
+                "reason":would_do["reason"]})
+        );
+    }
     let agent_words: Vec<_> = args
         .as_deref()
         .unwrap_or_default()
@@ -4933,6 +4941,20 @@ pub fn run_service(loop_name: &str) -> Result<(), LaneError> {
     })
 }
 
+fn heal_index_for_service(home: &Path, loop_name: &str) -> Result<Value, LaneError> {
+    let started = Instant::now();
+    let outcome =
+        Store::open(home, loop_name, true).and_then(|store| store.heal_learned_at_start());
+    let report = match &outcome {
+        Ok(status) => json!({"state":status["state"],"reason":status["reason"],
+            "wall_ms":started.elapsed().as_secs_f64() * 1000.0}),
+        Err(error) => json!({"state":"unavailable","reason":error.line(),
+            "wall_ms":started.elapsed().as_secs_f64() * 1000.0}),
+    };
+    let _reported = writeln!(io::stderr().lock(), "door learned index startup: {report}");
+    outcome
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_service_with_snapshot(
     loop_name: &str,
@@ -5059,6 +5081,8 @@ fn run_service_with_snapshot(
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| LaneError::input("door-registration", "row uid is absent"))?;
     recover_at_start(&owner_home, loop_name);
+    // The service owns the door idle lock; repair before binding its socket.
+    let _healed = heal_index_for_service(&owner_home, loop_name);
     let mut peer_map = None;
     let (listener, _bound_socket) = bind_socket_slot(&slot, |listener, before| {
         peer_map = Some(socket_group_child(
@@ -9808,6 +9832,13 @@ mod tests {
         let seed_id = seed.id().to_owned();
         store.file(seed).expect("seed filing");
         label(&store, &seed_id, "allow");
+        let index_path = fixture.home.join(".config/loops/alpha/door-learned.json");
+        std::fs::write(&index_path, b"{\"unavailable\":true}").expect("interrupted index");
+        assert_eq!(store.learned_status()["state"], "unavailable");
+        assert_eq!(
+            super::heal_index_for_service(&fixture.home, "alpha").expect("service startup heal")["state"],
+            "current"
+        );
         let route = route_for(&fixture.home);
         let (runner, effects, _) = counting_runner(&fixture);
         let agent = Agent(AtomicUsize::new(0));

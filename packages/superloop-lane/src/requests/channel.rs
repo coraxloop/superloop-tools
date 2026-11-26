@@ -620,7 +620,9 @@ impl Store {
         let prior_index = if changed.is_empty() {
             Value::Null
         } else {
-            self.read_learned()?
+            self.learned_for_write_locked().unwrap_or_else(|error| {
+                json!({"unavailable":true,"reason":format!("index rebuild refused: {}", error.kind)})
+            })
         };
         if !changed.is_empty() {
             self.write_learned(

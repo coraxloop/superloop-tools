@@ -114,23 +114,6 @@ fn convert(before: &Value, custody: &str) -> Result<Value, LaneError> {
 }
 
 impl Store {
-    pub(super) fn has_retired_custody(&self) -> Result<bool, LaneError> {
-        let mut directory = Dir::openat(
-            &self.runs,
-            ".",
-            OFlag::O_RDONLY | OFlag::O_DIRECTORY | OFlag::O_NOFOLLOW,
-            FileMode::empty(),
-        )
-        .map_err(|e| problem("requests-learned-index", e.to_string()))?;
-        for entry in directory.iter() {
-            let entry = entry.map_err(|e| problem("requests-learned-index", e.to_string()))?;
-            if entry.file_name().to_bytes().starts_with(b".retired-") {
-                return Ok(true);
-            }
-        }
-        Ok(false)
-    }
-
     /// Report the atomically published index, including failures and their remedy.
     pub fn learned_status(&self) -> Value {
         let (state, reason, shapes) = match self.read_learned() {
@@ -208,6 +191,57 @@ impl Store {
         })?;
         let _lock = self.write_lock("rebuild_index_stopped")?;
         self.write_learned(&json!({"unavailable":true,"reason":"index rebuild incomplete"}))?;
+        let index = self.rebuild_learned_from_custody()?;
+        self.write_learned(&index)?;
+        Ok(self.learned_status())
+    }
+
+    /// Rebuild while the service owns its door lock, before its first peer.
+    pub(crate) fn heal_learned_at_start(&self) -> Result<Value, LaneError> {
+        let _lock = self.write_lock("heal_learned_at_start")?;
+        let index = self.read_learned();
+        if let Ok(index) = &index
+            && (index["schema"] == 1
+                || matches!(
+                    index["reason"].as_str(),
+                    Some("shape index capacity" | "index byte capacity")
+                ))
+        {
+            return Ok(self.learned_status());
+        }
+        self.write_learned(&json!({"unavailable":true,"reason":"index rebuild incomplete"}))?;
+        let rebuilt = match self.rebuild_learned_from_custody() {
+            Ok(rebuilt) => rebuilt,
+            Err(error) => {
+                self.write_learned(&json!({"unavailable":true,
+                    "reason":format!("index rebuild refused: {}", error.kind)}))?;
+                return Err(error);
+            }
+        };
+        self.write_learned(&rebuilt)?;
+        Ok(self.learned_status())
+    }
+
+    /// Read the current index, or reconstruct it under the caller's store write lock.
+    /// A capacity limit or an earlier refused rebuild stays a named miss; only a
+    /// service start or the stopped-service rebuild scans custody for it again.
+    pub(super) fn learned_for_write_locked(&self) -> Result<Value, LaneError> {
+        if let Ok(index) = self.read_learned()
+            && (index["schema"] == 1
+                || matches!(
+                    index["reason"].as_str(),
+                    Some("shape index capacity" | "index byte capacity")
+                )
+                || index["reason"]
+                    .as_str()
+                    .is_some_and(|reason| reason.starts_with("index rebuild refused")))
+        {
+            return Ok(index);
+        }
+        self.rebuild_learned_from_custody()
+    }
+
+    fn rebuild_learned_from_custody(&self) -> Result<Value, LaneError> {
         let mut directory = Dir::openat(
             &self.runs,
             ".",
@@ -271,8 +305,7 @@ impl Store {
                 Self::index_judgement(&mut index, row.value(), None);
             }
         }
-        self.write_learned(&index)?;
-        Ok(self.learned_status())
+        Ok(index)
     }
 
     fn rewrite_plan(&self) -> Result<Value, LaneError> {
