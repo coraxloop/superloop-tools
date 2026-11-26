@@ -2134,7 +2134,8 @@ os._exit(0)"
         let source = crate::home::pin_parent(&bad_source, owner).expect("source descriptor");
         let target = crate::home::pin_parent(&destination, owner).expect("target descriptor");
         let first = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let mut record = json!({"schema":1,"worker_uid":3000,"checkouts":[],"checkouts_omitted":0,"checkout_attempts":[],"checkout_next_index":2,"checkout_pending":{"index":1,"token":first,"checkpoint_index":1,"repo":"tools","directory":destination,"object":"1".repeat(40),"preexisting":false,"attempt_instant_unix_ns":super::instant().expect("attempt instant")}});
+        let mut record = json!({"schema":1,"worker_uid":3000,"checkouts":[],"checkouts_omitted":0,"checkout_attempts":[],"checkout_next_index":2,"checkout_pending":{"index":1,"token":first,"checkpoint_index":1,"repo":"tools","directory":destination,"object":"1".repeat(40),"preexisting":false,"attempt_instant_unix_ns":super::instant().expect("attempt instant")},
+            "rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]});
         super::publish_record(&root_fd, "R", &record, first).expect("pending before clone");
         let error = super::clone_checkout(&source, &target, "R", &"1".repeat(40))
             .expect_err("bad source interrupts clone");
@@ -2174,6 +2175,10 @@ os._exit(0)"
         );
         assert_eq!(saved["checkout_attempts"][1]["token"], second);
         assert_eq!(saved["checkout_attempts"][1]["created_observed"], "unknown");
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
         assert!(destination.join(".git").exists());
     }
 

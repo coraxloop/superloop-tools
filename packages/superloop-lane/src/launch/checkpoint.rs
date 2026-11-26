@@ -2884,7 +2884,8 @@ mod tests {
         fs::set_permissions(run.join("preserved/4"), fs::Permissions::from_mode(0o700))
             .expect("target mode");
         let token = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let record = json!({"checkpoint_pending":{"index":4,"token":token}});
+        let record = json!({"checkpoint_pending":{"index":4,"token":token},
+            "rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]});
         let error = super::LaneError::input("checkpoint-private", "300 second time limit");
         let owner = nix::unistd::Uid::effective().as_raw();
         let observed = residue_at(&directory(&run), &run, 4, owner).expect("residue");
@@ -2894,6 +2895,10 @@ mod tests {
             serde_json::from_slice(&fs::read(&reservation).expect("reservation"))
                 .expect("saved record");
         assert!(saved.get("checkpoint_pending").is_none());
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
         let attempt = &saved["checkpoint_attempts"][0];
         assert_eq!(attempt["index"], 4);
         assert_eq!(attempt["refusal"], "checkpoint-private");
