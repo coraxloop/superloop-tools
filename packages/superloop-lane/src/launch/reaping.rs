@@ -1199,10 +1199,11 @@ fn record_reconciliation(record: &mut Value, cause: &str, unit: &str, reaping: &
     }
 }
 
-/// Leave launch's started and preparing reservations to its existing recovery readers.
+/// Leave launch's started and preparing reservations to its existing recovery readers,
+/// and a changing rotation's reconciliation to its own configuration hold.
 #[must_use]
 pub fn reconciles_before_command(command: &str) -> bool {
-    command != "launch"
+    !matches!(command, "launch" | "rotate")
 }
 
 /// Identify a started run whose launcher is gone so its reply can be read without a new unit.
@@ -2151,6 +2152,7 @@ mod tests {
         assert_eq!(preparing["pre_driver_failure"], "driver-death");
         assert_eq!(preparing["driver_end"]["state"], "not-started");
         assert!(!reconciles_before_command("launch"));
+        assert!(!reconciles_before_command("rotate"));
         assert!(reconciles_before_command("checkpoint"));
         assert!(
             started_recovery_state(&reservation(), "alpha", "R", |_, _| {

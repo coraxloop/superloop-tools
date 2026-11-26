@@ -1583,7 +1583,7 @@ pub(crate) fn busy_holder_with_program(
     }
     holders.sort();
     if holders.is_empty() {
-        vec!["a shared configuration reader (launch planning, a starting round, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run)".into()]
+        vec!["a shared configuration reader (launch planning, a starting round, a changing rotation, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run)".into()]
     } else {
         holders
     }
@@ -3054,7 +3054,7 @@ mod tests {
         assert!(
             shared
                 .detail
-                .contains("launch planning, a starting round, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run"),
+                .contains("launch planning, a starting round, a changing rotation, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run"),
             "{shared:?}"
         );
         drop(reader);

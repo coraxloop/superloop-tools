@@ -2270,6 +2270,11 @@ pub(crate) fn run_with_host_root(
     // before reading either the plan or the old reservation, and retain the
     // hold through recovery, dispatch, and failure recording.
     let _configuration = configuration_hold(owner_home, request)?;
+    if !request.dry_run {
+        // The command's reconciliation reads and may republish the old
+        // reservation, so it runs under this hold rather than before it.
+        super::reaping::reconcile_public(owner_home, &request.loop_name, &request.run)?;
+    }
     let caller = Uid::effective().as_raw();
     let (plan, settings) = crate::load_plan_for_record_with_door(
         owner_home,
