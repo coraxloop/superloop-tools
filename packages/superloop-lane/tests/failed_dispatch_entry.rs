@@ -659,6 +659,14 @@ fn old_reply_row_converts_before_interrupted_settlement_recovery() {
             .output()
             .expect("pause"),
     );
+    let paused = fixture.recovery(None);
+    assert_eq!(paused.status.code(), Some(2));
+    let paused_text = String::from_utf8_lossy(&paused.stderr);
+    assert!(paused_text.contains("launch-paused"), "{paused_text}");
+    assert!(
+        paused_text.contains("superloop-lane resume alpha"),
+        "{paused_text}"
+    );
     let conversion = successful_json(
         &fixture
             .command()

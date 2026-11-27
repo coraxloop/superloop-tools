@@ -1516,7 +1516,7 @@ fn resume_with_program(
         .ok_or_else(|| LaneError::input("round-step", "round is absent"))?;
     let config = owner_home.join(".config/loops").join(&request.loop_name);
     let _admission = crate::install::lock_loop_config(&config, true)?;
-    admission::ensure_open(&config, caller)?;
+    admission::ensure_open(&config, caller, &request.loop_name)?;
     let (mut plan, settings) = crate::load_plan_for_record_with_door(
         owner_home,
         &request.loop_name,

@@ -4034,7 +4034,7 @@ fn run_with_program(
     let config = owner_home.join(".config/loops").join(&request.loop_name);
     let (_admission, mut generation_guard) =
         crate::install::lock_launch_generation(&config, request.dry_run)?;
-    admission::ensure_open(&config, caller.0)?;
+    admission::ensure_open(&config, caller.0, &request.loop_name)?;
     if request.door_scope == crate::door::Scope::Work {
         door_scope::work_route(&config, &request.loop_name, caller.0)?;
     }
