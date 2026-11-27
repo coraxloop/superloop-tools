@@ -1680,7 +1680,7 @@ pub(crate) mod tests {
         ]);
         record["worker_uid"] = json!(worker);
         record["schema"] = json!(1);
-        record["rounds"] = json!([{"step":"dispatch","phase":"settled","ended_by":"by-report"}]);
+        record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","ended_by":"by-report"}]);
         record["active_round"] = json!("dispatch");
         record["collection"] = Value::Null;
         let root = settings.runs_root.as_deref().expect("runs root");
@@ -1980,7 +1980,7 @@ pub(crate) mod tests {
         }
         let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"settled",
             "plan":document,"worker_uid":3000,"harvest_agreement":null,"collection":null,
-            "rounds":[{"step":"dispatch","phase":"settled","ended_by":"by-report"}],
+            "rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","ended_by":"by-report"}],
             "active_round":"dispatch"});
         (
             Plan {
@@ -2053,7 +2053,7 @@ pub(crate) mod tests {
                     "schema":1,"loop":"alpha","run":"R","phase":"settled",
                     "plan":document,"worker_uid":3000,
                     "harvest_agreement":null,"collection":null,
-                    "rounds":[{"step":"dispatch","phase":"settled","ended_by":"by-report"}],
+                    "rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","ended_by":"by-report"}],
                     "active_round":"dispatch"
                 });
                 super::super::publish_reservation(&reservation, &record).expect("reservation");
@@ -2141,7 +2141,7 @@ pub(crate) mod tests {
         ]);
         record["worker_uid"] = json!(worker);
         record["schema"] = json!(1);
-        record["rounds"] = json!([{"step":"dispatch","phase":"settled","ended_by":"by-report"}]);
+        record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","ended_by":"by-report"}]);
         record["active_round"] = json!("dispatch");
         record["collection"] = json!({"checkpoint_index":1,"state":"removing","instant_unix_ns":3,"planned":["."],"writable_collected_first":null,"remaining":null,"refusal":null,"component":null,"token":"a".repeat(32),"parent_identity":{"device":1,"inode":1},"home_identity":{"device":1,"inode":2}});
         let root = settings.runs_root.as_deref().expect("runs root");

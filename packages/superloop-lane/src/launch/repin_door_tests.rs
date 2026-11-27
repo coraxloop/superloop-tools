@@ -9,7 +9,7 @@ use std::os::unix::fs::PermissionsExt as _;
 #[test]
 fn door_repin_interrupted_boundary_requires_ended_driver() {
     let record = json!({"run":"R","phase":"started","active_round":"work",
-        "driver_end":{"state":"completed"},"rounds":[{"step":"work","phase":"running"}]});
+        "driver_end":{"state":"completed"},"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"work","phase":"running"}]});
     assert_eq!(
         settled_boundary(&record, crate::launch::driver_report::fixture_read)
             .expect("interrupted boundary")
@@ -81,7 +81,7 @@ fn interrupted_fixture(completed_driver: bool, report_step: &str, successful: bo
         .as_array_mut()
         .expect("rounds")
         .push(json!({
-            "step":"work","phase":"running","budget_seconds":2,"driver_dir":report_directory
+            "reply_designation":{"state":"unmeasured"},"step":"work","phase":"running","budget_seconds":2,"driver_dir":report_directory
         }));
     publish_reservation(&fixture.path, &record).expect("interrupted resumed round");
     directory(
@@ -719,7 +719,7 @@ impl Fixture {
         file(&plan.home.join(".local/inbox/work.md"), letter, 0o600);
         let step_dir = plan.driver_dir.join("20261016T000000Z-dispatch");
         let path = reservation_path(&root, "R");
-        let record = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":worker,"door_scope":"work","plan":plan.document,"model_selection":selection,"letter_source":plan.home.join(".local/inbox/work.md"),"active_round":"dispatch","thread_id":"thread-1","rounds":[{"step":"dispatch","phase":"settled","driver_dir":step_dir}],"letters":[{"name":"work.md","step":"work","in_round":false,"state":"placed","bytes":letter.len(),"sha256":hash(letter),"stop":false,"placed_at_unix_ns":1}],"launcher_pid":u32::MAX,"launcher_start":1,"driver_entry_pid":u32::MAX,"driver_entry_start":1,"helper_pid":u32::MAX,"helper_start":1,"observer_state":"not-started","helper_spawn_state":"not-started","imports":[],"harvest_agreement":null,"collection":null});
+        let record = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":worker,"door_scope":"work","plan":plan.document,"model_selection":selection,"letter_source":plan.home.join(".local/inbox/work.md"),"active_round":"dispatch","thread_id":"thread-1","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","driver_dir":step_dir}],"letters":[{"name":"work.md","step":"work","in_round":false,"state":"placed","bytes":letter.len(),"sha256":hash(letter),"stop":false,"placed_at_unix_ns":1}],"launcher_pid":u32::MAX,"launcher_start":1,"driver_entry_pid":u32::MAX,"driver_entry_start":1,"helper_pid":u32::MAX,"helper_start":1,"observer_state":"not-started","helper_spawn_state":"not-started","imports":[],"harvest_agreement":null,"collection":null});
         let mut record = record;
         record["observer_end"] = json!({"state":"not-started"});
         publish_reservation(&path, &record).expect("settled reservation");
@@ -848,7 +848,7 @@ fn resumed_round_retains_the_configured_attempt_wall() {
     record["rounds"]
         .as_array_mut()
         .expect("rounds")
-        .push(json!({"step":"work","phase":"running","budget_seconds":2}));
+        .push(json!({"reply_designation":{"state":"unmeasured"},"step":"work","phase":"running","budget_seconds":2}));
     publish_reservation(&fixture.path, &record).expect("interrupted resumed round");
     let custody = fixture.path.parent().expect("runs").join(".launch-R");
     directory(&custody, 0o700);

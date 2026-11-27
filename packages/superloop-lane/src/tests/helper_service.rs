@@ -174,7 +174,8 @@ pub(super) fn prepare(home: &Path, runs: &Path, podman: &Path) -> Value {
         serde_json::from_slice(&fs::read(&path).expect("reservation")).expect("record");
     record["phase"] = json!("preparing");
     record["active_round"] = json!("dispatch");
-    record["rounds"] = json!([{"step":"dispatch","budget_seconds":3600}]);
+    record["rounds"] = json!([{"step":"dispatch","budget_seconds":3600,
+        "reply_designation":{"state":"unmeasured"}}]);
     crate::launch::publish_reservation(&path, &record).expect("preparing reservation");
     for path in [
         home.parent().expect("fixture root").to_path_buf(),
@@ -996,7 +997,8 @@ p.write_text(v['text']);p.chmod(0o600);os.chown(p,v['uid'],v['uid'])
     record["rounds"]
         .as_array_mut()
         .expect("rounds")
-        .push(json!({"step":"review","phase":"preparing"}));
+        .push(json!({"step":"review","phase":"preparing",
+            "reply_designation":{"state":"unmeasured"}}));
     crate::launch::publish_reservation(&reservation, &record).expect("resume input");
     ready_and_stop(
         built_helper(home, runs, podman, false),
@@ -1333,7 +1335,8 @@ os.chown(p,0,v['uid']);p.chmod(0o440)
         record["rounds"]
             .as_array_mut()
             .expect("rounds")
-            .push(json!({"step":"review","budget_seconds":3600}));
+            .push(json!({"step":"review","budget_seconds":3600,
+                "reply_designation":{"state":"unmeasured"}}));
         if case == "binding" {
             record["mail"] = json!([]);
         }
@@ -1429,10 +1432,10 @@ fn rollback_record(seed: &Value, runs: &Path, nonce: &str, request: &str) -> Val
     record["phase"] = json!("preparing");
     record["active_round"] = json!("review");
     record["letter_source"] = json!(runs.join("R/mail-review.txt"));
-    record["rounds"]
-        .as_array_mut()
-        .expect("rounds")
-        .push(json!({"step":"review","phase":"preparing","budget_seconds":3600}));
+    record["rounds"].as_array_mut().expect("rounds").push(
+        json!({"step":"review","phase":"preparing","budget_seconds":3600,
+            "reply_designation":{"state":"unmeasured"}}),
+    );
     let original: Vec<Value> = [
         crate::container_helper::socket_path(&runs.join("R")).expect("socket"),
         crate::container_helper::control_socket_path(&runs.join("R")).expect("control"),

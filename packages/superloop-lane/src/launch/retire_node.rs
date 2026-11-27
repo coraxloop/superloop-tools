@@ -2,7 +2,7 @@
 
 use super::{
     Duration, Instant, LaneError, Path, RetireRequest, Uid, Value, fs, json, node,
-    publish_reservation, read_reservation, reservation_path,
+    publish_reservation, reservation_path,
 };
 
 const HISTORY: usize = 4;
@@ -175,7 +175,8 @@ pub(super) fn finish(
     runner: Option<&dyn node::Runner>,
     budget: Duration,
 ) -> Result<Value, LaneError> {
-    let mut record = read_reservation(path)?.ok_or_else(|| refusal("retired record vanished"))?;
+    let mut record = super::read_reservation_for_conversion(path)?
+        .ok_or_else(|| refusal("retired record vanished"))?;
     if record["phase"] != "retired"
         || record["current_retirement"]["reservation_path"]["target"]
             != path.to_string_lossy().as_ref()
@@ -244,7 +245,7 @@ pub(super) fn complete(
         .run
         .as_deref()
         .ok_or_else(|| refusal("run is absent"))?;
-    if read_reservation(&reservation_path(root, run))?.is_some() {
+    if super::read_reservation_for_conversion(&reservation_path(root, run))?.is_some() {
         return Err(LaneError::input(
             "retire-node-active-run",
             "an active reservation still uses this run name",
@@ -263,7 +264,8 @@ pub(super) fn complete(
             continue;
         }
         let path = entry.path();
-        let record = read_reservation(&path)?.ok_or_else(|| refusal("retired record vanished"))?;
+        let record = super::read_reservation_for_conversion(&path)?
+            .ok_or_else(|| refusal("retired record vanished"))?;
         if record["run"] != run {
             continue;
         }

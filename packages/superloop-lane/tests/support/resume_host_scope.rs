@@ -749,10 +749,10 @@ fn earlier_bound_reply_refuses_without_recovery_remedy(fixture: &host::Host, bou
     changed["phase"] = serde_json::json!("failed");
     assert_eq!(changed["rounds"][1]["phase"], "settled");
     changed["active_round"] = serde_json::json!("later");
-    changed["rounds"]
-        .as_array_mut()
-        .expect("rounds")
-        .push(serde_json::json!({"step":"later", "phase":"failed", "reply":null}));
+    changed["rounds"].as_array_mut().expect("rounds").push(
+        serde_json::json!({"step":"later", "phase":"failed", "reply":null,
+            "reply_designation":{"state":"unmeasured"}}),
+    );
     let path = fixture.home().join("runs/.reservation-R.json");
     host::write(
         path.clone(),

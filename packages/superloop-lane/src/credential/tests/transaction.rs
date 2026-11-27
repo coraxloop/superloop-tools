@@ -1025,7 +1025,7 @@ fn service_round_body(enclosing: &Path, scenario: ServiceCase) {
             let mut record = json!({
                 "schema":1,"phase":"preparing","loop":"alpha","run":"R",
                 "worker_uid":3000,"launcher_pid":launcher_pid,"launcher_start":launcher_start,
-                "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}],
+                "active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":3600}],
                 "plan":plan.document,"model_selection":selection,"letter_source":letter
             });
             if scenario == ServiceCase::ReservationWrite {
@@ -1719,7 +1719,7 @@ fn staged_record(owner: &Path, runs: &Path, pid: u32, start: u64) -> Value {
     .expect("synthetic protected plan");
     plan.document["box_gate"] = crate::plan::box_gate(&plan.document).expect("recomputed gate");
     json!({"loop":"alpha", "run":"R", "phase":"started", "worker_uid":3000,
-        "helper_pid":pid, "helper_start":start, "active_round":"start", "rounds":[{"step":"start"}],
+        "helper_pid":pid, "helper_start":start, "active_round":"start", "rounds":[{"reply_designation":{"state":"unmeasured"},"step":"start"}],
         "plan":plan.document})
 }
 

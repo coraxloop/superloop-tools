@@ -97,6 +97,12 @@ impl DesignationCounts {
         } else {
             ""
         };
+        if lease == "absent" && record["launcher_pid"].is_null() {
+            self.blockers.push(json!({"kind":"preparing-without-lease-or-launcher","run":run,
+                "lease":lease,"next_command":null,
+                "clears_by":"Neither a lease nor a launcher identity is recorded, so retirement cannot prove this preparation absent and no command of this program converts it; any old-form row it holds keeps the census above zero. Retain the record and its recovery evidence for its owner's repair."}));
+            return;
+        }
         self.blockers.push(json!({"kind":"preparing-without-launch","run":run,
             "lease":lease,
             "next_command":format!("superloop-lane retire {loop_name} {run}{flag} --dry-run"),
@@ -122,11 +128,35 @@ impl DesignationCounts {
             self.live_invalid_member += invalid;
         }
         if absent > 0 {
+            let no_route = !retired
+                && self.blockers.iter().any(|row| {
+                    row["run"] == run && row["kind"] == "preparing-without-lease-or-launcher"
+                });
+            let first = if !retired && record["phase"] == "preparing" {
+                self.blockers
+                    .iter()
+                    .find(|row| row["run"] == run && row["kind"] == "preparing-without-launch")
+                    .and_then(|row| row["next_command"].as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_default()
+            } else {
+                format!("superloop-lane census rewrite-replies {loop_name} --dry-run")
+            };
             self.blockers.push(json!({"kind":"rounds-without-member","run":run,
                 "retired":retired,"count":absent,
-                "next_command":format!("superloop-lane census rewrite-replies {loop_name} --dry-run"),
-                "apply_command":format!("superloop-lane census rewrite-replies {loop_name} --expect-digest HEX"),
-                "then":"Replace HEX with preview_sha256 from the dry run."}));
+                "next_command":if first.is_empty() { Value::Null } else { json!(&first) },
+                "apply_command":if first.is_empty() { Value::Null } else {
+                    json!(format!("superloop-lane census rewrite-replies {loop_name} --expect-digest HEX"))
+                },
+                "then":if no_route {
+                    "Neither a lease nor a launcher identity is recorded; no command of this program converts this preparation. Retain its recovery evidence for its owner's repair."
+                } else if first.is_empty() {
+                    "Wait for the live launch to finish, or inspect the preparation blocker before repeating the census."
+                } else if !retired && record["phase"] == "started" {
+                    "After the recorded writers are absent, convert the row; then follow strict launch recovery for an interrupted settlement, or retire the run if no settlement was interrupted."
+                } else if !retired && record["phase"] == "preparing" {
+                    "Retire the run using the preview's confirmations, then preview the reply-row rewrite and replace HEX with its preview_sha256."
+                } else { "Replace HEX with preview_sha256 from the dry run." }}));
         }
         if invalid > 0 {
             self.blockers.push(json!({"kind":"rounds-with-invalid-member","run":run,
@@ -281,8 +311,8 @@ impl DesignationCounts {
                                 "node rewrite path escapes runs root",
                             ));
                         }
-                        let row =
-                            super::read_reservation_checked(recorded, false)?.ok_or_else(|| {
+                        let row = super::read_reservation_for_conversion_checked(recorded, false)?
+                            .ok_or_else(|| {
                                 LaneError::input(
                                     "census-record",
                                     format!("{} vanished", recorded.display()),
@@ -627,7 +657,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                     format!("{} has an invalid run name", path.display()),
                 ));
             }
-            let record = read_reservation(&path)
+            let record = read_reservation_for_conversion(&path)
                 .map_err(|error| LaneError::input("census-record", error.line()))?
                 .ok_or_else(|| {
                     LaneError::input("census-record", format!("{} vanished", path.display()))
@@ -647,8 +677,8 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                     owner_home, root, loop_name, &path, &record,
                 )?);
             }
-            designation_counts.row(&record, false, loop_name);
             designation_counts.preparing(root, &record, loop_name, owner);
+            designation_counts.row(&record, false, loop_name);
             let due = credential_refresh(&runs, run, owner)?;
             reservations.push(row(
                 loop_name,
@@ -660,7 +690,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                 &due,
             )?);
         } else if retired_name(&name) {
-            let record = read_reservation(&path)
+            let record = read_reservation_for_conversion(&path)
                 .map_err(|error| LaneError::input("census-record", error.line()))?
                 .ok_or_else(|| {
                     LaneError::input("census-record", format!("{} vanished", path.display()))
@@ -1088,7 +1118,7 @@ mod tests {
             })
         );
         let live_path = reservation_path(&root, "R");
-        let mut stranded = read_reservation(&live_path)
+        let mut stranded = read_reservation_for_conversion(&live_path)
             .expect("reservation read")
             .expect("reservation");
         stranded["phase"] = json!("preparing");
@@ -1101,13 +1131,12 @@ mod tests {
                 .as_array()
                 .expect("blockers")
                 .iter()
-                .any(|row| row["kind"] == "preparing-without-launch"
+                .any(|row| row["kind"] == "preparing-without-lease-or-launcher"
                     && row["run"] == "R"
-                    && row["next_command"]
-                        == "superloop-lane retire alpha R --confirm-missing-lease --dry-run"
-                    && row["clears_by"].as_str().is_some_and(|text| text.contains(
-                        "superloop-lane census rewrite-replies alpha --expect-digest HEX"
-                    )))
+                    && row["next_command"].is_null()
+                    && row["clears_by"].as_str().is_some_and(
+                        |text| text.contains("no command of this program converts it")
+                    ))
         );
         let lease = root.join(".prepare-R.lock");
         fs::write(&lease, b"").expect("unheld lease");
@@ -1132,6 +1161,13 @@ mod tests {
                 .expect("blockers")
                 .iter()
                 .any(|row| row["run"] == "R" && row["kind"] == "preparing-without-launch")
+        );
+        assert!(
+            !busy["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["run"] == "R" && row["kind"] == "preparing-lease-unmeasured")
         );
         drop(held);
         fs::set_permissions(&lease, fs::Permissions::from_mode(0o644))

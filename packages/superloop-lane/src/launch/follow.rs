@@ -840,7 +840,7 @@ mod tests {
             letter: PathBuf::new(),
             document: json!({}),
         };
-        let record = json!({"rounds":[{"step":"dispatch","phase":"running","driver_dir":"/runs/R/first-dispatch"}]});
+        let record = json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running","driver_dir":"/runs/R/first-dispatch"}]});
         let state = Rc::new(RefCell::new((Vec::new(), false)));
         let mut writer = ProbeWriter(Rc::clone(&state));
         let mut calls = 0;
@@ -872,7 +872,7 @@ mod tests {
     /// ´test:unit:follow-renders-wrong-thread-failure-without-reply-of-record´
     #[test]
     fn follow_renders_wrong_thread_failure_without_reply_of_record() {
-        let record = json!({"rounds":[{"step":"review","phase":"failed","reply":{"bytes":4,"sha256":"digest"},"settlement_error":"round-thread: step thread thread-2 differs from reservation thread-1"}],"mail":[]});
+        let record = json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"failed","reply":{"bytes":4,"sha256":"digest"},"settlement_error":"round-thread: step thread thread-2 differs from reservation thread-1"}],"mail":[]});
         let bounds = BTreeMap::from([("review".to_owned(), (0, 3))]);
         let output = render(&record, &[], b"{}\n", &bounds, None).expect("failed round");
         let lines = output
@@ -922,7 +922,7 @@ mod tests {
         };
         let loop_uid = Uid::effective().as_raw();
         let worker_uid = if loop_uid == 3000 { 3001 } else { 3000 };
-        let reservation = json!({"schema":1,"phase":"preparing","worker_uid":worker_uid,"loop":"alpha","run":"R","plan":{"home":plan.home,"driver_dir":run_root,"paths":[{"path":plan.home,"uid":loop_uid,"gid":loop_uid},{"path":run_root,"kind":"directory","uid":loop_uid,"gid":loop_uid}]},"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}],"mail":[{"step":"dispatch","name":"dispatch.md","placed_at_unix_ns":1}]});
+        let reservation = json!({"schema":1,"phase":"preparing","worker_uid":worker_uid,"loop":"alpha","run":"R","plan":{"home":plan.home,"driver_dir":run_root,"paths":[{"path":plan.home,"uid":loop_uid,"gid":loop_uid},{"path":run_root,"kind":"directory","uid":loop_uid,"gid":loop_uid}]},"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running","driver_dir":step_dir}],"mail":[{"step":"dispatch","name":"dispatch.md","placed_at_unix_ns":1}]});
         let reservation_path = super::super::reservation_path(&reservation_root, "R");
         super::super::publish_reservation(&reservation_path, &reservation).expect("reservation");
         let bound_runs: OwnedFd = File::open(&reservation_root)
@@ -1137,8 +1137,8 @@ mod tests {
             document: json!({}),
         };
         let record = json!({"rounds":[
-            {"step":"dispatch","phase":"settled","driver_dir":"/runs/R/first-dispatch"},
-            {"step":"review","phase":"running","driver_dir":"/runs/R/first-dispatch"}
+            {"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","driver_dir":"/runs/R/first-dispatch"},
+            {"reply_designation":{"state":"unmeasured"},"step":"review","phase":"running","driver_dir":"/runs/R/first-dispatch"}
         ]});
         let mut output = Vec::new();
         run_from_record(
@@ -1239,7 +1239,7 @@ mod tests {
             letter: PathBuf::new(),
             document: json!({}),
         };
-        let record = json!({"rounds":[{"step":"dispatch","phase":"running"}]});
+        let record = json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running"}]});
         let error = run_from_record(&plan, &record, None, &mut Vec::new(), false, |_, _| {
             Ok(String::new())
         })
@@ -1311,7 +1311,7 @@ mod tests {
             document: json!({}),
         };
         let loop_uid = Uid::effective().as_raw();
-        let record = json!({"loop":"alpha","run":"R","plan":{"home":plan.home,"driver_dir":root,"paths":[{"path":plan.home,"uid":loop_uid,"gid":loop_uid},{"path":root,"kind":"directory","uid":loop_uid,"gid":loop_uid}]},"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}],"mail":[]});
+        let record = json!({"loop":"alpha","run":"R","plan":{"home":plan.home,"driver_dir":root,"paths":[{"path":plan.home,"uid":loop_uid,"gid":loop_uid},{"path":root,"kind":"directory","uid":loop_uid,"gid":loop_uid}]},"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running","driver_dir":step_dir}],"mail":[]});
         let home_anchor = File::open(fixture.path()).expect("home anchor");
         let runs_anchor = File::open(&runs).expect("runs anchor");
         let _private = home::activate_private_launch(

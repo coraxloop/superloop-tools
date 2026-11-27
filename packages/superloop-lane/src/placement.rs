@@ -17,7 +17,7 @@ mod reader;
 mod tests;
 
 pub use reader::plan_bytes;
-pub(crate) use reader::{journal_bytes, reservation_bytes};
+pub(crate) use reader::{conversion_reservation_bytes, journal_bytes, reservation_bytes};
 
 fn refusal(detail: impl Into<String>) -> LaneError {
     LaneError::input("door-workspace-context-differs", detail)

@@ -2791,7 +2791,7 @@ mod tests {
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700))
             .expect("runs root mode");
         let path = super::reservation_path(root.path(), "R");
-        let original = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"rounds":[{"step":"review","phase":"settled","reply":{"sha256":"old-digest"}}]});
+        let original = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"settled","reply":{"sha256":"old-digest"}}]});
         super::publish_reservation(&path, &original).expect("original reservation");
         let held: OwnedFd = fs::File::open(root.path()).expect("held runs root").into();
         let owner = nix::unistd::Uid::effective().as_raw();
@@ -3130,7 +3130,7 @@ mod tests {
             fs::set_permissions(directory, fs::Permissions::from_mode(0o700)).expect("config mode");
         }
         fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).expect("runs mode");
-        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"door_scope":"review","model_selection":{"model":"gpt-6-sol","effort":"high"},"rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop","reply":{"sha256":"first"}}],"mail":[{"step":"review","name":"review-1.md","stop":true,"state":"placed","placed_at_unix_ns":1}]});
+        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"door_scope":"review","model_selection":{"model":"gpt-6-sol","effort":"high"},"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"settled","ended_by":"by-report-after-stop","reply":{"sha256":"first"}}],"mail":[{"step":"review","name":"review-1.md","stop":true,"state":"placed","placed_at_unix_ns":1}]});
         super::publish_reservation(&super::reservation_path(&root, "R"), &old).expect("old run");
         let handover = json!({"context":{"state":"unknown","reason":"window-unreported"},"replies":[{"step":"review","outbox":"review.md","sha256":"first","bytes":12,"inbox":["review.md","review-1.md"],"inbox_letters":[{"step":"review","name":"review.md","sha256":"round","bytes":13,"body":"Round letter.","body_truncated":false},{"step":"review","name":"review-1.md","sha256":"later","bytes":14,"body":"In-round note.","body_truncated":false}],"body":"First reply.","body_truncated":false}]});
         (home, root, old, handover)
@@ -3903,7 +3903,7 @@ mod tests {
         let (home, root, mut old, mut handover) = rotation_entry_fixture();
         let preview = entry_preview(home.path(), &root, old.clone(), handover.clone());
         let digest = preview["handover_sha256"].as_str().expect("digest");
-        old["rounds"].as_array_mut().expect("rounds").push(json!({"step":"later","phase":"settled","ended_by":"by-report-after-stop","reply":{"sha256":"second"}}));
+        old["rounds"].as_array_mut().expect("rounds").push(json!({"reply_designation":{"state":"unmeasured"},"step":"later","phase":"settled","ended_by":"by-report-after-stop","reply":{"sha256":"second"}}));
         old["mail"].as_array_mut().expect("letters").push(json!({"step":"later","name":"later-1.md","stop":true,"state":"placed","placed_at_unix_ns":2}));
         handover["replies"].as_array_mut().expect("replies").push(json!({"step":"later","outbox":"later.md","sha256":"second","bytes":13,"inbox":["later.md","later-1.md"],"inbox_letters":[{"step":"later","name":"later.md","sha256":"round","bytes":3,"body":"abc","body_truncated":false},{"step":"later","name":"later-1.md","sha256":"extra","bytes":3,"body":"abc","body_truncated":false}],"body":"Second reply.","body_truncated":false}));
         super::publish_reservation(&super::reservation_path(&root, "R"), &old)
@@ -4397,7 +4397,7 @@ mod tests {
         old["rounds"]
             .as_array_mut()
             .expect("rounds")
-            .push(json!({"step":"later","phase":"settled","reply":{"sha256":"later-digest"}}));
+            .push(json!({"reply_designation":{"state":"unmeasured"},"step":"later","phase":"settled","reply":{"sha256":"later-digest"}}));
         super::publish_reservation(&path, &old).expect("later round");
         let error = link_intent(
             root.path(),
@@ -4456,7 +4456,7 @@ mod tests {
     fn rotation_publishes_intent_before_new_reservation() {
         let root = tempfile::TempDir::new_in("/tmp").expect("fixture root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
-        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"rounds":[{"step":"review","phase":"settled","reply":{"sha256":"old-digest"}}]});
+        let old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"settled","reply":{"sha256":"old-digest"}}]});
         super::publish_reservation(&super::reservation_path(root.path(), "R"), &old).expect("old");
         let intent = publish_intent(
             root.path(),
@@ -4538,7 +4538,7 @@ mod tests {
     /// ´test:unit:rotation-selects-stop-of-final-settled-step´
     #[test]
     fn rotation_selects_stop_of_final_settled_step() {
-        let record = json!({"rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop"}],"mail":[
+        let record = json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"settled","ended_by":"by-report-after-stop"}],"mail":[
             {"step":"review","name":"review-1.md","stop":true,"state":"placed","placed_at_unix_ns":1},
             {"step":"later","name":"later.md","stop":true,"state":"placed","placed_at_unix_ns":2}]});
         assert_eq!(
@@ -4557,7 +4557,7 @@ mod tests {
     /// ´test:unit:rotation-requires-settlement-and-measured-threshold-or-force´
     #[test]
     fn rotation_requires_settlement_and_measured_threshold_or_force() {
-        let record = json!({"phase":"settled","rounds":[{"step":"review","phase":"settled","ended_by":"by-report-after-stop"}],"mail":[{"step":"review","stop":true,"state":"placed"}]});
+        let record = json!({"phase":"settled","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"settled","ended_by":"by-report-after-stop"}],"mail":[{"step":"review","stop":true,"state":"placed"}]});
         assert_eq!(
             check_rotation(&record, &json!({"state":"unknown"}), Some(0.8), None)
                 .expect_err("unknown")
@@ -4589,7 +4589,7 @@ mod tests {
             None,
         )
         .expect("crossed limit");
-        let live = json!({"phase":"started","rounds":[{"phase":"running"}]});
+        let live = json!({"phase":"started","rounds":[{"reply_designation":{"state":"unmeasured"},"phase":"running"}]});
         assert_eq!(
             check_rotation(&live, &json!({"state":"unknown"}), None, Some("force"))
                 .expect_err("live refuses force")
@@ -4790,7 +4790,7 @@ mod tests {
         let root = tempfile::TempDir::new_in("/tmp").expect("fixture root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
         let path = super::reservation_path(root.path(), "R");
-        let mut old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"model_selection":{"model":"gpt-6-sol","effort":"high"},"rounds":[{"step":"dispatch","phase":"settled","reply":{"sha256":"first"}}]});
+        let mut old = json!({"schema":1,"phase":"settled","loop":"alpha","run":"R","worker_uid":3000,"model_selection":{"model":"gpt-6-sol","effort":"high"},"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","reply":{"sha256":"first"}}]});
         super::publish_reservation(&path, &old).expect("first settled round");
         let first = json!({"replies":[{"step":"dispatch","outbox":"dispatch.md","sha256":"first","bytes":12,"inbox":["dispatch.md"],"inbox_letters":[],"body":"First reply.","body_truncated":false}],"next_task":{"state":"absent","sha256":null,"bytes":null,"body":null,"body_truncated":false}});
         let (_, preview_digest) = render_handover(&old, &first, "R", root.path()).expect("dry run");
@@ -4800,7 +4800,7 @@ mod tests {
             old["rounds"]
                 .as_array_mut()
                 .expect("rounds")
-                .push(json!({"step":"review","phase":"settled","reply":{"sha256":"second"}}));
+                .push(json!({"reply_designation":{"state":"unmeasured"},"step":"review","phase":"settled","reply":{"sha256":"second"}}));
             super::publish_reservation(&path, &old).expect("second settled round");
         }
         let mailbox = super::lock_mailbox(root.path(), "R", owner).expect("changing lock");

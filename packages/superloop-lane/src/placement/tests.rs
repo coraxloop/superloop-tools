@@ -30,6 +30,27 @@ fn member(value: &Value) -> Placement {
     Placement::decode(value["compute_placement"].clone(), &grant).unwrap()
 }
 
+/// ´test:unit:conversion-reader-keeps-placement-checks´
+#[test]
+fn conversion_reader_keeps_placement_checks() {
+    let mut old = record();
+    old["rounds"] = json!([{"step":"dispatch"}]);
+    let decode = |value: &Value| {
+        super::reader::conversion_reservation_bytes(
+            &serde_json::to_vec(value).expect("JSON"),
+            |error| LaneError::input("fixture-json", error.to_string()),
+        )
+    };
+    assert_eq!(decode(&old).expect("old row with valid placement"), old);
+    old["plan"]["compute_placement"]["grant_digest"] = json!("f".repeat(64));
+    assert_eq!(
+        decode(&old)
+            .expect_err("changed placement must refuse")
+            .kind,
+        "door-workspace-context-differs"
+    );
+}
+
 /// ´test:unit:placement-record-fields-bind-the-grant´
 #[test]
 fn placement_record_fields_bind_the_grant() {

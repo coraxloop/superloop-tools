@@ -943,7 +943,8 @@ os.chmod(a,0o600);os.chown(a,3000,3000)
 /// Panics if production follow or context receipt reopens configuration or loses bounded evidence.
 fn follow_round(home: &Path, runs: &Path, record: &mut Value) {
     record["rounds"] = json!([{"step":"dispatch","phase":"failed",
-        "settlement_error":"fixture-only","driver_dir":runs.join("R/dispatch")}]);
+        "settlement_error":"fixture-only","driver_dir":runs.join("R/dispatch"),
+        "reply_designation":{"state":"unmeasured"}}]);
     crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
         .expect("follow reservation");
     let step = runs.join("R/dispatch");
@@ -1021,7 +1022,8 @@ fn seed_inspection(home: &Path, runs: &Path, record: &mut Value) {
     let step = runs.join("R/fixture-dispatch");
     record["thread_id"] = json!("fixture-thread");
     record["phase"] = json!("preparing");
-    record["rounds"] = json!([{"step":"dispatch","phase":"settled","driver_dir":step}]);
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled","driver_dir":step,
+        "reply_designation":{"state":"unmeasured"}}]);
     crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
         .expect("inspection reservation");
     let script = r#"
@@ -1049,10 +1051,10 @@ for name,data in [('events.jsonl','{"type":"thread.started","thread_id":"fixture
 fn inspect_record(home: &Path, runs: &Path, record: &mut Value) {
     seed_inspection(home, runs, record);
     record["active_round"] = json!("work");
-    record["rounds"]
-        .as_array_mut()
-        .expect("rounds")
-        .push(json!({"step":"work","phase":"preparing","budget_seconds":60}));
+    record["rounds"].as_array_mut().expect("rounds").push(
+        json!({"step":"work","phase":"preparing","budget_seconds":60,
+            "reply_designation":{"state":"unmeasured"}}),
+    );
     record["mail"] = json!([{"step":"work","delivery":"fixture-delivery"}]);
     crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
         .expect("recording reservation");
@@ -1125,7 +1127,8 @@ fn rotation_cases(home: &Path, runs: &Path, record: &mut Value) {
     record["phase"] = json!("settled");
     record["rounds"] = json!([{"step":"dispatch","phase":"settled",
         "driver_dir":runs.join("R/fixture-dispatch"),
-        "reply":{"bytes":reply.len(),"sha256":reply_hash}}]);
+        "reply":{"bytes":reply.len(),"sha256":reply_hash},
+        "reply_designation":{"state":"unmeasured"}}]);
     record["initial_brief"] = json!({"bytes":brief.len(),"sha256":brief_hash});
     let path = runs.join(".reservation-R.json");
     crate::launch::publish_reservation(&path, record).expect("handover record");

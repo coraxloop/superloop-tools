@@ -1947,8 +1947,8 @@ mod tests {
         record["helper_end"] = json!({"state":"failed","status":"exit status: 2","parent_pid":record["launcher_pid"],"parent_start":record["launcher_start"]});
         record["readback_end"] = Value::Null;
         record["rounds"] = json!([
-            {"step":"dispatch","phase":"failed","ended_by":"by-report","reply":null,"settle_attempts":[{"phase":"complete","preview_sha256":"a".repeat(64),"detail":null}]},
-            {"step":"work-1","phase":"running","driver_dir":directory,"fresh_thread":true,"ended_by":null,"letter":"work-1.md","placed_at_unix_ns":1,"budget_seconds":10800,"in_round_letters":[]}
+            {"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"failed","ended_by":"by-report","reply":null,"settle_attempts":[{"phase":"complete","preview_sha256":"a".repeat(64),"detail":null}]},
+            {"reply_designation":{"state":"unmeasured"},"step":"work-1","phase":"running","driver_dir":directory,"fresh_thread":true,"ended_by":null,"letter":"work-1.md","placed_at_unix_ns":1,"budget_seconds":10800,"in_round_letters":[]}
         ]);
         record["mail_birth"] =
             json!({"name":"fixture","uid":owner,"reservation":"superloop-lane:R"});
@@ -3433,7 +3433,7 @@ else:
             .as_array_mut()
             .expect("rounds")
             .push(json!({
-                "step":"work-2","phase":"settled","reply":{"bytes":6},"settle_attempts":[]
+                "reply_designation":{"state":"unmeasured"},"step":"work-2","phase":"settled","reply":{"bytes":6},"settle_attempts":[]
             }));
         super::super::publish_reservation(&path, &continued).expect("settled continuation");
         let refusal = super::super::rotation::run_with_host_root(h, &rotate, h, owner)
@@ -3948,7 +3948,7 @@ printf '{{"thread_id":null}}\n'
     }
 
     fn failed_record(worker_uid: u32) -> Value {
-        json!({"schema":1,"phase":"failed","active_round":"work","worker_uid":worker_uid,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID,"driver_entry_start":1,"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},"settlement_uncertain":false,"reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},"readback_end":"settle-evidence: old refusal","rounds":[{"step":"work","phase":"failed"}]})
+        json!({"schema":1,"phase":"failed","active_round":"work","worker_uid":worker_uid,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID,"driver_entry_start":1,"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},"settlement_uncertain":false,"reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},"readback_end":"settle-evidence: old refusal","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"work","phase":"failed"}]})
     }
 
     fn fail_completed_round(plan: &crate::plan::Plan, record: &mut Value) {
@@ -4580,7 +4580,7 @@ esac
             let _unwritten = fields.remove(field);
         }
         record["phase"] = json!("started");
-        record["rounds"] = json!([{"step":"work","budget_seconds":900,"letter":"work.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[]}]);
+        record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"work","budget_seconds":900,"letter":"work.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[]}]);
         super::super::publish_reservation(&path, record).expect("running round");
         let driver_end = json!({"state":"completed","successful":false,"detail":"exit 1"});
         let helper_end = json!({"state":"completed","successful":true});
@@ -5044,7 +5044,7 @@ esac
         let mut record = super::super::read_reservation(&path)
             .expect("read reservation")
             .expect("reservation");
-        let prior = json!({"step":"dispatch","phase":"settled","driver_dir":record["rounds"][0]["driver_dir"]});
+        let prior = json!({"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","driver_dir":record["rounds"][0]["driver_dir"]});
         record["rounds"]
             .as_array_mut()
             .expect("rounds")

@@ -267,6 +267,23 @@ pub(super) fn read_record_bound(
     run: &str,
     owner: u32,
 ) -> Result<(Value, String), LaneError> {
+    read_record_bound_with(root, run, owner, false)
+}
+
+pub(super) fn read_record_bound_for_conversion(
+    root: &OwnedFd,
+    run: &str,
+    owner: u32,
+) -> Result<(Value, String), LaneError> {
+    read_record_bound_with(root, run, owner, true)
+}
+
+fn read_record_bound_with(
+    root: &OwnedFd,
+    run: &str,
+    owner: u32,
+    conversion: bool,
+) -> Result<(Value, String), LaneError> {
     let name = format!(".reservation-{run}.json");
     let fd = openat2(
         root,
@@ -295,9 +312,12 @@ pub(super) fn read_record_bound(
         .take(MAX_RESERVATION_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| LaneError::input("checkout-record", error.to_string()))?;
-    let record = crate::placement::reservation_bytes(&bytes, |error| {
-        LaneError::input("checkout-record", error.to_string())
-    })?;
+    let syntax = |error: serde_json::Error| LaneError::input("checkout-record", error.to_string());
+    let record = if conversion {
+        crate::placement::conversion_reservation_bytes(&bytes, syntax)?
+    } else {
+        crate::placement::reservation_bytes(&bytes, syntax)?
+    };
     if record["schema"] != 1 || record["worker_uid"].as_u64().is_none() {
         return Err(LaneError::input(
             "checkout-record",

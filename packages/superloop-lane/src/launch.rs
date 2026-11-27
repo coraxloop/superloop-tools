@@ -1318,13 +1318,40 @@ pub(crate) fn read_reservation(path: &Path) -> Result<Option<Value>, LaneError> 
     read_reservation_checked(path, true)
 }
 
+pub(crate) fn read_reservation_for_conversion(path: &Path) -> Result<Option<Value>, LaneError> {
+    read_reservation_for_conversion_checked(path, true)
+}
+
+fn read_reservation_for_conversion_checked(
+    path: &Path,
+    check_node: bool,
+) -> Result<Option<Value>, LaneError> {
+    read_reservation_checked_with(path, check_node, false)
+}
+
 fn read_reservation_checked(path: &Path, check_node: bool) -> Result<Option<Value>, LaneError> {
-    Ok(read_reservation_raw(path, check_node)?.map(|(record, _)| record))
+    read_reservation_checked_with(path, check_node, true)
+}
+
+fn read_reservation_checked_with(
+    path: &Path,
+    check_node: bool,
+    strict_reply: bool,
+) -> Result<Option<Value>, LaneError> {
+    Ok(read_reservation_raw_with(path, check_node, strict_reply)?.map(|(record, _)| record))
 }
 
 fn read_reservation_raw(
     path: &Path,
     check_node: bool,
+) -> Result<Option<(Value, Vec<u8>)>, LaneError> {
+    read_reservation_raw_with(path, check_node, true)
+}
+
+fn read_reservation_raw_with(
+    path: &Path,
+    check_node: bool,
+    strict_reply: bool,
 ) -> Result<Option<(Value, Vec<u8>)>, LaneError> {
     let opened = if home::private_is_active() {
         let parent = path
@@ -1349,7 +1376,7 @@ fn read_reservation_raw(
             .custom_flags(libc::O_NOFOLLOW)
             .open(path)
     };
-    read_reservation_file_raw(opened, path, check_node)
+    read_reservation_file_raw(opened, path, check_node, strict_reply)
 }
 
 pub(crate) fn read_reservation_file(
@@ -1357,13 +1384,14 @@ pub(crate) fn read_reservation_file(
     path: &Path,
     check_node: bool,
 ) -> Result<Option<Value>, LaneError> {
-    Ok(read_reservation_file_raw(opened, path, check_node)?.map(|(record, _)| record))
+    Ok(read_reservation_file_raw(opened, path, check_node, true)?.map(|(record, _)| record))
 }
 
 fn read_reservation_file_raw(
     opened: std::io::Result<File>,
     path: &Path,
     check_node: bool,
+    strict_reply: bool,
 ) -> Result<Option<(Value, Vec<u8>)>, LaneError> {
     let file = match opened {
         Ok(file) => file,
@@ -1392,9 +1420,12 @@ fn read_reservation_file_raw(
     file.take(MAX_RESERVATION_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| LaneError::input("uid-table", format!("{}: {error}", path.display())))?;
-    let record = crate::placement::reservation_bytes(&bytes, |error| {
-        LaneError::input("uid-table", format!("{}: {error}", path.display()))
-    })?;
+    let syntax = |error| LaneError::input("uid-table", format!("{}: {error}", path.display()));
+    let record = if strict_reply {
+        crate::placement::reservation_bytes(&bytes, syntax)?
+    } else {
+        crate::placement::conversion_reservation_bytes(&bytes, syntax)?
+    };
     if record["schema"] != 1
         || ![
             "preparing",
@@ -8153,7 +8184,7 @@ mod tests {
     /// ´test:unit:container-attempt-evidence-is-bound-to-launcher-generation´
     #[test]
     fn container_attempt_evidence_is_bound_to_launcher_generation() {
-        let mut record = serde_json::json!({"launcher_pid":42,"launcher_start":100,"rounds":[{}]});
+        let mut record = serde_json::json!({"launcher_pid":42,"launcher_start":100,"rounds":[{"reply_designation":{"state":"unmeasured"},}]});
         let marker = serde_json::json!({"launcher_pid":42,"launcher_start":100});
         assert!(super::attempt_belongs_to_round(&marker, &record));
         record["launcher_start"] = serde_json::json!(101);
@@ -8232,7 +8263,7 @@ mod tests {
         fs::write(directory.join(".event-start"), b"0\n").expect("event boundary");
         record["active_round"] = json!("dispatch");
         record["mail"] = json!([]);
-        record["rounds"] = json!([{"step":"dispatch","phase":"running","budget_seconds":1,"driver_dir":directory}]);
+        record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running","budget_seconds":1,"driver_dir":directory}]);
         let path = super::reservation_path(fixture.path(), "R");
         super::publish_reservation(&path, &record).expect("reservation");
         let mut end = crate::build::ChildEnd::default();
@@ -8998,7 +9029,7 @@ mod tests {
         let root = tempfile::tempdir().expect("runs root");
         fs::set_permissions(root.path(), fs::Permissions::from_mode(0o700)).expect("root mode");
         let reservation = super::reservation_path(root.path(), "R");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":{},"launcher_pid":321,"launcher_start":88,"observer_state":"not-started","helper_spawn_state":"running","helper_parent_pid":322,"helper_parent_start":89,"rounds":[{"step":"work","phase":"running"}]});
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":{},"launcher_pid":321,"launcher_start":88,"observer_state":"not-started","helper_spawn_state":"running","helper_parent_pid":322,"helper_parent_start":89,"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"work","phase":"running"}]});
         super::publish_reservation(&reservation, &record).expect("preparation");
         let refusal = crate::error::LaneError::operation("helper-start", "helper pin differed");
         super::record_failed_pre_driver(&reservation, &mut None, &refusal, 41001, false)
@@ -9203,7 +9234,7 @@ mod tests {
                 plan.document["worker_uid"] = json!(worker);
                 record["worker_uid"] = json!(worker);
                 record["plan"] = plan.document.clone();
-                record["rounds"] = json!([{"step":"dispatch","phase":"running"}]);
+                record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running"}]);
                 record["run_scope"] = json!({"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"proxy.service","proxy_invocation":"fixture"});
                 let path = super::reservation_path(fixture.path(), "R");
                 super::publish_reservation(&path, &record).expect("record");
@@ -9339,8 +9370,7 @@ mod tests {
     #[test]
     fn launch_settlement_document_carries_each_recorded_round_end() {
         for reason in ["by-report", "by-report-after-stop", "by-budget"] {
-            let record =
-                json!({"rounds":[{"step":"dispatch","phase":"settled","ended_by":reason}]});
+            let record = json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","ended_by":reason}]});
             let ended_by = super::rounds::settled_round_end(&record).expect("recorded end");
             let private =
                 json!({"schema":1,"command":"settle-evidence","readback":{},"ended_by":ended_by});
@@ -9361,7 +9391,7 @@ mod tests {
     #[test]
     fn launch_report_finish_seam_persists_before_returning_value() {
         let (fixture, plan, _letter, mut record) = settlement_fixture(false);
-        record["rounds"] = json!([{"step":"dispatch","phase":"settled","driver_dir":plan.driver_dir.join("20261007T043545Z-dispatch")}]);
+        record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","driver_dir":plan.driver_dir.join("20261007T043545Z-dispatch")}]);
         let held: OwnedFd = fs::File::open(fixture.path())
             .expect("held runs root")
             .into();
@@ -9380,8 +9410,8 @@ mod tests {
         let (fixture, plan, letter, mut record) = settlement_fixture(false);
         let round_dir = plan.driver_dir.join("20261007T043545Z-dispatch");
         record["rounds"] = json!([
-            {"step":"dispatch","phase":"settled","driver_dir":round_dir},
-            {"step":"review","phase":"settled","driver_dir":round_dir,"ended_by":"by-report"}
+            {"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","driver_dir":round_dir},
+            {"reply_designation":{"state":"unmeasured"},"step":"review","phase":"settled","driver_dir":round_dir,"ended_by":"by-report"}
         ]);
         record["active_round"] = json!("review");
         record["driver_end"] = json!({"state":"completed"});
@@ -9434,8 +9464,10 @@ mod tests {
             first_bytes
         );
         assert_eq!(
-            super::interrupted_report_step(&json!({"rounds":[{"step":"dispatch"}]}))
-                .expect("first round"),
+            super::interrupted_report_step(
+                &json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch"}]})
+            )
+            .expect("first round"),
             None
         );
     }
@@ -9448,8 +9480,7 @@ mod tests {
             record["active_round"] = json!("dispatch");
             record["mail"] = json!([]);
             let directory = plan.driver_dir.join("20261007T043545Z-dispatch");
-            record["rounds"] =
-                json!([{"step":"dispatch","phase":"running","driver_dir":directory}]);
+            record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running","driver_dir":directory}]);
             record["driver_end"] = json!({"state":"completed"});
             record["helper_end"] = json!({"state":"completed"});
             record["observer_end"] =

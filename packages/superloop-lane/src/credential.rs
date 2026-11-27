@@ -4589,7 +4589,7 @@ mod tests {
         let first_inode = fs::metadata(&source_path)
             .expect("synthetic metadata")
             .ino();
-        let mut record = json!({"worker_uid":Uid::effective().as_raw(),"plan":{"backend":"codex","home":run_home},"active_round":"dispatch","rounds":[{"step":"dispatch"}]});
+        let mut record = json!({"worker_uid":Uid::effective().as_raw(),"plan":{"backend":"codex","home":run_home},"active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch"}]});
         let before = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .expect("clock")

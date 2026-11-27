@@ -1,5 +1,6 @@
 //! Digest-bound conversion of retained round rows, without changing ordinary readers.
 
+use super::super::read_reservation_for_conversion as read_reservation;
 use super::*;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::time::Instant;
@@ -162,9 +163,10 @@ fn eligible_with_presence(
                 command(loop_name, None)
             )));
         }
-        if !["settled", "failed"].contains(&record["phase"].as_str().unwrap_or_default()) {
+        if !["settled", "failed", "started"].contains(&record["phase"].as_str().unwrap_or_default())
+        {
             return Err(refusal(format!(
-                "run {run}: round is live or uncertain; settle it, then repeat {}",
+                "run {run}: round is live or uncertain; follow the census's preparation or retirement command, then repeat {}",
                 command(loop_name, None)
             )));
         }
@@ -181,7 +183,7 @@ fn eligible_with_presence(
                 .to_owned();
             if presence == "present" || presence == "unknown" {
                 return Err(refusal(format!(
-                    "run {run}: {presence} round writer; wait for its exit and settle, then repeat {}",
+                    "run {run}: {presence} round writer; wait for its exit or follow the census's recovery command, then repeat {}",
                     command(loop_name, None)
                 )));
             }
@@ -821,10 +823,13 @@ mod tests {
             .expect("round")
             .remove("reply_designation");
         changed["phase"] = json!("started");
-        publish_reservation(&live, &changed).expect("live round");
+        publish_reservation(&live, &changed).expect("dead started round");
+        assert!(run(home, &["alpha".into(), "--dry-run".into()]).is_ok());
+        changed["phase"] = json!("preparing");
+        publish_reservation(&live, &changed).expect("uncertain round");
         assert!(
             run(home, &["alpha".into(), "--dry-run".into()])
-                .expect_err("live round")
+                .expect_err("uncertain round")
                 .line()
                 .contains("live or uncertain")
         );

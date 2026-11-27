@@ -269,7 +269,8 @@ pub(super) fn run(
     let store = crate::requests::store::Store::open(owner_home, &request.loop_name, false)?;
     let requests_guard = store.retirement_guard(run, &*runs_guard, request.dry_run)?;
     let path = reservation_path(root, run);
-    let saved = read_reservation(&path)?.ok_or_else(|| refusal("reservation absent"))?;
+    let saved =
+        read_reservation_for_conversion(&path)?.ok_or_else(|| refusal("reservation absent"))?;
     if super::proof::needed(&saved) {
         return Err(LaneError::input(
             "retire-confirmation-missing-identity",
