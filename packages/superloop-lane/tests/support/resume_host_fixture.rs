@@ -525,6 +525,9 @@ with open(os.devnull,'r+b') as null:
   file.write_text(json.dumps(record));os.chmod(file,0o600)
   print('DISPATCH-OBSERVER-STOPPED '+str(child.pid))
  finally:
-  if child.poll() is None: os.killpg(child.pid,9);child.wait()
+  if child.poll() is None:
+   try: os.killpg(child.pid,9)
+   except ProcessLookupError: pass
+   child.wait()
 os.close(runs);os.close(sockets)
 ";
