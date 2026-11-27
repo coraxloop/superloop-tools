@@ -196,9 +196,12 @@ mod workspace_stub_tests {
                     observed
                         .recv_timeout(Duration::from_secs(5))
                         .expect("door closed before request write");
+                    stream
+                        .shutdown(Shutdown::Write)
+                        .expect("force a request write failure while retaining the queued final");
                     assert_eq!(
                         std::io::Write::write(stream, b"x")
-                            .expect_err("closed door must refuse a write")
+                            .expect_err("locally closed write half must refuse a write")
                             .kind(),
                         io::ErrorKind::BrokenPipe
                     );
@@ -227,6 +230,59 @@ mod workspace_stub_tests {
             }
             clear_context();
         }
+    }
+
+    /// ´test:unit:workspace-stub-reads-capacity-final-with-another-peer-holder´
+    #[test]
+    fn workspace_stub_reads_capacity_final_with_another_peer_holder() {
+        let args = [
+            OsString::from("fixture-node"),
+            OsString::from("/usr/bin/true"),
+        ];
+        let temp = tempfile::tempdir().expect("fixture");
+        context(&temp.path().join("context.json"));
+        let (path, listener) = socket(&temp);
+        let (closed, observed) = std::sync::mpsc::sync_channel(0);
+        let (release, released) = std::sync::mpsc::sync_channel(0);
+        let server = thread::spawn(move || {
+            let (mut peer, _) = listener.accept().expect("stub connection");
+            let held = peer.try_clone().expect("second peer holder");
+            let active =
+                std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(super::super::MAX_PEERS));
+            assert!(super::super::admit_peer(&active, &mut peer).is_none());
+            drop(peer);
+            closed.send(()).expect("first peer holder closed");
+            released
+                .recv()
+                .expect("stub call ended while second holder was live");
+            drop(held);
+        });
+        STUB_BEFORE_REQUEST_WRITE.with(|slot| {
+            *slot.borrow_mut() = Some(Box::new(move |stream| {
+                observed
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("first peer holder closed");
+                assert_eq!(
+                    std::io::Write::write(stream, b"x").expect("held peer accepts write"),
+                    1
+                );
+            }));
+        });
+        let (sent, request_sent) = std::sync::mpsc::sync_channel(1);
+        STUB_REQUEST_SENT.with(|slot| *slot.borrow_mut() = Some(sent));
+        let reply = stub_call(&path, &args, &[]).expect("capacity final with held peer");
+        release.send(()).expect("release second peer holder");
+        server.join().expect("fixture server");
+        assert!(
+            request_sent.try_recv().is_ok(),
+            "the request write succeeded while the second holder was live"
+        );
+        assert_eq!(reply["reason"], "door-capacity-refusal");
+        assert_eq!(
+            reply["retry_after_seconds"],
+            super::super::CAPACITY_RETRY_SECONDS
+        );
+        clear_context();
     }
 
     fn socket(temp: &tempfile::TempDir) -> (PathBuf, UnixListener) {
