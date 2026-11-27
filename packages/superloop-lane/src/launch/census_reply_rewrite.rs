@@ -170,6 +170,29 @@ fn eligible_with_presence(
                 command(loop_name, None)
             )));
         }
+        if super::started_without_writer_identity(record)
+            && record["rounds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|round| designation_member(round) == DesignationMember::Absent)
+        {
+            let remedy = match reaping::check_unsettled_driver(record) {
+                Ok(reaping::UnsettledDriverCheck::Absent) => format!(
+                    "preview retirement with superloop-lane retire {loop_name} {run} --dry-run, apply its digest, then repeat {}",
+                    command(loop_name, None)
+                ),
+                Ok(reaping::UnsettledDriverCheck::Unreadable(error)) => format!(
+                    "report evidence cannot be read ({error}); retirement cannot establish absence and no command of this program converts it; retain its recovery evidence for owner repair"
+                ),
+                Err(error) => format!(
+                    "retirement refuses this run ({error}) and strict launch recovery needs a converted row; no command of this program converts it; retain its recovery evidence for owner repair"
+                ),
+            };
+            return Err(refusal(format!(
+                "run {run}: a started writer identity was not recorded; {remedy}"
+            )));
+        }
         for observed in [
             launcher_identity(record),
             driver_identity(record),
@@ -182,8 +205,14 @@ fn eligible_with_presence(
                 .unwrap_or_default()
                 .to_owned();
             if presence == "present" || presence == "unknown" {
+                let remedy = if presence == "unknown" {
+                    "its presence cannot be measured; inspect the process evidence before repeating"
+                        .to_owned()
+                } else {
+                    "wait for its exit before repeating".to_owned()
+                };
                 return Err(refusal(format!(
-                    "run {run}: {presence} round writer; wait for its exit or follow the census's recovery command, then repeat {}",
+                    "run {run}: {presence} round writer; {remedy} {}",
                     command(loop_name, None)
                 )));
             }
@@ -823,6 +852,10 @@ mod tests {
             .expect("round")
             .remove("reply_designation");
         changed["phase"] = json!("started");
+        for role in ["launcher", "driver_entry", "helper"] {
+            changed[format!("{role}_pid")] = json!(u32::MAX);
+            changed[format!("{role}_start")] = json!(1);
+        }
         publish_reservation(&live, &changed).expect("dead started round");
         assert!(run(home, &["alpha".into(), "--dry-run".into()]).is_ok());
         changed["phase"] = json!("preparing");

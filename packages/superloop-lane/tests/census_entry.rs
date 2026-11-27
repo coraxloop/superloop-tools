@@ -1182,6 +1182,139 @@ fn interrupted_settlement_census_names_conversion() {
 }
 
 /// # Panics
+/// Panics only if public census and conversion disagree on an unrecorded writer.
+/// ´test:integration:unrecorded-started-writer-retirement-route´
+#[test]
+fn unrecorded_started_writer_retirement_route() {
+    for evidence in ["absent", "recorded", "report-file", "unreadable"] {
+        let fixture = preparing_retirement_fixture();
+        let path = fixture.runs.join(".reservation-R.json");
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+        record["phase"] = json!("started");
+        record["rounds"] = json!([{"step":"work-2","phase":"running"}]);
+        record["launcher_pid"] = Value::Null;
+        record["launcher_start"] = Value::Null;
+        if evidence == "recorded" {
+            record["driver_end"] = json!({"state":"completed"});
+        }
+        write(&path, record.to_string());
+        if evidence == "report-file" {
+            write(
+                &fixture.runs.join(".report=R.json"),
+                first_round_report(&fixture).to_string(),
+            );
+        } else if evidence == "unreadable" {
+            std::os::unix::fs::symlink("missing-report", fixture.runs.join(".report=R.json"))
+                .expect("unreadable report");
+        }
+        let census = success(&fixture.command());
+        let blocker = census["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .find(|row| row["kind"] == "rounds-without-member" && row["run"] == "R")
+            .expect("old row blocker");
+        if evidence == "absent" {
+            assert_eq!(
+                blocker["next_command"],
+                "superloop-lane retire alpha R --dry-run"
+            );
+        } else {
+            assert!(blocker["next_command"].is_null(), "{blocker}");
+            assert!(
+                blocker["then"]
+                    .as_str()
+                    .expect("text")
+                    .contains("no command")
+            );
+            if evidence == "unreadable" {
+                assert!(
+                    blocker["then"]
+                        .as_str()
+                        .expect("text")
+                        .contains(".report=R.json")
+                );
+            }
+        }
+        success(&fixture.invoke(&["pause", "alpha"]));
+        let refusal = fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]);
+        assert_eq!(refusal.status.code(), Some(2));
+        let text = String::from_utf8_lossy(&refusal.stderr);
+        assert!(
+            text.contains("a started writer identity was not recorded"),
+            "{text}"
+        );
+        if evidence == "absent" {
+            assert!(
+                text.contains("superloop-lane retire alpha R --dry-run"),
+                "{text}"
+            );
+        } else {
+            assert!(
+                text.contains("no command of this program converts it"),
+                "{text}"
+            );
+            if evidence == "unreadable" {
+                assert!(text.contains(".report=R.json"), "{text}");
+            }
+        }
+    }
+}
+
+/// # Panics
+/// Panics only if the public census disagrees with a pending confirmed retirement.
+/// ´test:integration:pending-absence-census-repeats-retirement-flags´
+#[test]
+fn pending_absence_census_repeats_retirement_flags() {
+    let fixture = preparing_retirement_fixture();
+    let path = fixture.runs.join(".reservation-R.json");
+    fs::remove_file(fixture.runs.join(".prepare-R.lock")).expect("missing lease");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    record
+        .as_object_mut()
+        .expect("record")
+        .remove("harvest_agreement");
+    record.as_object_mut().expect("record").remove("collection");
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled"}]);
+    write(&path, record.to_string());
+    let flags = [
+        "--confirm-missing-lease",
+        "--confirm-missing-harvest-fields",
+    ];
+    let preview =
+        success(&fixture.invoke(&["retire", "alpha", "R", flags[0], flags[1], "--dry-run"]));
+    let mut pending = preview["plan"]["after"].clone();
+    pending["current_retirement"]["accepted_absences"]["preview_sha256"] =
+        preview["preview_sha256"].clone();
+    pending["retirement_absence_plan"] = preview["plan"].clone();
+    assert_eq!(pending["phase"], "retiring");
+    write(&path, pending.to_string());
+    let census = success(&fixture.command());
+    let blockers = census["reply_designation_readiness"]["blockers"]
+        .as_array()
+        .expect("blockers");
+    let rounds = blockers
+        .iter()
+        .find(|row| row["kind"] == "rounds-without-member" && row["run"] == "R")
+        .expect("rounds row");
+    let absence = blockers
+        .iter()
+        .find(|row| row["kind"] == "pending-absence-plan" && row["run"] == "R")
+        .expect("plan row");
+    assert_eq!(rounds["next_command"], absence["next_command"]);
+    assert_eq!(rounds["apply_command"], absence["apply_command"]);
+    assert_eq!(
+        rounds["next_command"],
+        "superloop-lane retire alpha R --confirm-missing-lease --confirm-missing-harvest-fields --dry-run"
+    );
+    let resumed =
+        success(&fixture.invoke(&["retire", "alpha", "R", flags[0], flags[1], "--dry-run"]));
+    assert_eq!(resumed["resuming"], true);
+}
+
+/// # Panics
 /// Panics only if fixture custody cannot be built or registration refusal changes shape.
 /// ´test:integration:retirement-entry-names-refused-registration´
 #[test]
@@ -1521,6 +1654,7 @@ fn retirement_entry_remeasures_proof_after_partial_custody_move() {
         serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
     record["launcher_pid"] = Value::Null;
     record["launcher_start"] = Value::Null;
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled"}]);
     write(&path, record.to_string());
     let driver = fixture.runs.join("R");
     directory(&driver);
@@ -1540,6 +1674,16 @@ fn retirement_entry_remeasures_proof_after_partial_custody_move() {
     record["retirement_absence_proof"] = journal["settlement"].clone();
     record["node_retirement"] = preview["retirement"]["node_retirement"].clone();
     write(&path, record.to_string());
+    let census = success(&fixture.command());
+    assert!(
+        census["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|row| row["kind"] == "rounds-without-member"
+                && row["run"] == "R"
+                && row["next_command"] == "superloop-lane retire alpha R --dry-run")
+    );
     let mut tampered = record.clone();
     tampered["current_retirement"]["reservation_path"]["target"] =
         json!(fixture.home.path().join(".retired-outside"));

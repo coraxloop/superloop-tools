@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Keep a `started` run with an unrecorded writer identity out of the reply-row conversion, and have the census name retirement, whose proof measures the writer's absence. A recorded end, a present report or unreadable report evidence with that missing identity is named for owner repair because retirement cannot clear it and strict recovery needs a converted row. A `retiring` run's census entry names the same confirmation flags as its pending absence plan. Compatibility: these are new refusals and guidance in the host lane program; no stored form or reply selection changes.
+
 - Name `superloop-lane resume LOOP` in the `launch-paused` refusal that a launch, a launch recovery or a resumed round prints while the loop's launch admission is paused; the refusal named no command before. Compatibility: only the host `superloop-lane` program's refusal text changes; its kind, its exit status and the admission record do not.
 
 - Apply `retire rewrite LOOP RUN --expect-digest HEX` as the retirement rewrite it previews: the reconciliation that precedes a changing `retire` read `rewrite` as the loop name and the loop as the run, so an apply refused before the rewrite began, while its `--dry-run` preview, which skips that reconciliation, worked. Compatibility: only the host `superloop-lane` program's behaviour changes; previews, their digests and stored forms do not change.

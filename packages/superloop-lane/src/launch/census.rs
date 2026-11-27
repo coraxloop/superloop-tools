@@ -21,6 +21,41 @@ fn designation_member(round: &Value) -> DesignationMember {
     }
 }
 
+fn started_without_writer_identity(record: &Value) -> bool {
+    record["phase"] == "started"
+        && ["launcher_pid", "driver_entry_pid", "helper_pid"]
+            .iter()
+            .any(|key| record[*key].is_null())
+}
+
+fn retirement_command(record: &Value, loop_name: &str, run: &str, action: &str) -> String {
+    let flags = record["retirement_absence_plan"]["flags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let options = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" {flags}")
+    };
+    format!("superloop-lane retire {loop_name} {run}{options} {action}")
+}
+
+fn unrecorded_writer_blocker(record: &Value) -> Option<String> {
+    match reaping::check_unsettled_driver(record) {
+        Ok(reaping::UnsettledDriverCheck::Absent) => None,
+        Ok(reaping::UnsettledDriverCheck::Unreadable(error)) => Some(format!(
+            "Report evidence cannot be read ({error}); retirement cannot establish absence and no command of this program converts the row. Retain the record and its recovery evidence for owner repair."
+        )),
+        Err(error) => Some(format!(
+            "Retirement refuses this run ({error}), while strict launch recovery requires a converted row; no command of this program converts it. Retain the record and its recovery evidence for owner repair."
+        )),
+    }
+}
+
 fn root_entries(root: &Path) -> Result<Vec<(String, PathBuf)>, LaneError> {
     let mut entries = fs::read_dir(root)
         .map_err(|error| LaneError::input("census-root", format!("{}: {error}", root.display())))?
@@ -128,6 +163,10 @@ impl DesignationCounts {
             self.live_invalid_member += invalid;
         }
         if absent > 0 {
+            let missing_writer = !retired && started_without_writer_identity(record);
+            let blocked_writer = missing_writer
+                .then(|| unrecorded_writer_blocker(record))
+                .flatten();
             let no_route = !retired
                 && self.blockers.iter().any(|row| {
                     row["run"] == run && row["kind"] == "preparing-without-lease-or-launcher"
@@ -139,24 +178,37 @@ impl DesignationCounts {
                     .and_then(|row| row["next_command"].as_str())
                     .map(str::to_owned)
                     .unwrap_or_default()
+            } else if blocked_writer.is_some() {
+                String::new()
+            } else if (!retired && record["phase"] == "retiring") || missing_writer {
+                retirement_command(record, loop_name, run, "--dry-run")
             } else {
                 format!("superloop-lane census rewrite-replies {loop_name} --dry-run")
+            };
+            let guidance = if no_route {
+                "Neither a lease nor a launcher identity is recorded; no command of this program converts this preparation. Retain its recovery evidence for its owner's repair.".to_owned()
+            } else if let Some(reason) = blocked_writer {
+                reason
+            } else if first.is_empty() {
+                "Wait for the live launch to finish, or inspect the preparation blocker before repeating the census.".to_owned()
+            } else if missing_writer || (!retired && record["phase"] == "retiring") {
+                "Preview and apply the named retirement with its confirmation flags; then preview and apply the reply-row rewrite to its retired row.".to_owned()
+            } else if !retired && record["phase"] == "started" {
+                "After the recorded writers are absent, convert the row; then follow strict launch recovery for an interrupted settlement, or retire the run if no settlement was interrupted.".to_owned()
+            } else if !retired && record["phase"] == "preparing" {
+                "Retire the run using the preview's confirmations, then preview the reply-row rewrite and replace HEX with its preview_sha256.".to_owned()
+            } else {
+                "Replace HEX with preview_sha256 from the dry run.".to_owned()
             };
             self.blockers.push(json!({"kind":"rounds-without-member","run":run,
                 "retired":retired,"count":absent,
                 "next_command":if first.is_empty() { Value::Null } else { json!(&first) },
-                "apply_command":if first.is_empty() { Value::Null } else {
+                "apply_command":if first.is_empty() { Value::Null } else if (!retired && record["phase"] == "retiring") || missing_writer {
+                    json!(retirement_command(record, loop_name, run, "--expect-digest HEX"))
+                } else {
                     json!(format!("superloop-lane census rewrite-replies {loop_name} --expect-digest HEX"))
                 },
-                "then":if no_route {
-                    "Neither a lease nor a launcher identity is recorded; no command of this program converts this preparation. Retain its recovery evidence for its owner's repair."
-                } else if first.is_empty() {
-                    "Wait for the live launch to finish, or inspect the preparation blocker before repeating the census."
-                } else if !retired && record["phase"] == "started" {
-                    "After the recorded writers are absent, convert the row; then follow strict launch recovery for an interrupted settlement, or retire the run if no settlement was interrupted."
-                } else if !retired && record["phase"] == "preparing" {
-                    "Retire the run using the preview's confirmations, then preview the reply-row rewrite and replace HEX with its preview_sha256."
-                } else { "Replace HEX with preview_sha256 from the dry run." }}));
+                "then":guidance}));
         }
         if invalid > 0 {
             self.blockers.push(json!({"kind":"rounds-with-invalid-member","run":run,
@@ -178,21 +230,10 @@ impl DesignationCounts {
         }
         if !retired && record.get("retirement_absence_plan").is_some() {
             self.pending_absence_plans += 1;
-            let flags = record["retirement_absence_plan"]["flags"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" ");
-            let options = if flags.is_empty() {
-                String::new()
-            } else {
-                format!(" {flags}")
-            };
-            self.blockers.push(json!({"kind":"pending-absence-plan","run":run,
-                "next_command":format!("superloop-lane retire {loop_name} {run}{options} --dry-run"),
-                "apply_command":format!("superloop-lane retire {loop_name} {run}{options} --expect-digest HEX"),
+            self.blockers
+                .push(json!({"kind":"pending-absence-plan","run":run,
+                "next_command":retirement_command(record, loop_name, run, "--dry-run"),
+                "apply_command":retirement_command(record, loop_name, run, "--expect-digest HEX"),
                 "then":"Replace HEX with the preview_sha256 from the dry run."}));
         }
     }
