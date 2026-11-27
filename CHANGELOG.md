@@ -28,6 +28,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
+- Make the door transport's queued-capacity regression test independent of whether a dropped peer's request write succeeds while another handle remains open. The test in ``packages/superloop-lane/src/door/transport.rs`` checks the final reply the stub actually receives; the door's dispatch behavior is unchanged.
+
 - Keep a `started` run with an unrecorded writer identity out of the reply-row conversion, and have the census name retirement, whose proof measures the writer's absence. A recorded end, a present report or unreadable report evidence with that missing identity is named for owner repair because retirement cannot clear it and strict recovery needs a converted row. A `retiring` run's census entry names the same confirmation flags as its pending absence plan. Compatibility: these are new refusals and guidance in the host lane program; no stored form or reply selection changes.
 
 - Name `superloop-lane resume LOOP` in the `launch-paused` refusal that a launch, a launch recovery or a resumed round prints while the loop's launch admission is paused; the refusal named no command before. Compatibility: only the host `superloop-lane` program's refusal text changes; its kind, its exit status and the admission record do not.
