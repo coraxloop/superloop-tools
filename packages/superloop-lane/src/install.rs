@@ -3336,6 +3336,15 @@ mod tests {
         let config = home.join(".config/loops/alpha");
         let unit_dir = home.join(".config/systemd/user");
         let bin_dir = home.join("bin");
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("fixture home mode");
+        for dir in [
+            home.join(".config"),
+            home.join(".config/loops"),
+            home.join(".config/systemd"),
+        ] {
+            fs::create_dir_all(&dir).expect("directory");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("directory mode");
+        }
         for dir in [&config, &unit_dir, &bin_dir] {
             fs::create_dir_all(dir).expect("directory");
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).expect("directory mode");
@@ -3441,17 +3450,7 @@ mod tests {
         )
     }
 
-    /// ´test:unit:proxy-move-reads-system-manager-properties-with-a-distribution-drop-in´
-    #[test]
-    fn proxy_move_reads_system_manager_properties_with_a_distribution_drop_in() {
-        let drop_in = Path::new("/usr/lib/systemd/user/service.d/10-timeout-abort.conf");
-        if !drop_in.exists() {
-            use std::io::Write as _;
-            std::io::stderr()
-                .write_all(b"SKIP: distribution service drop-in is absent on this test host\n")
-                .expect("skip notice");
-            return;
-        }
+    fn assert_recorded_manager_previews(drop_in: &str) {
         let rows = [
             ("inactive", "", "", false),
             (
@@ -3463,13 +3462,7 @@ mod tests {
         ];
         for (state, invocation, bound_by, active) in rows {
             let (fixture, request, unit) = move_fixture();
-            let output = recorded_manager_answer(
-                state,
-                invocation,
-                bound_by,
-                drop_in.to_str().expect("platform path"),
-                &unit,
-            );
+            let output = recorded_manager_answer(state, invocation, bound_by, drop_in, &unit);
             let service = super::parse_proxy_service(&output, &unit)
                 .expect("distribution drop-in is admitted");
             assert_eq!(service.active, active);
@@ -3506,6 +3499,30 @@ mod tests {
                     ])
                 );
             }
+        }
+    }
+
+    /// ´test:unit:proxy-move-reads-system-manager-properties-with-a-distribution-drop-in´
+    #[test]
+    #[ignore = "requires the distribution's service drop-in on this host"]
+    fn proxy_move_reads_system_manager_properties_with_a_distribution_drop_in() {
+        let drop_in = Path::new("/usr/lib/systemd/user/service.d/10-timeout-abort.conf");
+        assert!(drop_in.exists(), "distribution service drop-in is absent");
+        assert_recorded_manager_previews(drop_in.to_str().expect("platform path"));
+    }
+
+    fn protect_platform_fixture(root: &Path) {
+        fs::set_permissions(root, fs::Permissions::from_mode(0o755))
+            .expect("protect platform fixture root");
+        for component in [
+            "usr",
+            "usr/lib",
+            "usr/lib/systemd",
+            "usr/lib/systemd/user",
+            "usr/lib/systemd/user/service.d",
+        ] {
+            fs::set_permissions(root.join(component), fs::Permissions::from_mode(0o755))
+                .expect("protect platform directory");
         }
     }
 
@@ -3576,6 +3593,29 @@ mod tests {
         assert!(error.detail.contains(&platform.display().to_string()));
         fs::set_permissions(parent, fs::Permissions::from_mode(0o755))
             .expect("restore platform parent");
+        protect_platform_fixture(root);
+
+        for (state, invocation, bound_by, active) in [
+            ("inactive", "", "", false),
+            (
+                "active",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "superloop-lane-run-one.service superloop-lane-run-two.service",
+                true,
+            ),
+        ] {
+            let output = recorded_manager_answer(
+                state,
+                invocation,
+                bound_by,
+                platform.to_str().expect("fixture path"),
+                &unit,
+            );
+            let service = check(&output).expect("protected fixture drop-in is admitted");
+            assert_eq!(service.active, active);
+            assert_eq!(service.bound_by.join(" "), bound_by);
+        }
+        assert_recorded_manager_previews("");
 
         let other_fragment = unit.with_file_name("different.service");
         let output = recorded_manager_answer("inactive", "", "", "", &other_fragment);
