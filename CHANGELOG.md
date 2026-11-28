@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ### Fixed
 
-- Let `install --pilot LOOP --move-proxy` preview and apply on completed generation records written by the released pilot installer: the move introduced in 0.14.0 refused them as `install-generation` because it required a `loop` member the installer never wrote. Compatibility: update the host `superloop-lane` program; existing generation records need no rewrite, and the move still requires an explicit digest-bound preview and apply at an idle installation, restarting its vendor service only if it was active.
+- Let `install --pilot LOOP --move-proxy` preview and apply on completed generation records written by any released pilot installer: the move introduced in 0.14.0 refused every such record as `install-generation` because it required a `loop` member no installer wrote. Compatibility: install this release's host programs together, since the move runs only on a configured vendor proxy that answers the lane program's own version and otherwise refuses as `proxy-program`; existing generation records need no rewrite, and the move still requires an explicit digest-bound preview and apply at an idle installation, restarting its vendor service only if it was active.
 
 ## [0.14.0] - 2026-11-28
 
