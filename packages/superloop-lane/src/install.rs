@@ -1765,7 +1765,7 @@ fn proxy_move_plan(
         65_536,
     )?;
     let generation = validate_generation(&generation_path, &generation_bytes)?;
-    if generation["phase"] != "complete" || generation["loop"] != request.loop_name {
+    if generation["phase"] != "complete" {
         return Err(LaneError::input(
             "install-generation",
             "move needs a complete generation of this loop",
@@ -3274,20 +3274,52 @@ mod tests {
             .replace("@PROXY_BIN@", "/old/proxy");
         fs::write(&unit, text).expect("unit");
         fs::set_permissions(&unit, fs::Permissions::from_mode(0o644)).expect("unit mode");
-        let generation = serde_json::json!({
-            "schema":1,"phase":"complete","loop":"alpha","unit_dir":unit_dir,
-            "proxy_bin":"/old/proxy","proxy_sha256":"a".repeat(64), "unrelated_pin":"kept",
-        });
-        fs::write(
-            config.join("install-generation.json"),
-            generation.to_string(),
+        let image_hash = "c".repeat(64);
+        let image_digest = format!("sha256:{image_hash}");
+        let proxy_bin = Path::new("/old/proxy");
+        let proxy_sha256 = "a".repeat(64);
+        let codex_sha256 = "b".repeat(64);
+        let template_dir = home
+            .join(".var/loops/alpha/runner-templates/codex")
+            .join(&image_hash);
+        let socket_dir = home.join(".var/loops/alpha/sockets");
+        let loop_home = home.join(".var/loops/alpha");
+        let payload = crate::build::payload::InstallPayload {
+            vendor: crate::build::payload::CODEX,
+            bin: lane,
+            sha256: codex_sha256.clone(),
+            image_program: "/usr/bin/codex".into(),
+            companion: None,
+        };
+        let mut generation = super::preparing_generation(&super::GenerationRecord {
+            image_digest: &image_digest,
+            codex_sha256: &codex_sha256,
+            codex_host_sha256: "",
+            tools_commit: "fixture",
+            template_dir: &template_dir,
+            socket_dir: &socket_dir,
+            unit_dir: &unit_dir,
+            proxy_bin,
+            proxy_sha256: &proxy_sha256,
+            init_sha256: "fixture",
+            codex_image_program: "/usr/bin/codex",
+            source_fingerprint: "fixture",
+            payloads: &[payload],
+            loop_home: &loop_home,
+            image_hash: &image_hash,
+        })
+        .expect("installer's generation writer");
+        let generation_path = config.join("install-generation.json");
+        super::publish_generation(&generation_path, &generation).expect("preparing generation");
+        super::complete_generation_after_unit_sync_with(
+            &generation_path,
+            &mut generation,
+            &home.join(".config/systemd"),
+            &unit_dir,
+            None,
+            &mut |_, directory| directory.sync_all(),
         )
-        .expect("generation");
-        fs::set_permissions(
-            config.join("install-generation.json"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("generation mode");
+        .expect("completed installer generation");
         fs::write(config.join(".install-generation.lock"), b"").expect("generation lock");
         fs::set_permissions(
             config.join(".install-generation.lock"),
@@ -3316,6 +3348,63 @@ mod tests {
             unit.display(),
             if reload_pending { "yes" } else { "no" },
         )
+    }
+
+    /// ´test:unit:proxy-move-previews-and-applies-an-installer-generation´
+    #[test]
+    fn proxy_move_previews_and_applies_an_installer_generation() {
+        let (fixture, mut request, unit) = move_fixture();
+        let home = fixture.path();
+        let path = home.join(".config/loops/alpha/install-generation.json");
+        let before = super::read_generation(&path)
+            .expect("generation read")
+            .expect("completed generation");
+        assert_eq!(before["phase"], "complete");
+        assert!(before.get("loop").is_none());
+        assert_eq!(before["proxy_bin"], "/old/proxy");
+        assert_eq!(
+            before["unit_dir"].as_str(),
+            unit.parent().and_then(Path::to_str)
+        );
+
+        let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+            match action {
+                "show" => Ok(manager_answer(&unit, false, "", "", false)),
+                "reload" => Ok(String::new()),
+                "restart" => panic!("inactive service must stay inactive"),
+                _ => panic!("unexpected manager action"),
+            }
+        };
+        let mut inventory = || Ok(Vec::new());
+        let mut version = |_: &Path| Ok(());
+        let preview = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("installer generation preview");
+        assert_eq!(preview["blocked"], false);
+        request.dry_run = false;
+        request.expect_digest = preview["preview_sha256"].as_str().map(str::to_owned);
+        let applied = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("installer generation apply");
+        assert_eq!(applied["unit_activation_performed"], false);
+        let after = super::read_generation(&path)
+            .expect("generation read")
+            .expect("moved generation");
+        assert_eq!(after["proxy_bin"], applied["proxy_bin"]);
+        assert_eq!(after["image_digest"], before["image_digest"]);
+        assert!(after.get("loop").is_none());
     }
 
     /// ´test:unit:proxy-move-retries-after-each-publication-boundary´
@@ -3435,7 +3524,10 @@ mod tests {
                     .display()
                     .to_string()
             );
-            assert_eq!(completed["unrelated_pin"], "kept");
+            assert_eq!(
+                completed["image_digest"],
+                "sha256:".to_owned() + &"c".repeat(64)
+            );
         }
     }
 
