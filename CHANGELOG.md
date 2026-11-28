@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.14.1] - 2026-11-28
+
 ### Fixed
 
 - Let `install --pilot LOOP --move-proxy` preview and apply on completed generation records written by any released pilot installer: the move introduced in 0.14.0 refused every such record as `install-generation` because it required a `loop` member no installer wrote. On hosts where the distribution's service manager package supplies a global user-service drop-in, it also refused as `proxy-unit`; the move now admits that protected platform file while naming and refusing other overrides. Compatibility: install this release's host programs together, since the move runs only on a configured vendor proxy that answers the lane program's own version and otherwise refuses as `proxy-program`; existing generation records need no rewrite, and the move still requires an explicit digest-bound preview and apply at an idle installation, restarting its vendor service only if it was active. Install in this order: on the host, replace `superloop-lane` with its entry `superloop` and the other programs of this release together, since launch and resume refuse as `entry-version` unless the entry reports the lane's exact version; an installation whose generation records the proxy file the host install replaces, as one does after a move, refuses a fresh boxed launch as `proxy-program` until `install --pilot LOOP --refresh-proxy --proxy-bin RECORDED_PATH` records that file's new digest, while one recorded on a file the install leaves alone meets nothing; and for each loop that runs a door, at an idle boundary, run `superloop-lane install-door LOOP --dry-run` and, where it reports changed door bytes, the door step of (``alg:superlooplane:door-rollout-sequence``), which this rebuild owes although the door's behaviour does not change (``rule:superlooplane:door-rebuild-rollout``). The node entry's behaviour does not change, so reinstalling it only aligns its version.
@@ -1289,7 +1291,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.14.0...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.14.1...HEAD
+[0.14.1]: https://github.com/coraxloop/superloop-tools/compare/v0.14.0...v0.14.1
 [0.14.0]: https://github.com/coraxloop/superloop-tools/compare/v0.13.3...v0.14.0
 [0.13.3]: https://github.com/coraxloop/superloop-tools/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/coraxloop/superloop-tools/compare/v0.13.1...v0.13.2
