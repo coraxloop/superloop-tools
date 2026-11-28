@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 
 ## [Unreleased]
 
+## [0.14.0] - 2026-11-28
+
 ### Added
 
 - Add a daily compute-node volume sampler with immutable, sequenced JSON records and a bounded export of kept samples and unfinished reservations. It verifies a directory descriptor before reading volume counters, refuses unknown project inheritance, and names a replacement state directory with a new nonce. Compatibility: installation ships the program and unit templates but activates no timer, samples no volume and changes no stored request or worker form; provisioning must supply a root-owned, non-writable-by-others configuration, reviewed volume identities, reader-group access and unit activation before observations begin. The load reading's output is unchanged, but a missing `--known-hosts` or loop now fails with status 1 instead of as a usage error.
@@ -1283,7 +1285,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 - `superloop-claude-hook` and `permission-triage-hook` for handling harness events and command permissions.
 - GPL-3.0-or-later code and CC0-1.0 documents, with no backwards compatibility before 1.0.
 
-[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.13.3...HEAD
+[Unreleased]: https://github.com/coraxloop/superloop-tools/compare/v0.14.0...HEAD
+[0.14.0]: https://github.com/coraxloop/superloop-tools/compare/v0.13.3...v0.14.0
 [0.13.3]: https://github.com/coraxloop/superloop-tools/compare/v0.13.2...v0.13.3
 [0.13.2]: https://github.com/coraxloop/superloop-tools/compare/v0.13.1...v0.13.2
 [0.13.1]: https://github.com/coraxloop/superloop-tools/compare/v0.13.0...v0.13.1
