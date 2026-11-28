@@ -1607,6 +1607,18 @@ struct ProxyService {
 }
 
 fn parse_proxy_service(text: &str, unit: &Path) -> Result<ProxyService, LaneError> {
+    parse_proxy_service_with(text, unit, Path::new("/usr/lib/systemd/user"), |path| {
+        loop_home::workers_settings::platform_file(path, nix::unistd::Uid::effective().as_raw())
+            .is_ok()
+    })
+}
+
+fn parse_proxy_service_with(
+    text: &str,
+    unit: &Path,
+    distribution_root: &Path,
+    mut platform_file: impl FnMut(&Path) -> bool,
+) -> Result<ProxyService, LaneError> {
     let mut fields = std::collections::BTreeMap::new();
     for line in text.lines() {
         let (key, value) = line.split_once('=').ok_or_else(|| {
@@ -1625,16 +1637,37 @@ fn parse_proxy_service(text: &str, unit: &Path) -> Result<ProxyService, LaneErro
             .copied()
             .ok_or_else(|| LaneError::input("proxy-unit", format!("system manager omitted {name}")))
     };
-    if fields.len() != 7
-        || field("LoadState")? != "loaded"
-        || field("FragmentPath")? != unit.to_string_lossy()
-        || !field("DropInPaths")?.is_empty()
-    {
+    if fields.len() != 7 || field("LoadState")? != "loaded" {
         return Err(LaneError::input(
             "proxy-unit",
-            "vendor unit is not the recognized loaded file without overrides; preview install --pilot LOOP --move-proxy --dry-run",
+            "vendor unit is not a recognized loaded file; preview install --pilot LOOP --move-proxy --dry-run",
         ));
     }
+    let fragment = field("FragmentPath")?;
+    let unit_name = unit
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("vendor unit");
+    let loop_name = unit_name
+        .strip_prefix("superloop-lane-vendor@")
+        .and_then(|name| name.strip_suffix(".service"))
+        .unwrap_or("LOOP");
+    if fragment != unit.to_string_lossy() {
+        return Err(LaneError::input(
+            "proxy-unit",
+            format!(
+                "vendor unit loads from {fragment} instead of the recorded {}; restore the recorded unit with superloop-lane repair {loop_name}",
+                unit.display()
+            ),
+        ));
+    }
+    check_proxy_drop_ins(
+        field("DropInPaths")?,
+        unit_name,
+        loop_name,
+        distribution_root,
+        &mut platform_file,
+    )?;
     let state = field("ActiveState")?;
     let active = match state {
         "active" => true,
@@ -1676,6 +1709,51 @@ fn parse_proxy_service(text: &str, unit: &Path) -> Result<ProxyService, LaneErro
         bound_by,
         reload_pending,
     })
+}
+
+fn check_proxy_drop_ins(
+    drop_ins: &str,
+    unit_name: &str,
+    loop_name: &str,
+    distribution_root: &Path,
+    platform_file: &mut impl FnMut(&Path) -> bool,
+) -> Result<(), LaneError> {
+    let drop_ins = drop_ins
+        .split_ascii_whitespace()
+        .map(Path::new)
+        .collect::<Vec<_>>();
+    let outside = drop_ins
+        .iter()
+        .filter(|path| {
+            !path.starts_with(distribution_root)
+                || path.as_os_str() == distribution_root.as_os_str()
+        })
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if !outside.is_empty() {
+        return Err(LaneError::input(
+            "proxy-unit",
+            format!(
+                "vendor unit {unit_name} loads drop-in {}, which lies outside the distribution's /usr/lib/systemd/user and can change what the service starts; remove that file or move its setting elsewhere at an idle moment, run systemctl --user daemon-reload, then repeat install --pilot {loop_name} --move-proxy --dry-run",
+                outside.join(", ")
+            ),
+        ));
+    }
+    let replaceable = drop_ins
+        .iter()
+        .filter(|path| !platform_file(path))
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if !replaceable.is_empty() {
+        return Err(LaneError::input(
+            "proxy-unit",
+            format!(
+                "drop-in {} lies under /usr/lib/systemd/user but this user could replace it or a directory above it",
+                replaceable.join(", ")
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn proxy_manager(owner_home: &Path, loop_name: &str, action: &str) -> Result<String, LaneError> {
@@ -1765,7 +1843,7 @@ fn proxy_move_plan(
         65_536,
     )?;
     let generation = validate_generation(&generation_path, &generation_bytes)?;
-    if generation["phase"] != "complete" || generation["loop"] != request.loop_name {
+    if generation["phase"] != "complete" {
         return Err(LaneError::input(
             "install-generation",
             "move needs a complete generation of this loop",
@@ -3258,6 +3336,15 @@ mod tests {
         let config = home.join(".config/loops/alpha");
         let unit_dir = home.join(".config/systemd/user");
         let bin_dir = home.join("bin");
+        fs::set_permissions(home, fs::Permissions::from_mode(0o700)).expect("fixture home mode");
+        for dir in [
+            home.join(".config"),
+            home.join(".config/loops"),
+            home.join(".config/systemd"),
+        ] {
+            fs::create_dir_all(&dir).expect("directory");
+            fs::set_permissions(&dir, fs::Permissions::from_mode(0o700)).expect("directory mode");
+        }
         for dir in [&config, &unit_dir, &bin_dir] {
             fs::create_dir_all(dir).expect("directory");
             fs::set_permissions(dir, fs::Permissions::from_mode(0o700)).expect("directory mode");
@@ -3274,20 +3361,52 @@ mod tests {
             .replace("@PROXY_BIN@", "/old/proxy");
         fs::write(&unit, text).expect("unit");
         fs::set_permissions(&unit, fs::Permissions::from_mode(0o644)).expect("unit mode");
-        let generation = serde_json::json!({
-            "schema":1,"phase":"complete","loop":"alpha","unit_dir":unit_dir,
-            "proxy_bin":"/old/proxy","proxy_sha256":"a".repeat(64), "unrelated_pin":"kept",
-        });
-        fs::write(
-            config.join("install-generation.json"),
-            generation.to_string(),
+        let image_hash = "c".repeat(64);
+        let image_digest = format!("sha256:{image_hash}");
+        let proxy_bin = Path::new("/old/proxy");
+        let proxy_sha256 = "a".repeat(64);
+        let codex_sha256 = "b".repeat(64);
+        let template_dir = home
+            .join(".var/loops/alpha/runner-templates/codex")
+            .join(&image_hash);
+        let socket_dir = home.join(".var/loops/alpha/sockets");
+        let loop_home = home.join(".var/loops/alpha");
+        let payload = crate::build::payload::InstallPayload {
+            vendor: crate::build::payload::CODEX,
+            bin: lane,
+            sha256: codex_sha256.clone(),
+            image_program: "/usr/bin/codex".into(),
+            companion: None,
+        };
+        let mut generation = super::preparing_generation(&super::GenerationRecord {
+            image_digest: &image_digest,
+            codex_sha256: &codex_sha256,
+            codex_host_sha256: "",
+            tools_commit: "fixture",
+            template_dir: &template_dir,
+            socket_dir: &socket_dir,
+            unit_dir: &unit_dir,
+            proxy_bin,
+            proxy_sha256: &proxy_sha256,
+            init_sha256: "fixture",
+            codex_image_program: "/usr/bin/codex",
+            source_fingerprint: "fixture",
+            payloads: &[payload],
+            loop_home: &loop_home,
+            image_hash: &image_hash,
+        })
+        .expect("installer's generation writer");
+        let generation_path = config.join("install-generation.json");
+        super::publish_generation(&generation_path, &generation).expect("preparing generation");
+        super::complete_generation_after_unit_sync_with(
+            &generation_path,
+            &mut generation,
+            &home.join(".config/systemd"),
+            &unit_dir,
+            None,
+            &mut |_, directory| directory.sync_all(),
         )
-        .expect("generation");
-        fs::set_permissions(
-            config.join("install-generation.json"),
-            fs::Permissions::from_mode(0o600),
-        )
-        .expect("generation mode");
+        .expect("completed installer generation");
         fs::write(config.join(".install-generation.lock"), b"").expect("generation lock");
         fs::set_permissions(
             config.join(".install-generation.lock"),
@@ -3316,6 +3435,252 @@ mod tests {
             unit.display(),
             if reload_pending { "yes" } else { "no" },
         )
+    }
+
+    fn recorded_manager_answer(
+        state: &str,
+        invocation: &str,
+        bound_by: &str,
+        drop_ins: &str,
+        fragment: &Path,
+    ) -> String {
+        format!(
+            "BoundBy={bound_by}\nLoadState=loaded\nActiveState={state}\nFragmentPath={}\nDropInPaths={drop_ins}\nNeedDaemonReload=no\nInvocationID={invocation}\n",
+            fragment.display()
+        )
+    }
+
+    fn assert_recorded_manager_previews(drop_in: &str) {
+        let rows = [
+            ("inactive", "", "", false),
+            (
+                "active",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "superloop-lane-run-one.service superloop-lane-run-two.service",
+                true,
+            ),
+        ];
+        for (state, invocation, bound_by, active) in rows {
+            let (fixture, request, unit) = move_fixture();
+            let output = recorded_manager_answer(state, invocation, bound_by, drop_in, &unit);
+            let service = super::parse_proxy_service(&output, &unit)
+                .expect("distribution drop-in is admitted");
+            assert_eq!(service.active, active);
+            let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+                assert_eq!(action, "show");
+                Ok(output.clone())
+            };
+            let preview = super::run_proxy_move_with(
+                fixture.path(),
+                &request,
+                &mut manager,
+                &mut || Ok(Vec::new()),
+                &mut |_| Ok(()),
+                &mut |_| Ok(()),
+            )
+            .expect("recorded manager output reaches a preview");
+            assert_eq!(preview["blocked"], active);
+            if active {
+                assert_eq!(
+                    preview["busy"],
+                    serde_json::json!([
+                        "vendor BoundBy=superloop-lane-run-one.service",
+                        "vendor BoundBy=superloop-lane-run-two.service"
+                    ])
+                );
+            } else {
+                assert_eq!(preview["busy"], serde_json::json!([]));
+                assert_eq!(
+                    preview["actions"],
+                    serde_json::json!([
+                        "replace vendor unit",
+                        "daemon-reload",
+                        "publish generation"
+                    ])
+                );
+            }
+        }
+    }
+
+    /// ´test:unit:proxy-move-reads-system-manager-properties-with-a-distribution-drop-in´
+    #[test]
+    #[ignore = "requires the distribution's service drop-in on this host"]
+    fn proxy_move_reads_system_manager_properties_with_a_distribution_drop_in() {
+        let drop_in = Path::new("/usr/lib/systemd/user/service.d/10-timeout-abort.conf");
+        assert!(drop_in.exists(), "distribution service drop-in is absent");
+        assert_recorded_manager_previews(drop_in.to_str().expect("platform path"));
+    }
+
+    fn protect_platform_fixture(root: &Path) {
+        fs::set_permissions(root, fs::Permissions::from_mode(0o755))
+            .expect("protect platform fixture root");
+        for component in [
+            "usr",
+            "usr/lib",
+            "usr/lib/systemd",
+            "usr/lib/systemd/user",
+            "usr/lib/systemd/user/service.d",
+        ] {
+            fs::set_permissions(root.join(component), fs::Permissions::from_mode(0o755))
+                .expect("protect platform directory");
+        }
+    }
+
+    /// ´test:unit:proxy-move-refuses-untrusted-drop-ins-and-wrong-fragment´
+    #[test]
+    fn proxy_move_refuses_untrusted_drop_ins_and_wrong_fragment() {
+        let fixture = tempfile::tempdir().expect("path fixture");
+        let root = fixture.path();
+        let distribution = root.join("usr/lib/systemd/user");
+        let owner = root.join("home/owner/.config/systemd/user/service.d/owner.conf");
+        let administrator = root.join("etc/systemd/user/service.d/admin.conf");
+        let platform = distribution.join("service.d/platform.conf");
+        let unit = root.join("home/owner/.config/systemd/user/superloop-lane-vendor@alpha.service");
+        for path in [&owner, &administrator, &platform] {
+            fs::create_dir_all(path.parent().expect("parent")).expect("drop-in directory");
+            fs::write(path, b"[Service]\n").expect("drop-in");
+        }
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let other_uid = if uid == 3000 { 3001 } else { 3000 };
+        let check = |text: &str| {
+            super::parse_proxy_service_with(text, &unit, &distribution, |path| {
+                loop_home::workers_settings::platform_file_at(path, root, uid, other_uid).is_ok()
+            })
+        };
+        for outside in [&owner, &administrator] {
+            let output = recorded_manager_answer(
+                "inactive",
+                "",
+                "",
+                outside.to_str().expect("fixture path"),
+                &unit,
+            );
+            let error = check(&output).expect_err("non-distribution drop-in refuses");
+            assert_eq!(error.kind, "proxy-unit");
+            assert!(error.detail.contains(&outside.display().to_string()));
+            assert!(error.detail.contains("lies outside the distribution"));
+        }
+        let both = format!("{} {}", owner.display(), administrator.display());
+        let output = recorded_manager_answer("inactive", "", "", &both, &unit);
+        let error = check(&output).expect_err("every outside drop-in is named");
+        assert!(error.detail.contains(&owner.display().to_string()));
+        assert!(error.detail.contains(&administrator.display().to_string()));
+
+        fs::set_permissions(&platform, fs::Permissions::from_mode(0o666))
+            .expect("replaceable platform file");
+        let output = recorded_manager_answer(
+            "inactive",
+            "",
+            "",
+            platform.to_str().expect("fixture path"),
+            &unit,
+        );
+        let error = check(&output).expect_err("writable platform file refuses");
+        assert_eq!(error.kind, "proxy-unit");
+        assert!(error.detail.contains(&platform.display().to_string()));
+        assert!(
+            error
+                .detail
+                .contains("this user could replace it or a directory above it")
+        );
+
+        fs::set_permissions(&platform, fs::Permissions::from_mode(0o644))
+            .expect("protected platform file");
+        let parent = platform.parent().expect("parent");
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o777))
+            .expect("replaceable platform parent");
+        let error = check(&output).expect_err("writable platform parent refuses");
+        assert!(error.detail.contains(&platform.display().to_string()));
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o755))
+            .expect("restore platform parent");
+        protect_platform_fixture(root);
+
+        for (state, invocation, bound_by, active) in [
+            ("inactive", "", "", false),
+            (
+                "active",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "superloop-lane-run-one.service superloop-lane-run-two.service",
+                true,
+            ),
+        ] {
+            let output = recorded_manager_answer(
+                state,
+                invocation,
+                bound_by,
+                platform.to_str().expect("fixture path"),
+                &unit,
+            );
+            let service = check(&output).expect("protected fixture drop-in is admitted");
+            assert_eq!(service.active, active);
+            assert_eq!(service.bound_by.join(" "), bound_by);
+        }
+        assert_recorded_manager_previews("");
+
+        let other_fragment = unit.with_file_name("different.service");
+        let output = recorded_manager_answer("inactive", "", "", "", &other_fragment);
+        let error = check(&output).expect_err("fragment mismatch refuses");
+        assert_eq!(error.kind, "proxy-unit");
+        assert!(error.detail.contains(&other_fragment.display().to_string()));
+        assert!(error.detail.contains(&unit.display().to_string()));
+        assert!(error.detail.contains("superloop-lane repair alpha"));
+    }
+
+    /// ´test:unit:proxy-move-previews-and-applies-an-installer-generation´
+    #[test]
+    fn proxy_move_previews_and_applies_an_installer_generation() {
+        let (fixture, mut request, unit) = move_fixture();
+        let home = fixture.path();
+        let path = home.join(".config/loops/alpha/install-generation.json");
+        let before = super::read_generation(&path)
+            .expect("generation read")
+            .expect("completed generation");
+        assert_eq!(before["phase"], "complete");
+        assert!(before.get("loop").is_none());
+        assert_eq!(before["proxy_bin"], "/old/proxy");
+        assert_eq!(
+            before["unit_dir"].as_str(),
+            unit.parent().and_then(Path::to_str)
+        );
+
+        let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+            match action {
+                "show" => Ok(manager_answer(&unit, false, "", "", false)),
+                "reload" => Ok(String::new()),
+                "restart" => panic!("inactive service must stay inactive"),
+                _ => panic!("unexpected manager action"),
+            }
+        };
+        let mut inventory = || Ok(Vec::new());
+        let mut version = |_: &Path| Ok(());
+        let preview = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("installer generation preview");
+        assert_eq!(preview["blocked"], false);
+        request.dry_run = false;
+        request.expect_digest = preview["preview_sha256"].as_str().map(str::to_owned);
+        let applied = super::run_proxy_move_with(
+            home,
+            &request,
+            &mut manager,
+            &mut inventory,
+            &mut version,
+            &mut |_| Ok(()),
+        )
+        .expect("installer generation apply");
+        assert_eq!(applied["unit_activation_performed"], false);
+        let after = super::read_generation(&path)
+            .expect("generation read")
+            .expect("moved generation");
+        assert_eq!(after["proxy_bin"], applied["proxy_bin"]);
+        assert_eq!(after["image_digest"], before["image_digest"]);
+        assert!(after.get("loop").is_none());
     }
 
     /// ´test:unit:proxy-move-retries-after-each-publication-boundary´
@@ -3435,7 +3800,10 @@ mod tests {
                     .display()
                     .to_string()
             );
-            assert_eq!(completed["unrelated_pin"], "kept");
+            assert_eq!(
+                completed["image_digest"],
+                "sha256:".to_owned() + &"c".repeat(64)
+            );
         }
     }
 

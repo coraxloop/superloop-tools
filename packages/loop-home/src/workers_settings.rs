@@ -3,7 +3,7 @@
 use std::path::{Component, Path, PathBuf};
 
 use nix::fcntl::{OFlag, OpenHow, ResolveFlag, open, openat2};
-use nix::sys::stat::fstat;
+use nix::sys::stat::{FileStat, fstat};
 
 use crate::{LoopError, LoopRecord};
 
@@ -42,10 +42,46 @@ fn retired_setting(table: &toml::Table) -> Option<LoopError> {
 ///
 /// Refuses a path whose parent or inode the loop identity could replace.
 pub fn owner_executable(path: &Path, owner_uid: u32) -> Result<(), LoopError> {
-    let relative = path.strip_prefix("/").map_err(|_| {
-        refusal(
+    let stat = checked_file_at(
+        path,
+        Path::new("/"),
+        "owner-program",
+        Some(owner_uid),
+        |stat| {
+            let trusted_owner =
+                stat.st_uid == owner_uid || stat.st_uid == 0 || stat.st_uid == 65534;
+            let sticky_root =
+                (stat.st_uid == 0 || stat.st_uid == 65534) && stat.st_mode & 0o1777 == 0o1777;
+            trusted_owner && (stat.st_mode & 0o022 == 0 || sticky_root)
+        },
+    )?;
+    if stat.st_mode & libc::S_IFMT != libc::S_IFREG
+        || stat.st_mode & 0o111 == 0
+        || stat.st_mode & 0o022 != 0
+        || !(stat.st_uid == owner_uid || stat.st_uid == 0 || stat.st_uid == 65534)
+    {
+        return Err(refusal(
             "owner-program",
-            format!("{} is not absolute", path.display()),
+            format!("{} is not an owner-controlled executable", path.display()),
+        ));
+    }
+    Ok(())
+}
+
+fn checked_file_at(
+    path: &Path,
+    anchor: &Path,
+    kind: &'static str,
+    owner_uid: Option<u32>,
+    parent_safe: impl Fn(&FileStat) -> bool,
+) -> Result<FileStat, LoopError> {
+    let relative = path.strip_prefix(anchor).map_err(|_| {
+        refusal(
+            kind,
+            owner_uid.map_or_else(
+                || format!("{} is outside {}", path.display(), anchor.display()),
+                |_| format!("{} is not absolute", path.display()),
+            ),
         )
     })?;
     let parts = relative.components().collect::<Vec<_>>();
@@ -55,26 +91,25 @@ pub fn owner_executable(path: &Path, owner_uid: u32) -> Result<(), LoopError> {
             .any(|part| !matches!(part, Component::Normal(_)))
     {
         return Err(refusal(
-            "owner-program",
+            kind,
             format!("{} is not a plain absolute path", path.display()),
         ));
     }
     let mut parent = open(
-        "/",
-        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC,
+        anchor,
+        OFlag::O_PATH | OFlag::O_DIRECTORY | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW,
         nix::sys::stat::Mode::empty(),
     )
-    .map_err(|error| refusal("owner-program", error.to_string()))?;
+    .map_err(|error| refusal(kind, error.to_string()))?;
     for (index, part) in parts.iter().enumerate() {
-        let stat = fstat(&parent).map_err(|error| refusal("owner-program", error.to_string()))?;
-        let trusted_owner = stat.st_uid == owner_uid || stat.st_uid == 0 || stat.st_uid == 65534;
-        let sticky_root =
-            (stat.st_uid == 0 || stat.st_uid == 65534) && stat.st_mode & 0o1777 == 0o1777;
-        if !trusted_owner || (stat.st_mode & 0o022 != 0 && !sticky_root) {
+        let stat = fstat(&parent).map_err(|error| refusal(kind, error.to_string()))?;
+        if !parent_safe(&stat) {
+            let owner_detail =
+                owner_uid.map_or_else(String::new, |uid| format!(", owner uid {uid}"));
             return Err(refusal(
-                "owner-program",
+                kind,
                 format!(
-                    "{} has a replaceable parent at component {index}: uid {} mode {:04o}, owner uid {owner_uid}",
+                    "{} has a replaceable parent at component {index}: uid {} mode {:04o}{owner_detail}",
                     path.display(),
                     stat.st_uid,
                     stat.st_mode & 0o7777
@@ -97,17 +132,42 @@ pub fn owner_executable(path: &Path, owner_uid: u32) -> Result<(), LoopError> {
                 )
                 .resolve(ResolveFlag::RESOLVE_BENEATH | ResolveFlag::RESOLVE_NO_SYMLINKS),
         )
-        .map_err(|error| refusal("owner-program", format!("{}: {error}", path.display())))?;
+        .map_err(|error| refusal(kind, format!("{}: {error}", path.display())))?;
     }
-    let stat = fstat(&parent).map_err(|error| refusal("owner-program", error.to_string()))?;
+    fstat(&parent).map_err(|error| refusal(kind, error.to_string()))
+}
+
+/// Verify one platform file through link-free, nonreplaceable path components.
+///
+/// # Errors
+///
+/// Refuses a path with a link, a caller-owned or writable parent, or a file the caller can replace.
+pub fn platform_file(path: &Path, caller_uid: u32) -> Result<(), LoopError> {
+    platform_file_at(path, Path::new("/"), 0, caller_uid)
+}
+
+/// Verify the same policy beneath a chosen root and owner for isolated fixtures.
+///
+/// # Errors
+///
+/// Refuses a linked, nonregular, writable or differently owned file or parent.
+pub fn platform_file_at(
+    path: &Path,
+    anchor: &Path,
+    platform_uid: u32,
+    caller_uid: u32,
+) -> Result<(), LoopError> {
+    let stat = checked_file_at(path, anchor, "platform-file", None, |stat| {
+        stat.st_uid == platform_uid && stat.st_uid != caller_uid && stat.st_mode & 0o022 == 0
+    })?;
     if stat.st_mode & libc::S_IFMT != libc::S_IFREG
-        || stat.st_mode & 0o111 == 0
+        || stat.st_uid != platform_uid
+        || stat.st_uid == caller_uid
         || stat.st_mode & 0o022 != 0
-        || !(stat.st_uid == owner_uid || stat.st_uid == 0 || stat.st_uid == 65534)
     {
         return Err(refusal(
-            "owner-program",
-            format!("{} is not an owner-controlled executable", path.display()),
+            "platform-file",
+            format!("{} is not a protected platform file", path.display()),
         ));
     }
     Ok(())

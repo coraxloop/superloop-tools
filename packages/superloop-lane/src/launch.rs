@@ -8771,6 +8771,73 @@ mod tests {
     use crate::container_helper::ProcessPresence;
     use crate::plan::Plan;
 
+    /// ´test:unit:proxy-move-inventory-reads-launch-written-reservations-without-a-door´
+    #[test]
+    fn proxy_move_inventory_reads_launch_written_reservations_without_a_door() {
+        let fixture = tempfile::tempdir().expect("isolated home");
+        let home = fixture.path();
+        let config = home.join(".config/loops");
+        let runs = home.join(".var/loops/alpha/runs");
+        fs::create_dir_all(&config).expect("registry directory");
+        fs::create_dir_all(&runs).expect("runs directory");
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o700))
+            .expect("registry directory mode");
+        fs::set_permissions(&runs, fs::Permissions::from_mode(0o700)).expect("runs directory mode");
+        fs::write(
+            config.join("registry.toml"),
+            format!("namespace = \"org.superloop-tools.loophome.registry\"\nversion = [1, 0, 0]\nloops = [{{ name = \"alpha\", uid = 41001, launch = \"src\", runs_root = \"{}\" }}]\n", runs.display()),
+        )
+        .expect("registry");
+        fs::set_permissions(
+            config.join("registry.toml"),
+            fs::Permissions::from_mode(0o600),
+        )
+        .expect("registry mode");
+        let empty = crate::install_door::proxy_move_busy(home, "alpha").expect("empty inventory");
+        assert!(empty.is_empty(), "{empty:?}");
+
+        let plan = Plan {
+            home: home.to_path_buf(),
+            driver_dir: home.join("driver"),
+            letter: home.join("letter"),
+            document: json!({"runtime_argv":["/usr/bin/podman"]}),
+        };
+        let mut reservation = super::initial_reservation(
+            &plan,
+            "alpha",
+            "R",
+            3000,
+            &json!({}),
+            &[],
+            &plan.letter,
+            None,
+            &[],
+            crate::door::Scope::Work,
+        );
+        reservation["phase"] = json!("settled");
+        reservation["launcher_pid"] = json!(u32::MAX);
+        reservation["launcher_start"] = json!(1);
+        let path = super::reservation_path(&runs, "R");
+        super::publish_reservation(&path, &reservation).expect("settled reservation");
+        let settled =
+            crate::install_door::proxy_move_busy(home, "alpha").expect("settled inventory");
+        assert!(settled.is_empty(), "{settled:?}");
+
+        fs::remove_file(&path).expect("retired reservation");
+        let retired =
+            crate::install_door::proxy_move_busy(home, "alpha").expect("retired inventory");
+        assert!(retired.is_empty(), "{retired:?}");
+
+        reservation["phase"] = json!("started");
+        reservation["launcher_pid"] = json!(std::process::id());
+        reservation["launcher_start"] = json!(
+            crate::container_helper::process_start(std::process::id()).expect("live launcher")
+        );
+        super::publish_reservation(&path, &reservation).expect("live reservation");
+        let live = crate::install_door::proxy_move_busy(home, "alpha").expect("live inventory");
+        assert_eq!(live, vec!["run R has a live launcher"]);
+    }
+
     /// ´test:unit:interrupted-completion-requires-successful-process-ends´
     #[test]
     fn interrupted_completion_requires_successful_process_ends() {
