@@ -309,6 +309,11 @@ pub(crate) fn run_with_lane_bin(
                 "unit directory is not recorded; run install --pilot",
             )
         })?;
+    crate::install::require_repair_proxy_unit_agreement(
+        owner_home,
+        &request.loop_name,
+        &generation,
+    )?;
     let settings =
         crate::settings::Settings::read(&generation_path.with_file_name("workers.toml"))?;
     let boundary = if settings.configures("codex") {

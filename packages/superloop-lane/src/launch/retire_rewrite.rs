@@ -231,9 +231,6 @@ pub(super) fn run(
     let _mailbox = lock_retirement_mailbox(root, run, owner, request.dry_run)?;
     let path = reservation_path(root, run);
     let journal_path = root.join(format!(".retire-rewrite-{run}.json"));
-    let current = read_reservation(&path)?.ok_or_else(|| refusal("reservation absent"))?;
-    eligible(owner_home, root, request, &current)?;
-    let bytes = absences::read_bytes(&path)?.ok_or_else(|| refusal("reservation vanished"))?;
     let prior = absences::read_bytes(&journal_path)?
         .map(|bytes| {
             crate::placement::journal_bytes(&bytes, |error| refusal(format!("journal: {error}")))
@@ -242,6 +239,14 @@ pub(super) fn run(
     let resuming = prior
         .as_ref()
         .is_some_and(|journal| journal["phase"] == "pending");
+    let read = if resuming {
+        super::read_reservation_for_conversion
+    } else {
+        read_reservation
+    };
+    let current = read(&path)?.ok_or_else(|| refusal("reservation absent"))?;
+    eligible(owner_home, root, request, &current)?;
+    let bytes = absences::read_bytes(&path)?.ok_or_else(|| refusal("reservation vanished"))?;
     let plan = if let Some(journal) = &prior {
         if journal["schema"] != 1
             || !["pending", "complete"].contains(&journal["phase"].as_str().unwrap_or_default())
@@ -382,7 +387,8 @@ mod tests {
             "observer_state":"ended","observer_pid":u32::MAX-worker,"observer_start":worker,
             "harvest_agreement":{"checkpoint_index":1,"preserved_object":"a".repeat(40),"gate_object":"a".repeat(40),"instant_unix_ns":1},
             "collection":{"checkpoint_index":1,"state":"collected","instant_unix_ns":2,"planned":["."],"remaining":[],"refusal":null,"component":null,
-            "token":"a".repeat(32),"parent_identity":{"device":1,"inode":2},"home_identity":{"device":1,"inode":3}}});
+            "token":"a".repeat(32),"parent_identity":{"device":1,"inode":2},"home_identity":{"device":1,"inode":3}},
+            "rounds":[{"step":"dispatch","phase":"settled","reply_designation":{"state":"unmeasured"}}]});
         publish_reservation(&reservation_path(&root, "R"), &record).expect("predecessor");
         (home, root, request, record)
     }
@@ -430,6 +436,10 @@ mod tests {
                 .expect("read")
                 .expect("record");
             assert_eq!(
+                after["rounds"][0]["reply_designation"],
+                before["rounds"][0]["reply_designation"]
+            );
+            assert_eq!(
                 after["retirement_rewrite"]["original_collection"],
                 before["collection"]
             );
@@ -449,6 +459,10 @@ mod tests {
             .expect("reader")
             .expect("record");
             assert_eq!(archived["retirement_rewrite"], after["retirement_rewrite"]);
+            assert_eq!(
+                archived["rounds"][0]["reply_designation"],
+                before["rounds"][0]["reply_designation"]
+            );
         }
     }
 
@@ -530,21 +544,36 @@ mod tests {
         for published in [false, true] {
             let (home, root, mut request, _) = fixture(3001);
             let preview = super::super::run(home.path(), &request).expect("preview");
-            let journal = json!({"schema":1,"phase":"pending","digest":preview["preview_sha256"],"plan":preview["plan"]});
+            let mut plan = preview["plan"].clone();
+            let path = reservation_path(&root, "R");
+            plan["files"][0]["before"]["rounds"][0]
+                .as_object_mut()
+                .expect("round")
+                .remove("reply_designation");
+            publish_reservation(&path, &plan["files"][0]["before"]).expect("old-form reservation");
+            let hash = absences::hash(&absences::read_bytes(&path).expect("read").expect("bytes"));
+            plan["files"][0]["before_sha256"] = json!(&hash);
+            plan["files"][0]["after"]["rounds"][0]
+                .as_object_mut()
+                .expect("round")
+                .remove("reply_designation");
+            plan["files"][0]["after"]["retirement_rewrite"]["before_sha256"] = json!(hash);
+            let digest = node::digest(&plan);
+            let journal = json!({"schema":1,"phase":"pending","digest":digest,"plan":plan});
             publish_reservation(&root.join(".retire-rewrite-R.json"), &journal)
                 .expect("interrupted journal");
             if published {
                 publish_reservation(
                     &reservation_path(&root, "R"),
-                    &preview["plan"]["files"][0]["after"],
+                    &journal["plan"]["files"][0]["after"],
                 )
                 .expect("target published before interruption");
             }
             let resumed = super::super::run(home.path(), &request).expect("resume preview");
             assert_eq!(resumed["resuming"], true);
-            assert_eq!(resumed["preview_sha256"], preview["preview_sha256"]);
+            assert_eq!(resumed["preview_sha256"], journal["digest"]);
             request.dry_run = false;
-            request.expect_digest = preview["preview_sha256"].as_str().map(str::to_owned);
+            request.expect_digest = journal["digest"].as_str().map(str::to_owned);
             assert_eq!(
                 super::super::run(home.path(), &request).expect("resume")["complete"],
                 true

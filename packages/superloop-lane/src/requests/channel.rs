@@ -9,6 +9,7 @@ use serde_json::{Value, json};
 
 use super::{LaneError, RequestRecord, Store, problem, read_leaf, replace_leaf};
 use client::Client;
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -25,6 +26,7 @@ pub(super) fn with_test_client<T>(
 }
 
 const BINDING: &str = "requests-channel.json";
+pub(super) type ProjectionIndex<'a> = HashMap<&'a str, &'a Request>;
 
 fn lock_path(action: &str) -> &'static str {
     match action {
@@ -517,26 +519,50 @@ impl Store {
             .transpose()
     }
 
+    #[cfg(test)]
     pub(super) fn channel_project(
         &self,
         rows: &mut [RequestRecord],
         collection: Option<&Collection>,
     ) -> Result<(), LaneError> {
-        let Some(collection) = collection else {
+        let index = collection.map(Self::channel_projection_index);
+        self.channel_project_indexed(rows, index.as_ref())
+    }
+
+    pub(super) fn channel_projection_index(collection: &Collection) -> ProjectionIndex<'_> {
+        let mut index = HashMap::with_capacity(collection.requests.len());
+        for row in &collection.requests {
+            index.entry(row.id.as_str()).or_insert(row);
+        }
+        index
+    }
+
+    pub(super) fn channel_project_indexed(
+        &self,
+        rows: &mut [RequestRecord],
+        index: Option<&ProjectionIndex<'_>>,
+    ) -> Result<(), LaneError> {
+        let Some(index) = index else {
             return Ok(());
         };
         for record in rows {
             let key = common_id(&self.loop_name, record.id());
-            if let Some(row) = collection.requests.iter().find(|row| row.id == key) {
+            if let Some(row) = index.get(key.as_str()) {
                 *record = project(record, row, "unrecorded")?;
             }
         }
         Ok(())
     }
 
-    fn channel_doors(&self, collection: &Collection) -> Result<Vec<Request>, LaneError> {
+    fn channel_doors(
+        &self,
+        collection: &Collection,
+        runs: &[(String, u64, Vec<RequestRecord>)],
+        only_pending: bool,
+    ) -> Result<Vec<Request>, LaneError> {
         let mut doors = Vec::new();
-        for (_, _, records) in self.all_runs(None)? {
+        let index = Self::channel_projection_index(collection);
+        for (_, _, records) in runs {
             for record in records {
                 if !matches!(
                     record.value()["state"].as_str(),
@@ -545,10 +571,10 @@ impl Store {
                     continue;
                 }
                 let id = common_id(&self.loop_name, record.id());
-                let row = if let Some(saved) = collection.requests.iter().find(|row| row.id == id) {
-                    check_source(&record, &source(saved)?)?;
-                    let mut row = saved.clone();
-                    row.body["record"] = record.into_value();
+                let row = if let Some(saved) = index.get(id.as_str()) {
+                    check_source(record, &source(saved)?)?;
+                    let mut row = (*saved).clone();
+                    row.body["record"] = record.value().clone();
                     row
                 } else {
                     // A guarded label can answer a live workspace wait before its
@@ -562,9 +588,11 @@ impl Store {
                     {
                         continue;
                     }
-                    imported(&record, &self.loop_name)?
+                    imported(record, &self.loop_name)?
                 };
-                doors.push(row);
+                if !only_pending || row.state.pending() {
+                    doors.push(row);
+                }
             }
         }
         Ok(doors)
@@ -583,12 +611,25 @@ impl Store {
         id: Option<&str>,
         pending: bool,
     ) -> Result<Value, LaneError> {
+        self.collection_command_with_read(action, document, id, pending, |result, _| Ok(result))
+    }
+
+    #[allow(clippy::too_many_lines)]
+    pub(crate) fn collection_command_with_read(
+        &self,
+        action: &str,
+        document: Option<&Value>,
+        id: Option<&str>,
+        pending: bool,
+        render: impl FnOnce(Value, (Vec<RequestRecord>, Value, bool)) -> Result<Value, LaneError>,
+    ) -> Result<Value, LaneError> {
         let changing = !matches!(action, "status" | "list");
+        let mut initial = None;
         let guard = if changing {
             Some(self.write_lock(lock_path(action))?)
         } else {
             if read_leaf(self.state_dir(), super::LOCK_FILE, self.owner, 4096)?.is_none() {
-                self.list_with_status()?;
+                initial = Some(self.list_with_status()?);
             }
             if read_leaf(self.state_dir(), super::LOCK_FILE, self.owner, 4096)?.is_none() {
                 None
@@ -601,18 +642,36 @@ impl Store {
         }
         let client = self.bound_client()?.map_or_else(Client::configured, Ok)?;
         let collection = self.channel_owner_read(&client)?;
-        let doors = if guard.is_some() {
-            self.channel_doors(&collection)?
-        } else {
-            Vec::new()
-        };
+        let runs = guard
+            .as_ref()
+            .map(|_| self.all_runs_with_collection(None, Some(&collection)))
+            .transpose()?;
+        let doors = runs
+            .as_ref()
+            .map(|runs| {
+                self.channel_doors(&collection, runs, !changing && pending && action == "list")
+            })
+            .transpose()?
+            .unwrap_or_default();
         let now = request_core::now_ns().map_err(core)?;
         let mut input = envelope(&doors, document, id, pending, now);
         let preview = client.call("--owner-preview", action, &self.loop_name, Some(&input))?;
         let before = decode(preview["before"].clone())?;
         let mut next = decode(preview["collection"].clone())?;
         if !changing {
-            return Ok(preview["result"].clone());
+            let snapshot = runs.map_or_else(
+                || {
+                    initial.ok_or_else(|| {
+                        problem(
+                            "requests-record-refusal",
+                            "request lock changed during read",
+                        )
+                    })
+                },
+                |runs| self.list_with_status_from_runs(&runs),
+            )?;
+            drop(guard);
+            return render(preview["result"].clone(), snapshot);
         }
         let at = request_core::utc_time(now);
         let changed = project_changes(&before, &mut next, &at)?;
@@ -620,7 +679,9 @@ impl Store {
         let prior_index = if changed.is_empty() {
             Value::Null
         } else {
-            self.read_learned()?
+            self.learned_for_write_locked().unwrap_or_else(|error| {
+                json!({"unavailable":true,"reason":format!("index rebuild refused: {}", error.kind)})
+            })
         };
         if !changed.is_empty() {
             self.write_learned(
@@ -1052,6 +1113,7 @@ mod tests {
             for selected in [None, Some(&collection)] {
                 assert_projection_equivalent(&store, &records, selected);
             }
+            assert_doors_equivalent(&store, &records, &collection);
             if count != 0 {
                 let mut actual = records.clone();
                 store
@@ -1063,8 +1125,10 @@ mod tests {
                 let duplicate = imported(&records[0], "alpha").unwrap();
                 collection.requests.push(duplicate);
                 assert_projection_equivalent(&store, &records, Some(&collection));
+                assert_doors_equivalent(&store, &records, &collection);
                 collection.requests.reverse();
                 assert_projection_equivalent(&store, &records, Some(&collection));
+                assert_doors_equivalent(&store, &records, &collection);
                 let mut reversed = records.clone();
                 store
                     .channel_project(&mut reversed, Some(&collection))
@@ -1075,6 +1139,41 @@ mod tests {
                     "first match {count}"
                 );
             }
+        }
+    }
+
+    fn assert_doors_equivalent(store: &Store, records: &[RequestRecord], collection: &Collection) {
+        let runs = vec![("R".to_owned(), 1, records.to_vec())];
+        for only_pending in [false, true] {
+            let mut expected = Vec::new();
+            for record in records {
+                let id = common_id(&store.loop_name, record.id());
+                let row = collection
+                    .requests
+                    .iter()
+                    .find(|row| row.id == id)
+                    .map_or_else(
+                        || imported(record, &store.loop_name).expect("imported row"),
+                        |saved| {
+                            check_source(record, &source(saved).expect("source"))
+                                .expect("unchanged source");
+                            let mut row = saved.clone();
+                            row.body["record"] = record.value().clone();
+                            row
+                        },
+                    );
+                if !only_pending || row.state.pending() {
+                    expected.push(row);
+                }
+            }
+            let actual = store
+                .channel_doors(collection, &runs, only_pending)
+                .expect("indexed door rows");
+            assert_eq!(
+                serde_json::to_vec(&actual).expect("actual bytes"),
+                serde_json::to_vec(&expected).expect("linear bytes"),
+                "complete preview door bytes, pending={only_pending}"
+            );
         }
     }
 

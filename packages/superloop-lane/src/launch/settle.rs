@@ -1947,8 +1947,8 @@ mod tests {
         record["helper_end"] = json!({"state":"failed","status":"exit status: 2","parent_pid":record["launcher_pid"],"parent_start":record["launcher_start"]});
         record["readback_end"] = Value::Null;
         record["rounds"] = json!([
-            {"step":"dispatch","phase":"failed","ended_by":"by-report","reply":null,"settle_attempts":[{"phase":"complete","preview_sha256":"a".repeat(64),"detail":null}]},
-            {"step":"work-1","phase":"running","driver_dir":directory,"fresh_thread":true,"ended_by":null,"letter":"work-1.md","placed_at_unix_ns":1,"budget_seconds":10800,"in_round_letters":[]}
+            {"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"failed","ended_by":"by-report","reply":null,"settle_attempts":[{"phase":"complete","preview_sha256":"a".repeat(64),"detail":null}]},
+            {"reply_designation":{"state":"unmeasured"},"step":"work-1","phase":"running","driver_dir":directory,"fresh_thread":true,"ended_by":null,"letter":"work-1.md","placed_at_unix_ns":1,"budget_seconds":10800,"in_round_letters":[]}
         ]);
         record["mail_birth"] =
             json!({"name":"fixture","uid":owner,"reservation":"superloop-lane:R"});
@@ -3084,6 +3084,7 @@ else:
             dead_resume_fixture_in("started", parent.parent().expect("protected parent"));
         let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
         let h = fixture.path();
+        install_agreeing_vendor_unit(h);
         let owner = Uid::effective().as_raw();
         let root = File::open(h).expect("fixture root");
         let _guard = home::activate_handed_home(h, &root, owner).expect("private custody");
@@ -3432,7 +3433,7 @@ else:
             .as_array_mut()
             .expect("rounds")
             .push(json!({
-                "step":"work-2","phase":"settled","reply":{"bytes":6},"settle_attempts":[]
+                "reply_designation":{"state":"unmeasured"},"step":"work-2","phase":"settled","reply":{"bytes":6},"settle_attempts":[]
             }));
         super::super::publish_reservation(&path, &continued).expect("settled continuation");
         let refusal = super::super::rotation::run_with_host_root(h, &rotate, h, owner)
@@ -3481,10 +3482,35 @@ printf '{{"thread_id":null}}\n'
         .expect("fake container entry");
     }
 
+    fn install_agreeing_vendor_unit(home: &Path) {
+        let unit_dir = home.join(".config/systemd/user");
+        std::fs::create_dir_all(&unit_dir).expect("unit directory");
+        std::fs::set_permissions(&unit_dir, std::fs::Permissions::from_mode(0o700))
+            .expect("unit directory mode");
+        let unit = unit_dir.join("superloop-lane-vendor@alpha.service");
+        let text = include_str!("../../data/vendor-proxy.service.in")
+            .replace("@LANE_BIN@", "/usr/bin/true")
+            .replace("@PROXY_BIN@", "/fixture/proxy");
+        std::fs::write(&unit, text).expect("recognized vendor unit");
+        std::fs::set_permissions(&unit, std::fs::Permissions::from_mode(0o644))
+            .expect("vendor unit mode");
+        let generation = home.join(".config/loops/alpha/install-generation.json");
+        std::fs::create_dir_all(generation.parent().expect("generation directory"))
+            .expect("create generation directory");
+        std::fs::write(
+            &generation,
+            json!({"schema":1,"phase":"complete","loop":"alpha","unit_dir":unit_dir,"proxy_bin":"/fixture/proxy"}).to_string(),
+        )
+        .expect("generation");
+        std::fs::set_permissions(&generation, std::fs::Permissions::from_mode(0o600))
+            .expect("generation mode");
+    }
+
     fn resume_threadless_dispatch_through_entry() {
         let (fixture, plan, mut request) = dead_resume_fixture("started");
         let _mail_standin = crate::build::mail_standin::register(&request.podman_bin);
         let h = fixture.path();
+        install_agreeing_vendor_unit(h);
         let owner = Uid::effective().as_raw();
         let root = File::open(h).expect("root");
         let _guard = home::activate_handed_home(h, &root, owner).expect("private fixture");
@@ -3602,6 +3628,7 @@ printf '{{"thread_id":null}}\n'
     #[allow(clippy::too_many_lines)]
     fn recovered_threadless_continuation(recover_again: bool, failed_dispatch: bool) {
         let (fixture, plan, mut request) = recovery_fixture_in(&std::env::temp_dir());
+        install_agreeing_vendor_unit(fixture.path());
         let owner = Uid::effective().as_raw();
         let root = File::open(fixture.path()).expect("fixture root");
         let _guard = home::activate_handed_home(fixture.path(), &root, owner)
@@ -3921,7 +3948,7 @@ printf '{{"thread_id":null}}\n'
     }
 
     fn failed_record(worker_uid: u32) -> Value {
-        json!({"schema":1,"phase":"failed","active_round":"work","worker_uid":worker_uid,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID,"driver_entry_start":1,"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},"settlement_uncertain":false,"reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},"readback_end":"settle-evidence: old refusal","rounds":[{"step":"work","phase":"failed"}]})
+        json!({"schema":1,"phase":"failed","active_round":"work","worker_uid":worker_uid,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID,"driver_entry_start":1,"driver_end":{"state":"completed"},"helper_end":{"state":"completed"},"observation_end":"completed","observer_state":"not-started","observer_end":{"state":"not-started","socket":{"state":"not-applicable"}},"settlement_uncertain":false,"reaping":{"state":"verified-empty","container_payload":{"state":"absent"}},"readback_end":"settle-evidence: old refusal","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"work","phase":"failed"}]})
     }
 
     fn fail_completed_round(plan: &crate::plan::Plan, record: &mut Value) {
@@ -3932,7 +3959,7 @@ printf '{{"thread_id":null}}\n'
             .expect("active step")
             .to_owned();
         let directory = record["rounds"][0]["driver_dir"].clone();
-        record["rounds"] = json!([{"step":step,"budget_seconds":900,"letter":format!("{step}.md"),"phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[]}]);
+        record["rounds"] = json!([{"step":step,"budget_seconds":900,"letter":format!("{step}.md"),"phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[],"reply_designation":{"state":"unmeasured"}}]);
         let reply = plan.driver_dir.join(format!("reply-{step}.txt"));
         if reply.exists() {
             std::fs::remove_file(&reply).expect("absent reply");
@@ -4081,7 +4108,8 @@ printf '{{"thread_id":null}}\n'
         )
         .expect("failed report");
         record["active_round"] = json!(step);
-        record["rounds"] = json!([{"driver_dir":directory}]);
+        record["rounds"] =
+            json!([{"driver_dir":directory,"reply_designation":{"state":"unmeasured"}}]);
         record["mail"] = json!([]);
         record["driver_end"] = json!({"state":"completed","successful":report_case});
         record["helper_end"] = json!({"state":"completed"});
@@ -4101,7 +4129,7 @@ printf '{{"thread_id":null}}\n'
             )
             .expect("retained thread event");
             record["rounds"].as_array_mut().expect("rounds").insert(0,
-                json!({"step":"dispatch","driver_dir":directory,"phase":"settled","ended_by":"by-report","reply":{"bytes":6},"settle_attempts":[]}));
+                json!({"step":"dispatch","driver_dir":directory,"phase":"settled","ended_by":"by-report","reply":{"bytes":6},"settle_attempts":[],"reply_designation":{"state":"unmeasured"}}));
             super::super::publish_reservation(&path, &record).expect("prior dispatch retained");
         }
         let owner = Uid::effective().as_raw();
@@ -4167,6 +4195,13 @@ printf '{{"thread_id":null}}\n'
             .expect("read")
             .expect("settled record");
         assert_eq!(saved["rounds"][round_index]["phase"], "failed");
+        assert!(
+            saved["rounds"]
+                .as_array()
+                .expect("settled rounds")
+                .iter()
+                .all(|round| round["reply_designation"] == json!({"state":"unmeasured"}))
+        );
         assert!(saved["rounds"][round_index]["reply"].is_null());
         assert_eq!(
             saved["rounds"][round_index]["settle_attempts"][0]["phase"],
@@ -4287,6 +4322,7 @@ printf '{{"thread_id":null}}\n'
     }
 
     fn launch_after_public_settle(h: &Path, plan: &crate::plan::Plan, settled: &Value) {
+        install_agreeing_vendor_unit(h);
         let _mail_standin = crate::build::mail_standin::register(&h.join("runtime"));
         // Replace the container runtime, and with it the private _inspect-round and
         // _settle-evidence halves: launch still publishes the next round, starts and
@@ -4544,7 +4580,7 @@ esac
             let _unwritten = fields.remove(field);
         }
         record["phase"] = json!("started");
-        record["rounds"] = json!([{"step":"work","budget_seconds":900,"letter":"work.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[]}]);
+        record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"work","budget_seconds":900,"letter":"work.md","phase":"running","driver_dir":directory,"ended_by":null,"placed_at_unix_ns":1,"in_round_letters":[]}]);
         super::super::publish_reservation(&path, record).expect("running round");
         let driver_end = json!({"state":"completed","successful":false,"detail":"exit 1"});
         let helper_end = json!({"state":"completed","successful":true});
@@ -5008,7 +5044,7 @@ esac
         let mut record = super::super::read_reservation(&path)
             .expect("read reservation")
             .expect("reservation");
-        let prior = json!({"step":"dispatch","phase":"settled","driver_dir":record["rounds"][0]["driver_dir"]});
+        let prior = json!({"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","driver_dir":record["rounds"][0]["driver_dir"]});
         record["rounds"]
             .as_array_mut()
             .expect("rounds")

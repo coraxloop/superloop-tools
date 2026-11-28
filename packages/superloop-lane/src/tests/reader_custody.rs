@@ -943,7 +943,8 @@ os.chmod(a,0o600);os.chown(a,3000,3000)
 /// Panics if production follow or context receipt reopens configuration or loses bounded evidence.
 fn follow_round(home: &Path, runs: &Path, record: &mut Value) {
     record["rounds"] = json!([{"step":"dispatch","phase":"failed",
-        "settlement_error":"fixture-only","driver_dir":runs.join("R/dispatch")}]);
+        "settlement_error":"fixture-only","driver_dir":runs.join("R/dispatch"),
+        "reply_designation":{"state":"unmeasured"}}]);
     crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
         .expect("follow reservation");
     let step = runs.join("R/dispatch");
@@ -1021,7 +1022,8 @@ fn seed_inspection(home: &Path, runs: &Path, record: &mut Value) {
     let step = runs.join("R/fixture-dispatch");
     record["thread_id"] = json!("fixture-thread");
     record["phase"] = json!("preparing");
-    record["rounds"] = json!([{"step":"dispatch","phase":"settled","driver_dir":step}]);
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled","driver_dir":step,
+        "reply_designation":{"state":"unmeasured"}}]);
     crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
         .expect("inspection reservation");
     let script = r#"
@@ -1049,10 +1051,10 @@ for name,data in [('events.jsonl','{"type":"thread.started","thread_id":"fixture
 fn inspect_record(home: &Path, runs: &Path, record: &mut Value) {
     seed_inspection(home, runs, record);
     record["active_round"] = json!("work");
-    record["rounds"]
-        .as_array_mut()
-        .expect("rounds")
-        .push(json!({"step":"work","phase":"preparing","budget_seconds":60}));
+    record["rounds"].as_array_mut().expect("rounds").push(
+        json!({"step":"work","phase":"preparing","budget_seconds":60,
+            "reply_designation":{"state":"unmeasured"}}),
+    );
     record["mail"] = json!([{"step":"work","delivery":"fixture-delivery"}]);
     crate::launch::publish_reservation(&runs.join(".reservation-R.json"), record)
         .expect("recording reservation");
@@ -1125,7 +1127,8 @@ fn rotation_cases(home: &Path, runs: &Path, record: &mut Value) {
     record["phase"] = json!("settled");
     record["rounds"] = json!([{"step":"dispatch","phase":"settled",
         "driver_dir":runs.join("R/fixture-dispatch"),
-        "reply":{"bytes":reply.len(),"sha256":reply_hash}}]);
+        "reply":{"bytes":reply.len(),"sha256":reply_hash},
+        "reply_designation":{"state":"unmeasured"}}]);
     record["initial_brief"] = json!({"bytes":brief.len(),"sha256":brief_hash});
     let path = runs.join(".reservation-R.json");
     crate::launch::publish_reservation(&path, record).expect("handover record");
@@ -1219,7 +1222,8 @@ fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
     let source: Value = serde_json::from_slice(&output.stdout).expect("measured seed identity");
     let object = source["seed"].as_str().expect("seed object").to_owned();
     record["phase"] = json!("settled");
-    record["rounds"] = json!([{"step":"dispatch","phase":"settled","ended_by":"by-report"}]);
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled","ended_by":"by-report",
+        "reply_designation":{"state":"unmeasured"}}]);
     record["declared_sources"] = json!([source]);
     for key in [
         "checkpoints",
@@ -1251,6 +1255,15 @@ fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
         );
         let report: Value = serde_json::from_slice(&output.stdout).expect("production report");
         assert_eq!(report["command"], operation);
+        let saved: Value = serde_json::from_slice(
+            &fs::read(runs.join(".reservation-R.json")).expect("published reservation"),
+        )
+        .expect("reservation JSON");
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"}),
+            "{operation} dropped the member"
+        );
         if operation == "checkout" {
             assert_eq!(
                 fs::read(checkout_parent(home).join("checkout/letter")).expect("checkout"),
@@ -1265,6 +1278,90 @@ fn settled_readers(home: &Path, runs: &Path, record: &mut Value) {
     assert_eq!(record["checkpoints"][0]["bares"][0]["object"], object);
     assert_eq!(record["checkouts"][0]["object"], object);
     assert_eq!(record["imports"][0]["object"], object);
+    public_settled_readers(home, runs);
+}
+
+/// # Panics
+/// Panics if the public checkpoint or checkout fails to retain the reply member.
+fn public_settled_readers(home: &Path, runs: &Path) {
+    let library = home.join("report-custody.so");
+    let compiled = std::process::Command::new("/usr/bin/cc")
+        .args(["-shared", "-fPIC", "-o"])
+        .arg(&library)
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/report_custody.c"))
+        .arg("-ldl")
+        .output()
+        .expect("compile ancestry fixture");
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    for (operation, args) in [
+        (
+            "checkpoint",
+            vec!["checkpoint".to_owned(), "alpha".into(), "R".into()],
+        ),
+        (
+            "checkout",
+            vec![
+                "checkout".to_owned(),
+                "alpha".into(),
+                "R".into(),
+                "--repo".into(),
+                "tools".into(),
+                "--into".into(),
+                checkout_parent(home)
+                    .join("checkout-public")
+                    .display()
+                    .to_string(),
+            ],
+        ),
+    ] {
+        let binary = runtime_preparation::binary();
+        let member = if operation == "checkpoint" {
+            "checkpoints"
+        } else {
+            "checkouts"
+        };
+        let before: Value = serde_json::from_slice(
+            &fs::read(runs.join(".reservation-R.json")).expect("before public command"),
+        )
+        .expect("before JSON");
+        let prior = before[member].as_array().expect("prior rows").len();
+        // Model only the protected temporary ancestry. The named run is absent,
+        // so the command and its private child read the real reservation bytes.
+        let output = std::process::Command::new(&binary)
+            .args(&args)
+            .env("HOME", home)
+            .env("LD_PRELOAD", &library)
+            .env("REPORT_FIXTURE_RUN", runs.join("never-created"))
+            .env("REPORT_FIXTURE_READABLE", "1")
+            .output()
+            .expect("public command");
+        assert!(
+            output.status.success(),
+            "{operation}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let report: Value = serde_json::from_slice(&output.stdout).expect("public result");
+        assert_eq!(report["command"], operation);
+        let saved: Value = serde_json::from_slice(
+            &fs::read(runs.join(".reservation-R.json")).expect("public reservation"),
+        )
+        .expect("reservation JSON");
+        assert_eq!(
+            saved[member].as_array().expect("published rows").len(),
+            prior + 1
+        );
+        for round in saved["rounds"].as_array().expect("round rows") {
+            assert_eq!(
+                round["reply_designation"],
+                json!({"state":"unmeasured"}),
+                "{operation} dropped the member"
+            );
+        }
+    }
 }
 
 /// # Panics

@@ -21,6 +21,41 @@ fn designation_member(round: &Value) -> DesignationMember {
     }
 }
 
+fn started_without_writer_identity(record: &Value) -> bool {
+    record["phase"] == "started"
+        && ["launcher_pid", "driver_entry_pid", "helper_pid"]
+            .iter()
+            .any(|key| record[*key].is_null())
+}
+
+fn retirement_command(record: &Value, loop_name: &str, run: &str, action: &str) -> String {
+    let flags = record["retirement_absence_plan"]["flags"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let options = if flags.is_empty() {
+        String::new()
+    } else {
+        format!(" {flags}")
+    };
+    format!("superloop-lane retire {loop_name} {run}{options} {action}")
+}
+
+fn unrecorded_writer_blocker(record: &Value) -> Option<String> {
+    match reaping::check_unsettled_driver(record) {
+        Ok(reaping::UnsettledDriverCheck::Absent) => None,
+        Ok(reaping::UnsettledDriverCheck::Unreadable(error)) => Some(format!(
+            "Report evidence cannot be read ({error}); retirement cannot establish absence and no command of this program converts the row. Retain the record and its recovery evidence for owner repair."
+        )),
+        Err(error) => Some(format!(
+            "Retirement refuses this run ({error}), while strict launch recovery requires a converted row; no command of this program converts it. Retain the record and its recovery evidence for owner repair."
+        )),
+    }
+}
+
 fn root_entries(root: &Path) -> Result<Vec<(String, PathBuf)>, LaneError> {
     let mut entries = fs::read_dir(root)
         .map_err(|error| LaneError::input("census-root", format!("{}: {error}", root.display())))?
@@ -75,6 +110,40 @@ struct DesignationCounts {
 }
 
 impl DesignationCounts {
+    fn preparing(&mut self, root: &Path, record: &Value, loop_name: &str, owner: u32) {
+        if record["phase"] != "preparing" {
+            return;
+        }
+        let run = record["run"].as_str().unwrap_or_default();
+        let lease = match super::retire::probe_retirement_lease(root, run, owner) {
+            Ok(Some(_)) => "unheld",
+            Ok(None) => "absent",
+            Err(error) if error.kind == "retire-busy" => return,
+            Err(error) => {
+                self.blockers.push(json!({"kind":"preparing-lease-unmeasured","run":run,
+                    "next_command":null,"clears_by":format!(
+                        "The preparation lease cannot be measured ({error}); inspect the run before retirement."
+                    )}));
+                return;
+            }
+        };
+        let flag = if lease == "absent" {
+            " --confirm-missing-lease"
+        } else {
+            ""
+        };
+        if lease == "absent" && record["launcher_pid"].is_null() {
+            self.blockers.push(json!({"kind":"preparing-without-lease-or-launcher","run":run,
+                "lease":lease,"next_command":null,
+                "clears_by":"Neither a lease nor a launcher identity is recorded, so retirement cannot prove this preparation absent and no command of this program converts it; any old-form row it holds keeps the census above zero. Retain the record and its recovery evidence for its owner's repair."}));
+            return;
+        }
+        self.blockers.push(json!({"kind":"preparing-without-launch","run":run,
+            "lease":lease,
+            "next_command":format!("superloop-lane retire {loop_name} {run}{flag} --dry-run"),
+            "clears_by":format!("Inspect the recovery evidence and confirmation flags in the retirement preview; apply with superloop-lane retire {loop_name} {run}{flag} --expect-digest HEX, carrying before --expect-digest any other confirmation flag that preview needed. Then run superloop-lane census rewrite-replies {loop_name} --dry-run and apply its preview_sha256 with superloop-lane census rewrite-replies {loop_name} --expect-digest HEX.")}));
+    }
+
     fn row(&mut self, record: &Value, retired: bool, loop_name: &str) {
         let run = record["run"].as_str().unwrap_or_default();
         let mut absent = 0;
@@ -94,11 +163,52 @@ impl DesignationCounts {
             self.live_invalid_member += invalid;
         }
         if absent > 0 {
+            let missing_writer = !retired && started_without_writer_identity(record);
+            let blocked_writer = missing_writer
+                .then(|| unrecorded_writer_blocker(record))
+                .flatten();
+            let no_route = !retired
+                && self.blockers.iter().any(|row| {
+                    row["run"] == run && row["kind"] == "preparing-without-lease-or-launcher"
+                });
+            let first = if !retired && record["phase"] == "preparing" {
+                self.blockers
+                    .iter()
+                    .find(|row| row["run"] == run && row["kind"] == "preparing-without-launch")
+                    .and_then(|row| row["next_command"].as_str())
+                    .map(str::to_owned)
+                    .unwrap_or_default()
+            } else if blocked_writer.is_some() {
+                String::new()
+            } else if (!retired && record["phase"] == "retiring") || missing_writer {
+                retirement_command(record, loop_name, run, "--dry-run")
+            } else {
+                format!("superloop-lane census rewrite-replies {loop_name} --dry-run")
+            };
+            let guidance = if no_route {
+                "Neither a lease nor a launcher identity is recorded; no command of this program converts this preparation. Retain its recovery evidence for its owner's repair.".to_owned()
+            } else if let Some(reason) = blocked_writer {
+                reason
+            } else if first.is_empty() {
+                "Wait for the live launch to finish, or inspect the preparation blocker before repeating the census.".to_owned()
+            } else if missing_writer || (!retired && record["phase"] == "retiring") {
+                "Preview and apply the named retirement with its confirmation flags; then preview and apply the reply-row rewrite to its retired row.".to_owned()
+            } else if !retired && record["phase"] == "started" {
+                "After the recorded writers are absent, convert the row; then follow strict launch recovery for an interrupted settlement, or retire the run if no settlement was interrupted.".to_owned()
+            } else if !retired && record["phase"] == "preparing" {
+                "Retire the run using the preview's confirmations, then preview the reply-row rewrite and replace HEX with its preview_sha256.".to_owned()
+            } else {
+                "Replace HEX with preview_sha256 from the dry run.".to_owned()
+            };
             self.blockers.push(json!({"kind":"rounds-without-member","run":run,
                 "retired":retired,"count":absent,
-                "next_command":format!("superloop-lane census rewrite-replies {loop_name} --dry-run"),
-                "apply_command":format!("superloop-lane census rewrite-replies {loop_name} --expect-digest HEX"),
-                "then":"Replace HEX with preview_sha256 from the dry run."}));
+                "next_command":if first.is_empty() { Value::Null } else { json!(&first) },
+                "apply_command":if first.is_empty() { Value::Null } else if (!retired && record["phase"] == "retiring") || missing_writer {
+                    json!(retirement_command(record, loop_name, run, "--expect-digest HEX"))
+                } else {
+                    json!(format!("superloop-lane census rewrite-replies {loop_name} --expect-digest HEX"))
+                },
+                "then":guidance}));
         }
         if invalid > 0 {
             self.blockers.push(json!({"kind":"rounds-with-invalid-member","run":run,
@@ -120,21 +230,10 @@ impl DesignationCounts {
         }
         if !retired && record.get("retirement_absence_plan").is_some() {
             self.pending_absence_plans += 1;
-            let flags = record["retirement_absence_plan"]["flags"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(" ");
-            let options = if flags.is_empty() {
-                String::new()
-            } else {
-                format!(" {flags}")
-            };
-            self.blockers.push(json!({"kind":"pending-absence-plan","run":run,
-                "next_command":format!("superloop-lane retire {loop_name} {run}{options} --dry-run"),
-                "apply_command":format!("superloop-lane retire {loop_name} {run}{options} --expect-digest HEX"),
+            self.blockers
+                .push(json!({"kind":"pending-absence-plan","run":run,
+                "next_command":retirement_command(record, loop_name, run, "--dry-run"),
+                "apply_command":retirement_command(record, loop_name, run, "--expect-digest HEX"),
                 "then":"Replace HEX with the preview_sha256 from the dry run."}));
         }
     }
@@ -253,8 +352,8 @@ impl DesignationCounts {
                                 "node rewrite path escapes runs root",
                             ));
                         }
-                        let row =
-                            super::read_reservation_checked(recorded, false)?.ok_or_else(|| {
+                        let row = super::read_reservation_for_conversion_checked(recorded, false)?
+                            .ok_or_else(|| {
                                 LaneError::input(
                                     "census-record",
                                     format!("{} vanished", recorded.display()),
@@ -599,7 +698,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                     format!("{} has an invalid run name", path.display()),
                 ));
             }
-            let record = read_reservation(&path)
+            let record = read_reservation_for_conversion(&path)
                 .map_err(|error| LaneError::input("census-record", error.line()))?
                 .ok_or_else(|| {
                     LaneError::input("census-record", format!("{} vanished", path.display()))
@@ -619,6 +718,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                     owner_home, root, loop_name, &path, &record,
                 )?);
             }
+            designation_counts.preparing(root, &record, loop_name, owner);
             designation_counts.row(&record, false, loop_name);
             let due = credential_refresh(&runs, run, owner)?;
             reservations.push(row(
@@ -631,7 +731,7 @@ fn run_with(owner_home: &Path, loop_name: &str, migration: bool) -> Result<Value
                 &due,
             )?);
         } else if retired_name(&name) {
-            let record = read_reservation(&path)
+            let record = read_reservation_for_conversion(&path)
                 .map_err(|error| LaneError::input("census-record", error.line()))?
                 .ok_or_else(|| {
                     LaneError::input("census-record", format!("{} vanished", path.display()))
@@ -1057,6 +1157,76 @@ mod tests {
                 "state":"unmeasured","reason":"historical-envelope:four-key-run-refusals",
                 "expires_unix":null,"refresh_due_unix":null,"evidence_state":"published","refused":null
             })
+        );
+        let live_path = reservation_path(&root, "R");
+        let mut stranded = read_reservation_for_conversion(&live_path)
+            .expect("reservation read")
+            .expect("reservation");
+        stranded["phase"] = json!("preparing");
+        stranded["launcher_pid"] = Value::Null;
+        stranded["launcher_start"] = Value::Null;
+        publish_reservation(&live_path, &stranded).expect("stranded preparation");
+        let absent = run(home, "alpha").expect("absent lease census");
+        assert!(
+            absent["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["kind"] == "preparing-without-lease-or-launcher"
+                    && row["run"] == "R"
+                    && row["next_command"].is_null()
+                    && row["clears_by"].as_str().is_some_and(
+                        |text| text.contains("no command of this program converts it")
+                    ))
+        );
+        let lease = root.join(".prepare-R.lock");
+        fs::write(&lease, b"").expect("unheld lease");
+        fs::set_permissions(&lease, fs::Permissions::from_mode(0o600)).expect("lease mode");
+        let unheld = run(home, "alpha").expect("unheld lease census");
+        assert!(
+            unheld["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["kind"] == "preparing-without-launch"
+                    && row["run"] == "R"
+                    && row["next_command"] == "superloop-lane retire alpha R --dry-run")
+        );
+        let held = super::retire::probe_retirement_lease(&root, "R", Uid::effective().as_raw())
+            .expect("probe lease")
+            .expect("lease");
+        let busy = run(home, "alpha").expect("held lease census");
+        assert!(
+            !busy["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["run"] == "R" && row["kind"] == "preparing-without-launch")
+        );
+        assert!(
+            !busy["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["run"] == "R" && row["kind"] == "preparing-lease-unmeasured")
+        );
+        drop(held);
+        fs::set_permissions(&lease, fs::Permissions::from_mode(0o644))
+            .expect("unmeasurable lease mode");
+        let unmeasured = run(home, "alpha").expect("unmeasurable lease census");
+        assert!(
+            unmeasured["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["run"] == "R" && row["kind"] == "preparing-lease-unmeasured")
+        );
+        assert!(
+            !unmeasured["reply_designation_readiness"]["blockers"]
+                .as_array()
+                .expect("blockers")
+                .iter()
+                .any(|row| row["run"] == "R" && row["kind"] == "preparing-without-launch")
         );
         let rewrite = root.join(".retire-rewrite-R.json");
         publish_reservation(&rewrite, &json!({"schema":1,"phase":"unknown"}))

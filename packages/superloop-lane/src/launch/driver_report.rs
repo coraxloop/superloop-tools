@@ -41,7 +41,15 @@ pub(crate) fn read(owner_home: &Path, record: &Value) -> Result<Value, LaneError
     if FIXTURE_READER.with(std::cell::Cell::get) {
         return fixture_read(record);
     }
-    request(owner_home, record, false)
+    request(owner_home, record, false, false)
+}
+
+pub(super) fn read_for_retirement(owner_home: &Path, record: &Value) -> Result<Value, LaneError> {
+    #[cfg(test)]
+    if FIXTURE_READER.with(std::cell::Cell::get) {
+        return fixture_read(record);
+    }
+    request(owner_home, record, false, true)
 }
 
 pub(super) fn locks(owner_home: &Path, record: &Value) -> Result<Value, LaneError> {
@@ -49,10 +57,15 @@ pub(super) fn locks(owner_home: &Path, record: &Value) -> Result<Value, LaneErro
     if FIXTURE_READER.with(std::cell::Cell::get) {
         return super::retire::proof::fixture_locks(record);
     }
-    request(owner_home, record, true)
+    request(owner_home, record, true, true)
 }
 
-fn request(owner_home: &Path, record: &Value, locks: bool) -> Result<Value, LaneError> {
+fn request(
+    owner_home: &Path,
+    record: &Value,
+    locks: bool,
+    retirement: bool,
+) -> Result<Value, LaneError> {
     let owner = Uid::effective().as_raw();
     let run = record["run"].as_str().ok_or_else(invalid)?;
     let loop_name = record["loop"].as_str().ok_or_else(invalid)?;
@@ -60,7 +73,11 @@ fn request(owner_home: &Path, record: &Value, locks: bool) -> Result<Value, Lane
     let root = directory.parent().ok_or_else(invalid)?;
     let verified_home = home::verify_host_prefix_from(Path::new("/"), owner_home, owner, 0)?;
     let runs = home::verify_host_launch_root(Path::new("/"), owner_home, root, owner, 0)?;
-    let (current, identity) = super::checkout::read_record_bound(&runs, run, owner)?;
+    let (current, identity) = if retirement {
+        super::checkout::read_record_bound_for_conversion(&runs, run, owner)?
+    } else {
+        super::checkout::read_record_bound(&runs, run, owner)?
+    };
     if current != *record {
         return Err(private_error(
             "reservation changed before private report read",
@@ -80,6 +97,8 @@ fn request(owner_home: &Path, record: &Value, locks: bool) -> Result<Value, Lane
     argv.extend(private_argv(owner_home, loop_name, run, &identity)?);
     if locks {
         argv.push("--locks".into());
+    } else if retirement {
+        argv.push("--retirement".into());
     }
     let output = build::run_checked_with_private_launch(
         program,
@@ -162,7 +181,12 @@ pub(super) fn private_argv(
 /// Refuses missing namespace authority, changed reservations or invalid report evidence.
 pub fn private(args: &[String]) -> Result<Value, LaneError> {
     let locks = args.last().is_some_and(|word| word == "--locks");
-    let args = if locks { &args[..args.len() - 1] } else { args };
+    let retirement = locks || args.last().is_some_and(|word| word == "--retirement");
+    let args = if retirement {
+        &args[..args.len() - 1]
+    } else {
+        args
+    };
     let [
         command,
         loop_name,
@@ -189,7 +213,11 @@ pub fn private(args: &[String]) -> Result<Value, LaneError> {
         ));
     }
     let (root, runs) = home::private_runs()?;
-    let (record, identity) = super::checkout::read_record_bound(&runs, run, 0)?;
+    let (record, identity) = if retirement {
+        super::checkout::read_record_bound_for_conversion(&runs, run, 0)?
+    } else {
+        super::checkout::read_record_bound(&runs, run, 0)?
+    };
     if identity != *expected
         || record["loop"] != *loop_name
         || record["run"] != *run
@@ -441,5 +469,39 @@ mod tests {
                 .expect("held report"),
             original
         );
+    }
+
+    /// A long start list stays inside the boxed report reader's byte and field bounds.
+    /// # Panics
+    /// Panics only if the fixture cannot be written or the reader rejects the bounded report.
+    /// ´test:unit:boxed-report-accepts-bounded-session-load´
+    #[test]
+    fn boxed_report_accepts_bounded_session_load() {
+        let root = tempfile::tempdir().expect("fixture");
+        let directory = root.path().join("dispatch");
+        std::fs::create_dir(&directory).expect("directory");
+        let mut names = vec![String::new(), "x".repeat(100)];
+        names.extend((0..100).map(|index| format!("plugin-{index:03}")));
+        let evidence = json!({"state":"measured","plugins":names,"mcp_servers":["", "server-a", "server-b", "server-c"]});
+        let mut report = format!(
+            "RUN-REPORT lane=dispatch exit=0 verdict=SUCCESS dir={}\n",
+            directory.display()
+        )
+        .into_bytes();
+        lane_lifecycle::annotate_session_load(&mut report, &evidence, true);
+        assert!(report.len() <= 4096);
+        let line = String::from_utf8(report.clone()).expect("status UTF-8");
+        assert!(
+            line.contains(" loaded_plugins=plugin-000,plugin-001 "),
+            "{line}"
+        );
+        assert!(line.contains("loaded_plugins_omitted=100"), "{line}");
+        assert!(line.contains("loaded_mcp_servers_omitted=2"), "{line}");
+        assert!(!line.contains("loaded_mcp_servers=,"), "{line}");
+        std::fs::write(directory.join("run-report.txt"), report).expect("report");
+        let held: OwnedFd = File::open(&directory).expect("held directory").into();
+        let last = json!({"step":"dispatch","driver_dir":directory});
+        read_directory(&held, &directory, &last, Uid::effective().as_raw())
+            .expect("host reader accepts bounded report");
     }
 }

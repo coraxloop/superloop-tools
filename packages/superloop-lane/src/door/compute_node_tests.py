@@ -67,6 +67,23 @@ wrappers = []
 compute_environment = {"RUSTUP_HOME": "/opt/fixture/rustup", "PATH": "/opt/fixture/tools:/opt/fixture/cargo/bin:/usr/bin:/bin", "PUBLIC_PACK_TEST_LINTER": "/opt/fixture/tools/superloop-lint"}
 
 
+def gone_or_zombie(process):
+    # A disappearing proc entry is an exited process, including when it goes
+    # away during this read. Other read failures still fail the fixture.
+    try:
+        return process.read_text().rsplit(") ", 1)[1][0] == "Z"
+    except (FileNotFoundError, ProcessLookupError):
+        return True
+
+
+with patch.object(Path, "read_text", side_effect=ProcessLookupError(3, "No such process")):
+    assert gone_or_zombie(Path("/proc/fixture/stat"))
+with patch.object(Path, "read_text", return_value="1 (fixture) S 0"):
+    assert not gone_or_zombie(Path("/proc/fixture/stat"))
+with patch.object(Path, "read_text", return_value="1 (fixture) Z 0"):
+    assert gone_or_zombie(Path("/proc/fixture/stat"))
+
+
 def git(*words, cwd=seed):
     return real_run(["/usr/bin/git", *words], cwd=cwd, check=True,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE).stdout.decode().strip()
@@ -321,7 +338,10 @@ class ControlledChild:
         return self
     def __exit__(self, *args):
         if self.child.poll() is None:
-            real_killpg(self.pid, signal.SIGKILL)
+            try:
+                real_killpg(self.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
         return self.child.__exit__(*args)
     def wait(self, timeout=None):
         if not self.first:
@@ -397,7 +417,7 @@ for mode, expected in [("yes", 137), ("no", 124), ("outer", 124),
         assert b"node preparation deadline" in result.stderr, result.stderr
         wrapper_pid = int(Path(str(mirror) + ".pid").read_text())
         process = Path(f"/proc/{wrapper_pid}/stat")
-        assert not process.exists() or process.read_text().split(") ", 1)[1][0] == "Z"
+        assert gone_or_zombie(process)
         with (root / "lanes/R.lock").open("a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
 print("node cases=20: original 13, ignored output, interrupted unborn HEAD, interrupted default HEAD, early 124, early 137, outer TERM kills wrapper group, no-report measured child")
@@ -506,14 +526,38 @@ def stop_held(descriptor):
         os.close(descriptor)
 
 
+def stop_route(child):
+    # The group can exit between poll and the cleanup signal. Waiting on the
+    # child still reaps what this fixture started; ESRCH means no group to end.
+    if child.poll() is None:
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        child.wait(timeout=5)
+
+
+class ExitedBeforeCleanupSignal:
+    pid = 100000003
+
+    def poll(self):
+        return None
+
+    def wait(self, timeout):
+        assert timeout == 5
+        return 0
+
+
+with patch("os.killpg", side_effect=ProcessLookupError(3, "No such process")):
+    stop_route(ExitedBeforeCleanupSignal())
+
+
 def finish_route(child):
     try:
         child.wait(timeout=25)
         return child.returncode, child.stderr.read()
     finally:
-        if child.poll() is None:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait(timeout=5)
+        stop_route(child)
 
 
 def has_lock_open(child):
@@ -544,11 +588,9 @@ try:
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     process = Path(f"/proc/{wrapper_pid}/stat")
-    assert not process.exists() or process.read_text().split(") ", 1)[1][0] == "Z"
+    assert gone_or_zombie(process)
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
     stop_held(wrapper_handle)
 
 # A waiting request abandons the queue when its own route closes or its
@@ -568,9 +610,7 @@ with lock_path.open("a") as held:
             assert json.loads(errors.decode().split("DOOR-COMPUTE ")[-1])["reason"] == ending
             assert not marker.exists(), ending
         finally:
-            if child.poll() is None:
-                os.killpg(child.pid, signal.SIGKILL)
-                child.wait(timeout=5)
+            stop_route(child)
 
 marker = route_root / "complete.pid"
 child = route_call(marker, 40, ["/usr/bin/true"])
@@ -580,9 +620,7 @@ try:
     assert marker.exists()
     assert json.loads(errors.decode().split("DOOR-COMPUTE ")[-1])["reason"] == "door-complete"
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
 print("node route cases=4: silent disconnect, queued disconnect, queued deadline, natural completion")
 
 # A worker killed by a signal is reported as the command's completion. GNU
@@ -599,9 +637,7 @@ try:
     assert result["reason"] == "door-complete", errors
     assert result["detail"]["wrapper_exit_status"] == 137, errors
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
     stop_held(worker_handle)
 print("node route signal case=1: worker death is command completion")
 
@@ -616,9 +652,7 @@ try:
     assert code == 0, errors
     assert json.loads(errors.decode().split("DOOR-COMPUTE ")[-1])["reason"] == "door-complete"
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
 
 # A Git fetch that blocks in preparation is ended when the route closes. The
 # wrapper is not reached, and the run lock is available for the next request.
@@ -643,11 +677,9 @@ try:
     with lock_path.open("a") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
     process = Path(f"/proc/{int(fetch_pid.read_text())}/stat")
-    assert not process.exists() or process.read_text().split(") ", 1)[1][0] == "Z"
+    assert gone_or_zombie(process)
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
     stop_held(fetch_handle)
 print("node route repair cases=2: command input EOF, interrupted fetch")
 
@@ -673,7 +705,7 @@ try:
     child.wait(timeout=5)
     process = Path(f"/proc/{int(ignored_pid.read_text())}/stat")
     def stopped_and_unlocked():
-        if process.exists() and process.read_text().split(") ", 1)[1][0] != "Z":
+        if not gone_or_zombie(process):
             return False
         with lock_path.open("a") as lock:
             try:
@@ -684,9 +716,7 @@ try:
     wait_for(stopped_and_unlocked)
     assert lock_path.read_bytes() == b"pending\n"
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
     stop_held(ignored_handle)
 
 # A post-detach interrupted fetch may leave Git's lock file behind. The next
@@ -705,9 +735,7 @@ try:
     assert not (route_root / "lanes/R/.git/index.lock").exists()
     assert lock_path.read_bytes() == b""
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
 print("node route recovery cases=2: outer KILL, next request after interrupted fetch")
 
 # A third party can kill the timeout parent first. Its writer then retains the
@@ -752,13 +780,9 @@ try:
         assert b"do not remove the lock file" in errors
         assert json.loads(errors.decode().split("DOOR-COMPUTE ")[-1])["reason"] == "door-compute-preparation-held"
     finally:
-        if refused.poll() is None:
-            os.killpg(refused.pid, signal.SIGKILL)
-            refused.wait(timeout=5)
+        stop_route(refused)
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
     stop_held(supervisor_handle)
     stop_held(writer_handle)
     wait_for(stopped_and_unlocked)
@@ -789,9 +813,7 @@ for attempt in range(2):
         wait_for(stopped_and_unlocked)
         assert lock_path.read_bytes() == b"pending\n"
     finally:
-        if child.poll() is None:
-            os.killpg(child.pid, signal.SIGKILL)
-            child.wait(timeout=5)
+        stop_route(child)
         stop_held(remover_handle)
 child = route_call(route_root / "removal-recovered.pid", 40,
                    ["/usr/bin/true"])
@@ -803,7 +825,5 @@ try:
     assert detail["detail"]["checkout_commit"] == git("rev-parse", "HEAD")
     assert lock_path.read_bytes() == b""
 finally:
-    if child.poll() is None:
-        os.killpg(child.pid, signal.SIGKILL)
-        child.wait(timeout=5)
+    stop_route(child)
 print("node route removal cases=3: two interruptions and a clean recovery")

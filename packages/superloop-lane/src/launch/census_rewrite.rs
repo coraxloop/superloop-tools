@@ -290,19 +290,6 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
     let _lease = retire::lock_retirement_lease(root, request.run, owner, request.loop_name)?;
     let _mailbox =
         retire::lock_retirement_mailbox(root, request.run, owner, request.expected.is_none())?;
-    let record = read_reservation(&reservation_path(root, request.run))?
-        .ok_or_else(|| refusal("reservation absent"))?;
-    eligible(owner_home, root, &request, &record)?;
-    let reservation_name = format!(".reservation-{}.json", request.run);
-    let reservation = read_bytes(&runs, &reservation_name, owner)?
-        .ok_or_else(|| refusal("reservation vanished"))?;
-    if crate::placement::reservation_bytes(&reservation, |_| refusal("reservation malformed"))?
-        != record
-    {
-        return Err(refusal("reservation changed during absence proof"));
-    }
-    let bytes = crate::credential::read_evidence_bytes(&runs, request.run, owner)?
-        .ok_or_else(|| refusal("evidence absent"))?;
     let journal_name = format!(".census-rewrite-{}.json", request.run);
     let prior = read_bytes(&runs, &journal_name, owner)?;
     let journal = prior
@@ -310,6 +297,32 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
         .map(|bytes| serde_json::from_slice::<Value>(bytes))
         .transpose()
         .map_err(|_| refusal("rewrite journal is malformed"))?;
+    let resuming = journal
+        .as_ref()
+        .is_some_and(|value| value["phase"] == "pending");
+    let read = if resuming {
+        super::read_reservation_for_conversion
+    } else {
+        read_reservation
+    };
+    let record =
+        read(&reservation_path(root, request.run))?.ok_or_else(|| refusal("reservation absent"))?;
+    eligible(owner_home, root, &request, &record)?;
+    let reservation_name = format!(".reservation-{}.json", request.run);
+    let reservation = read_bytes(&runs, &reservation_name, owner)?
+        .ok_or_else(|| refusal("reservation vanished"))?;
+    let decoded = if resuming {
+        crate::placement::conversion_reservation_bytes(&reservation, |_| {
+            refusal("reservation malformed")
+        })?
+    } else {
+        crate::placement::reservation_bytes(&reservation, |_| refusal("reservation malformed"))?
+    };
+    if decoded != record {
+        return Err(refusal("reservation changed during absence proof"));
+    }
+    let bytes = crate::credential::read_evidence_bytes(&runs, request.run, owner)?
+        .ok_or_else(|| refusal("evidence absent"))?;
     let plan = bound_plan(
         &request,
         owner,
@@ -318,9 +331,6 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
         journal.as_ref(),
     )?;
     let digest = crate::door::retirement::digest(&plan);
-    let resuming = journal
-        .as_ref()
-        .is_some_and(|value| value["phase"] == "pending");
     if let Some(expected) = request.expected {
         if expected != digest {
             return Err(refusal(

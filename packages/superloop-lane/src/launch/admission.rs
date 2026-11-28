@@ -85,12 +85,15 @@ pub(crate) fn read(config: &Path, owner: u32) -> Result<Value, LaneError> {
     Ok(record)
 }
 
-pub(crate) fn ensure_open(config: &Path, owner: u32) -> Result<Value, LaneError> {
+pub(crate) fn ensure_open(config: &Path, owner: u32, loop_name: &str) -> Result<Value, LaneError> {
     let record = read(config, owner)?;
     if record["state"] == "paused" {
         return Err(LaneError::input(
             "launch-paused",
-            format!("{} has paused launch admission", config.display()),
+            format!(
+                "{} has paused launch admission; resume with superloop-lane resume {loop_name}",
+                config.display()
+            ),
         ));
     }
     Ok(record)
@@ -164,7 +167,9 @@ mod tests {
         assert_eq!(paused["admission"]["state"], "paused");
         assert!(paused["admission"]["paused_wall_unix_seconds"].is_u64());
         assert_eq!(
-            ensure_open(&config, owner).expect_err("pause gate").kind,
+            ensure_open(&config, owner, "alpha")
+                .expect_err("pause gate")
+                .kind,
             "launch-paused"
         );
         let request = super::super::LaunchRequest {
@@ -199,7 +204,7 @@ mod tests {
         let resumed = set(fixture.path(), "alpha", false).expect("resume");
         assert!(resumed["admission"]["resumed_wall_unix_seconds"].is_u64());
         assert_eq!(
-            ensure_open(&config, owner).expect("resumed gate")["state"],
+            ensure_open(&config, owner, "alpha").expect("resumed gate")["state"],
             "running"
         );
         fs::write(

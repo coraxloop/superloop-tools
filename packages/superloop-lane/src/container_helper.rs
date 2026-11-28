@@ -3679,7 +3679,7 @@ mod tests {
             "--verbose".into(),
         ]);
         let session = "22222222-2222-4222-8222-222222222222";
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":{"backend":"claude"},"active_round":"work-1","thread_id":session,"rounds":[{"step":"work-1","budget_seconds":3600}]});
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"plan":{"backend":"claude"},"active_round":"work-1","thread_id":session,"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"work-1","budget_seconds":3600}]});
         let reservation = fixture.root.path().join(".reservation-R.json");
         publish_reservation(&reservation, &record).expect("Claude reservation");
         let (mut server, mut client) = UnixStream::pair().expect("channel");
@@ -3793,7 +3793,7 @@ mod tests {
     fn seed_attempt_reservation(root: &Path) {
         publish_reservation(
             &root.join(".reservation-R.json"),
-            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600,"reply_designation":{"state":"unmeasured"}}]}),
         )
         .expect("protected attempt reservation");
     }
@@ -3809,8 +3809,8 @@ mod tests {
             (json!({"attempt_wall_seconds":7}), 328),
         ] {
             let record = json!({"active_round":"review","rounds":[
-                {"step":"dispatch","budget_seconds":1},
-                {"step":"review","budget_seconds":7200}
+                {"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":1},
+                {"reply_designation":{"state":"unmeasured"},"step":"review","budget_seconds":7200}
             ],"plan":plan});
             let attempt = super::attempt_wall_bound(&record).expect("attempt wall");
             let host = super::host_launch_bound(&record).expect("host guard");
@@ -3821,7 +3821,7 @@ mod tests {
                 u64::from(super::MAX_ATTEMPTS) * attempt + super::HOST_LAUNCH_MARGIN_SECONDS
             );
         }
-        let record = json!({"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":1}],"plan":{"attempt_wall_seconds":u64::MAX}});
+        let record = json!({"active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":1}],"plan":{"attempt_wall_seconds":u64::MAX}});
         assert_eq!(
             super::host_launch_bound(&record)
                 .expect_err("unrepresentable guard")
@@ -3848,9 +3848,9 @@ mod tests {
             (u64::MAX, u64::MAX),
         ] {
             let mut record = json!({"active_round":"review","rounds":[
-                {"step":"dispatch","budget_seconds":2},
-                {"step":"review","budget_seconds":budget},
-                {"step":"later","budget_seconds":3}
+                {"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":2},
+                {"reply_designation":{"state":"unmeasured"},"step":"review","budget_seconds":budget},
+                {"reply_designation":{"state":"unmeasured"},"step":"later","budget_seconds":3}
             ],"plan":{}});
             assert_eq!(
                 super::attempt_wall_bound(&record).expect("budget bound"),
@@ -3877,7 +3877,7 @@ mod tests {
             json!("1"),
             serde_json::Value::Null,
         ] {
-            let record = json!({"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":1}],"plan":{"attempt_wall_seconds":wall}});
+            let record = json!({"active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":1}],"plan":{"attempt_wall_seconds":wall}});
             assert_eq!(
                 super::attempt_wall_bound(&record)
                     .expect_err("invalid explicit bound")
@@ -3893,7 +3893,7 @@ mod tests {
         let fixture = StartedAttemptFixture::new("printf started > \"$TEST_REMOVE\"");
         for plan in [json!({}), json!({"attempt_wall_seconds":1})] {
             let (mut server, _client) = UnixStream::pair().expect("channel");
-            let record = json!({"active_round":"review","rounds":[{"step":"dispatch","budget_seconds":60},{"step":"review"}],"plan":plan});
+            let record = json!({"active_round":"review","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":60},{"reply_designation":{"state":"unmeasured"},"step":"review"}],"plan":plan});
             let result = run_attempt(
                 &mut server,
                 &fixture.vector,
@@ -3929,7 +3929,7 @@ mod tests {
     fn helper_wall_stop_retains_cause_in_outcome_and_round() {
         let fixture = StartedAttemptFixture::new("cat >/dev/null; exec sleep infinity");
         let reservation = fixture.root.path().join(".reservation-R.json");
-        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":7200}],"plan":{"backend":"codex","attempt_wall_seconds":1}});
+        let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":7200}],"plan":{"backend":"codex","attempt_wall_seconds":1}});
         publish_reservation(&reservation, &record).expect("planned wall");
         let (mut server, mut client) = UnixStream::pair().expect("channel");
         client
@@ -4811,7 +4811,7 @@ mod tests {
         let reservation = crate::launch::reservation_path(root, "R");
         let record = json!({"schema":1,"phase":"preparing","loop":"alpha","run":"R",
             "worker_uid":3001,"plan":{"backend":"codex","home":worker},
-            "active_round":"one","rounds":[{"step":"one","credential_publication":null}]});
+            "active_round":"one","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"one","credential_publication":null}]});
         crate::launch::publish_reservation(&reservation, &record).expect("reservation");
         let bytes = fs::read(&reservation).expect("prior bytes");
         let inode = fs::metadata(&reservation).expect("prior inode").ino();
@@ -5060,7 +5060,7 @@ mod tests {
                 .expect("namespace environment"),
             root,
             &root.join(".reservation-R.json"),
-            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":3600}]}),
             &driver,
             1,
             &AtomicBool::new(false),
@@ -5157,7 +5157,7 @@ mod tests {
                 .expect("namespace environment"),
             root,
             &root.join(".reservation-R.json"),
-            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+            &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":3600}]}),
             &driver,
             1,
             &AtomicBool::new(false),
@@ -5367,7 +5367,8 @@ mod tests {
             await_fixture_marker(&mut ready_event, *b"started");
             let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,
                 "driver_entry_pid":driver_pid,"driver_entry_start":process_start(driver_pid).expect("driver identity"),
-                "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
+                "active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600,
+                    "reply_designation":{"state":"unmeasured"}}]});
             let reservation = fixture.root.path().join(".reservation-R.json");
             publish_reservation(&reservation, &record).expect("record");
             let stopped = fixture.root.path().join("stopped");
@@ -5557,7 +5558,7 @@ mod tests {
                 &self.environment,
                 self.root.path(),
                 &self.root.path().join(".reservation-R.json"),
-                &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+                &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600,"reply_designation":{"state":"unmeasured"}}]}),
                 &self.driver,
                 1,
                 &AtomicBool::new(false),
@@ -5644,7 +5645,7 @@ exit 0
                 "-".into(),
             ]);
             let prompt = format!("Read /home/worker/.local/inbox/{step}.md.");
-            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
+            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"reply_designation":{"state":"unmeasured"},"step":step,"budget_seconds":3600}]});
             let mut retry_thread = None;
             for attempt in 1..=2 {
                 let (mut server, mut client) = UnixStream::pair().expect("channel");
@@ -5809,7 +5810,7 @@ exit 0
             client.write_all(request).expect("request");
             let record = json!({"plan":{"backend":if backend == BoxBackend::Codex { "codex" } else { "claude" }},
                 "schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,
-                "active_round":"review","thread_id":"recorded-thread","rounds":[{"step":"review","budget_seconds":3600}]});
+                "active_round":"review","thread_id":"recorded-thread","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","budget_seconds":3600}]});
             publish_reservation(&fixture.root.path().join(".reservation-R.json"), &record)
                 .expect("matching backend reservation");
             let pid = std::process::id();
@@ -5898,7 +5899,7 @@ exit 0
                 )
                 .expect("length");
             client.write_all(&request).expect("round request");
-            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"step":step,"budget_seconds":3600}]});
+            let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":step,"thread_id":"thread-1","rounds":[{"reply_designation":{"state":"unmeasured"},"step":step,"budget_seconds":3600}]});
             let pid = std::process::id();
             let result = run_attempt(
                 &mut server,
@@ -6657,7 +6658,7 @@ exit 0
                 &fixture.environment,
                 fixture.root.path(),
                 &fixture.root.path().join(".reservation-R.json"),
-                &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]}),
+                &json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":3600}]}),
                 &fixture.driver,
                 1,
                 &signal,
@@ -6730,7 +6731,7 @@ exit 0
         fs::set_permissions(fixture.path(), fs::Permissions::from_mode(0o700))
             .expect("protected fixture");
         let path = fixture.path().join(".reservation-R.json");
-        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"step":"dispatch","budget_seconds":3600}]});
+        let record = json!({"plan":{"backend":"codex"},"schema":1,"phase":"preparing","loop":"alpha","run":"R","worker_uid":3000,"active_round":"dispatch","rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","budget_seconds":3600}]});
         publish_reservation(&path, &record).expect("seed reservation");
         start_after_reservation(&path, &record, || {
             let saved = read_reservation(&path)

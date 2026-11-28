@@ -1,5 +1,6 @@
 //! Digest-bound conversion of retained round rows, without changing ordinary readers.
 
+use super::super::read_reservation_for_conversion as read_reservation;
 use super::*;
 use std::os::unix::fs::DirBuilderExt as _;
 use std::time::Instant;
@@ -120,6 +121,16 @@ fn record_names(root: &Path) -> Result<Vec<(String, PathBuf, bool)>, LaneError> 
 }
 
 fn eligible(record: &Value, run: &str, retired: bool, loop_name: &str) -> Result<(), LaneError> {
+    eligible_with_presence(record, run, retired, loop_name, identity)
+}
+
+fn eligible_with_presence(
+    record: &Value,
+    run: &str,
+    retired: bool,
+    loop_name: &str,
+    presence_of: impl Fn(Result<Option<(u32, u64)>, LaneError>) -> Result<Value, LaneError>,
+) -> Result<(), LaneError> {
     if record["loop"] != loop_name || record["run"] != run {
         return Err(refusal(format!(
             "run {run}: reservation identity differs; repeat {}",
@@ -152,10 +163,34 @@ fn eligible(record: &Value, run: &str, retired: bool, loop_name: &str) -> Result
                 command(loop_name, None)
             )));
         }
-        if !["settled", "failed"].contains(&record["phase"].as_str().unwrap_or_default()) {
+        if !["settled", "failed", "started"].contains(&record["phase"].as_str().unwrap_or_default())
+        {
             return Err(refusal(format!(
-                "run {run}: round is live or uncertain; settle it, then repeat {}",
+                "run {run}: round is live or uncertain; follow the census's preparation or retirement command, then repeat {}",
                 command(loop_name, None)
+            )));
+        }
+        if super::started_without_writer_identity(record)
+            && record["rounds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .any(|round| designation_member(round) == DesignationMember::Absent)
+        {
+            let remedy = match reaping::check_unsettled_driver(record) {
+                Ok(reaping::UnsettledDriverCheck::Absent) => format!(
+                    "preview retirement with superloop-lane retire {loop_name} {run} --dry-run, apply its digest, then repeat {}",
+                    command(loop_name, None)
+                ),
+                Ok(reaping::UnsettledDriverCheck::Unreadable(error)) => format!(
+                    "report evidence cannot be read ({error}); retirement cannot establish absence and no command of this program converts it; retain its recovery evidence for owner repair"
+                ),
+                Err(error) => format!(
+                    "retirement refuses this run ({error}) and strict launch recovery needs a converted row; no command of this program converts it; retain its recovery evidence for owner repair"
+                ),
+            };
+            return Err(refusal(format!(
+                "run {run}: a started writer identity was not recorded; {remedy}"
             )));
         }
         for observed in [
@@ -165,13 +200,19 @@ fn eligible(record: &Value, run: &str, retired: bool, loop_name: &str) -> Result
             helper_parent_identity(record),
             observer_identity(record),
         ] {
-            let presence = identity(observed)?["presence"]
+            let presence = presence_of(observed)?["presence"]
                 .as_str()
                 .unwrap_or_default()
                 .to_owned();
             if presence == "present" || presence == "unknown" {
+                let remedy = if presence == "unknown" {
+                    "its presence cannot be measured; inspect the process evidence before repeating"
+                        .to_owned()
+                } else {
+                    "wait for its exit before repeating".to_owned()
+                };
                 return Err(refusal(format!(
-                    "run {run}: {presence} round writer; wait for its exit and settle, then repeat {}",
+                    "run {run}: {presence} round writer; {remedy} {}",
                     command(loop_name, None)
                 )));
             }
@@ -346,11 +387,16 @@ fn check_manifest(root: &Path, loop_name: &str, plan: &Value) -> Result<(), Lane
     Ok(())
 }
 
-fn check_journal_bound(journal: &Value, plan: &Value, loop_name: &str) -> Result<(), LaneError> {
+fn check_journal_bound(
+    journal: &Value,
+    plan: &Value,
+    loop_name: &str,
+    bound: u64,
+) -> Result<(), LaneError> {
     if serde_json::to_vec(journal)
         .map_err(|error| refusal(error.to_string()))?
         .len() as u64
-        <= MAX_RESERVATION_BYTES
+        <= bound
     {
         return Ok(());
     }
@@ -361,7 +407,7 @@ fn check_journal_bound(journal: &Value, plan: &Value, loop_name: &str) -> Result
             .join(", ")
     });
     Err(refusal(format!(
-        "runs {runs}: journal exceeds {MAX_RESERVATION_BYTES} bytes; reduce the retained inventory before repeating {}",
+        "runs {runs}: journal exceeds {bound} bytes; reduce the retained inventory before repeating {}",
         command(loop_name, None)
     )))
 }
@@ -370,8 +416,16 @@ fn check_journal_bound(journal: &Value, plan: &Value, loop_name: &str) -> Result
 ///
 /// # Errors
 /// Refuses changed inputs, live writers, pending rewrites, malformed members or unsafe custody.
-#[allow(clippy::too_many_lines)]
 pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
+    run_with_journal_bound(owner_home, args, MAX_RESERVATION_BYTES)
+}
+
+#[allow(clippy::too_many_lines)]
+fn run_with_journal_bound(
+    owner_home: &Path,
+    args: &[String],
+    journal_bound: u64,
+) -> Result<Value, LaneError> {
     let begun = Instant::now();
     let (loop_name, expected) = parse(args)?;
     let config = owner_home.join(".config/loops").join(loop_name);
@@ -452,7 +506,7 @@ pub fn run(owner_home: &Path, args: &[String]) -> Result<Value, LaneError> {
     let mut journal = json!({"schema":1,"phase":"pending","loop":loop_name,
         "plan":plan,"preview_sha256":digest,"published":0});
     journal["published"] = json!(plan["files"].as_array().map_or(0, Vec::len));
-    check_journal_bound(&journal, &plan, loop_name)?;
+    check_journal_bound(&journal, &plan, loop_name, journal_bound)?;
     journal["published"] = json!(0);
     if let Some(expected) = expected {
         if expected != digest {
@@ -798,10 +852,17 @@ mod tests {
             .expect("round")
             .remove("reply_designation");
         changed["phase"] = json!("started");
-        publish_reservation(&live, &changed).expect("live round");
+        for role in ["launcher", "driver_entry", "helper"] {
+            changed[format!("{role}_pid")] = json!(u32::MAX);
+            changed[format!("{role}_start")] = json!(1);
+        }
+        publish_reservation(&live, &changed).expect("dead started round");
+        assert!(run(home, &["alpha".into(), "--dry-run".into()]).is_ok());
+        changed["phase"] = json!("preparing");
+        publish_reservation(&live, &changed).expect("uncertain round");
         assert!(
             run(home, &["alpha".into(), "--dry-run".into()])
-                .expect_err("live round")
+                .expect_err("uncertain round")
                 .line()
                 .contains("live or uncertain")
         );
@@ -832,6 +893,14 @@ mod tests {
         admission::set(home, "alpha", true).expect("pause again");
         let live = reservation_path(&root, "R");
         let mut record = read_reservation(&live).expect("read").expect("record");
+        assert!(
+            eligible_with_presence(&record, "R", false, "alpha", |_| {
+                Ok(json!({"presence":"unknown"}))
+            })
+            .expect_err("unknown writer")
+            .line()
+            .contains("unknown round writer")
+        );
         record["launcher_pid"] = json!(std::process::id());
         record["launcher_start"] =
             json!(crate::container_helper::process_start(std::process::id()).expect("start"));
@@ -933,10 +1002,15 @@ mod tests {
         let plan = json!({"runs":["R"]});
         let journal = json!({"padding":"x".repeat(usize::try_from(MAX_RESERVATION_BYTES).expect("bound fits usize"))});
         assert!(
-            check_journal_bound(&journal, &plan, "alpha")
+            check_journal_bound(&journal, &plan, "alpha", MAX_RESERVATION_BYTES)
                 .expect_err("journal bound")
                 .line()
                 .contains("runs R: journal exceeds")
         );
+        let (fixture, _) = fixture();
+        let error =
+            run_with_journal_bound(fixture.path(), &["alpha".into(), "--dry-run".into()], 1)
+                .expect_err("run checks its journal before publishing");
+        assert!(error.line().contains("journal exceeds 1 bytes"));
     }
 }

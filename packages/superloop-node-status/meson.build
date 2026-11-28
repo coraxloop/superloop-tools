@@ -2,11 +2,18 @@
 pkg_superloop_node_status_rust = files(
   'src/main.rs',
   'src/ssh.rs',
+  'src/storage.rs',
+  'src/storage_tests.rs',
   'tests/subprocess_contract.rs',
 )
 pkg_superloop_node_status_prose = files('README.md')
 pkg_superloop_node_status_toml = []
-pkg_superloop_node_status_install = []
+pkg_superloop_node_status_install = files(
+  'data/superloop-node-storage.service.in',
+  'data/superloop-node-storage.timer.in',
+)
+install_data(pkg_superloop_node_status_install,
+  install_dir: get_option('datadir') / 'superloop' / 'node-status')
 pkg_superloop_node_status_excluded_rust = []
 pkg_superloop_node_status_excluded_prose = []
 pkg_superloop_node_status_excluded_toml = []
@@ -40,9 +47,9 @@ dependency_ledger += ['''
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-node-status/meson.build:custom_target#1","sha256":"5e5ca27c95cdd46d33fffc547c4c2a2a1c7835344281bf19c660db3f2f8dd2bb","caller":"meson:superloop-node-status","owner":"superloop-node-status","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"989a146e50c5806ca758b901e213986726a61735ea17212af423209f0a29e64c"}
+{"kind":"meson-call","site":"packages/superloop-node-status/meson.build:custom_target#1","sha256":"5e5ca27c95cdd46d33fffc547c4c2a2a1c7835344281bf19c660db3f2f8dd2bb","caller":"meson:superloop-node-status","owner":"superloop-node-status","callees":["external:env","libexec/build-sync"],"lookup":"build-artifact","contract":"Stage the declared binary from the shared workspace artifact without compilation; validate its installed identity and publish changed bytes with the owning version, release group, repository and full source commit","scope_sha256":"e695238eb6b32ccbe600d289b38daa71d21f9df33a0bb9c934d781608e5a00c5"}
 ''']
 
 dependency_ledger += ['''
-{"kind":"meson-call","site":"packages/superloop-node-status/meson.build:find_program#1","caller":"meson:superloop-node-status","owner":"superloop-node-status","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"989a146e50c5806ca758b901e213986726a61735ea17212af423209f0a29e64c"}
+{"kind":"meson-call","site":"packages/superloop-node-status/meson.build:find_program#1","caller":"meson:superloop-node-status","owner":"superloop-node-status","callees":["external:env"],"lookup":"build-artifact","contract":"Resolve env to invoke the shared artifact staging helper","sha256":"b62d20523b3020eda924514b28e44088ad53c63f5119c0cbe311ef37a405f3ac","scope_sha256":"e695238eb6b32ccbe600d289b38daa71d21f9df33a0bb9c934d781608e5a00c5"}
 ''']

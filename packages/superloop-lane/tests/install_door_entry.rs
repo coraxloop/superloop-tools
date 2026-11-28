@@ -173,7 +173,7 @@ fn install_door_entry_empty_runs_root_names_shared_holder_list() {
     let refusal = refused_with_shared_holder(ReservationSource::EmptyRunsRoot);
     assert!(
         refusal.contains(
-            "launch planning, a starting round, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run"
+            "launch planning, a starting round, a changing rotation, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run"
         ),
         "{refusal}"
     );

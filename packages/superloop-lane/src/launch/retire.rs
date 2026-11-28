@@ -250,7 +250,7 @@ fn run_with(
         return node_record::complete(owner_home, root, request, runner, budget, begun);
     }
     let reservation = reservation_path(root, run);
-    let record = read_reservation(&reservation)
+    let record = read_reservation_for_conversion(&reservation)
         .map_err(retire_error)?
         .ok_or_else(|| {
             LaneError::input(
@@ -765,7 +765,7 @@ fn absent_unrecorded_observer(
             return Ok(true);
         }
         return match super::repin_door::settled_boundary(record, |record| {
-            super::driver_report::read(owner_home, record)
+            super::driver_report::read_for_retirement(owner_home, record)
         }) {
             Ok((_, _, boundary)) => Ok(boundary == "interrupted-settlement"),
             Err(error) if error.kind == "repin-door-state" => Ok(false),
@@ -1144,7 +1144,7 @@ fn retire_record_confirmed_with(
     {
         saved.clone()
     } else {
-        read_reservation(&reservation)?.ok_or_else(|| {
+        read_reservation_for_conversion(&reservation)?.ok_or_else(|| {
             LaneError::input(
                 "retire-record",
                 "reservation vanished before phase transition",
@@ -1164,7 +1164,7 @@ fn retire_record_confirmed_with(
             current = saved.clone();
         } else {
             publish_reservation(&reservation, saved)?;
-            current = read_reservation(&reservation)?.ok_or_else(|| {
+            current = read_reservation_for_conversion(&reservation)?.ok_or_else(|| {
                 LaneError::input("retire-record", "reconciled reservation vanished")
             })?;
         }

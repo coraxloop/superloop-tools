@@ -72,7 +72,7 @@ pub fn evidence(backend: &str) -> Result<Value, String> {
     Ok(serde_json::json!({"program": selected[0], "settings": source}))
 }
 
-fn token(text: &str) -> String {
+pub(crate) fn token(text: &str) -> String {
     let mut output = String::new();
     for byte in text.bytes() {
         if byte.is_ascii_alphanumeric() || b"/._-:".contains(&byte) {

@@ -141,6 +141,16 @@ pub(super) fn run(case: &str) {
     }
     let output = result.expect("bounded scoped command");
     assert!(output.status.success(), "{output:?}");
+    let saved: serde_json::Value =
+        serde_json::from_slice(&scope.fixture.as_ref().expect("owned root").reservation())
+            .expect("saved reservation");
+    for round in saved["rounds"].as_array().expect("round rows") {
+        assert_eq!(
+            round["reply_designation"],
+            serde_json::json!({"state":"unmeasured"}),
+            "{case}: copied round lost its designation member"
+        );
+    }
     std::io::stdout()
         .lock()
         .write_all(&output.stdout)
@@ -739,10 +749,10 @@ fn earlier_bound_reply_refuses_without_recovery_remedy(fixture: &host::Host, bou
     changed["phase"] = serde_json::json!("failed");
     assert_eq!(changed["rounds"][1]["phase"], "settled");
     changed["active_round"] = serde_json::json!("later");
-    changed["rounds"]
-        .as_array_mut()
-        .expect("rounds")
-        .push(serde_json::json!({"step":"later", "phase":"failed", "reply":null}));
+    changed["rounds"].as_array_mut().expect("rounds").push(
+        serde_json::json!({"step":"later", "phase":"failed", "reply":null,
+            "reply_designation":{"state":"unmeasured"}}),
+    );
     let path = fixture.home().join("runs/.reservation-R.json");
     host::write(
         path.clone(),

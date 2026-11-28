@@ -117,6 +117,11 @@ const THREAD_ID_FILE: &str = "thread-id.txt";
 const MONITOR_FILE_PREFIX: &str = ".monitor-";
 const RECONSTRUCTED_FILE: &str = ".reconstructed";
 const RATE_LIMIT_FILE: &str = "rate-limit.txt";
+const SESSION_LOAD_FILE: &str = "session-load.json";
+const MAX_RUN_REPORT_BYTES: usize = 4096;
+const MAX_SESSION_STATUS_BYTES: usize = 384;
+const MAX_SESSION_STATUS_NAMES: usize = 2;
+const MAX_SESSION_STATUS_NAME_BYTES: usize = 64;
 const CONTEXT_FILE: &str = "context.jsonl";
 const POOL_FILE: &str = "lane-pool.json";
 const SECONDS_PER_MINUTE: u64 = 60;
@@ -228,6 +233,12 @@ pub trait Backend {
 
     /// Extract the last nonempty assistant message from an event stream.
     fn last_message(&self, events: &[u8]) -> Option<Vec<u8>>;
+
+    /// Read the backend's first session-start record from this step's stream.
+    /// A backend without such a record format leaves this evidence absent.
+    fn session_start_evidence(&self, _events: &[u8]) -> Option<serde_json::Value> {
+        None
+    }
 
     /// Read the terminal result the transcript's last complete line carries.
     ///
@@ -1710,6 +1721,7 @@ fn undo_preparation(run_dir: &Path, prior: &str, step: &str) -> io::Result<()> {
         (CAPACITY_ATTEMPTS_FILE, CAPACITY_ATTEMPTS_FILE),
         ("kill-evidence.txt", "kill-evidence.txt"),
         ("finished-step.json", ".finished-step.json"),
+        (SESSION_LOAD_FILE, SESSION_LOAD_FILE),
     ] {
         restore_optional(&history.join(archived), &run_dir.join(live))?;
     }
@@ -2283,6 +2295,14 @@ fn execute_with_clock(
     // refusal is not this one's, and a whole cumulative transcript would
     // supply one.
     let step_region = step_events(&run_dir, Some(backend));
+    let session_load = backend.session_start_evidence(step_region.as_deref().unwrap_or_default());
+    let session_load_written = session_load.as_ref().is_none_or(|evidence| {
+        atomic_write(
+            &run_dir.join(SESSION_LOAD_FILE),
+            evidence.to_string().as_bytes(),
+        )
+        .is_ok()
+    });
     let failed_result = matches!(&child_result, Ok(ChildResult::Natural(exit)) if !exit.success())
         || matches!(&child_result, Ok(ChildResult::Terminal(result)) if result.is_error());
     let rejection = (failed_result && step_attempt_wall(backend, &run_dir).is_none())
@@ -2371,6 +2391,9 @@ fn execute_with_clock(
     if let Some(evidence) = &execution_evidence {
         execution_settings::annotate(&mut report, evidence);
     }
+    if let Some(evidence) = &session_load {
+        annotate_session_load(&mut report, evidence, session_load_written);
+    }
     let publication = atomic_write(&run_dir.join("run-report.txt"), &report);
     if publication.is_ok() {
         let _ignored = lock.record_finished(&run_dir);
@@ -2393,6 +2416,9 @@ fn execute_with_clock(
         }
         if let Some(evidence) = &execution_evidence {
             execution_settings::annotate(&mut failed_report, evidence);
+        }
+        if let Some(evidence) = &session_load {
+            annotate_session_load(&mut failed_report, evidence, session_load_written);
         }
         return LaneResult {
             status: 1,
@@ -2439,6 +2465,58 @@ fn annotate_suspend_resumes(report: &mut Vec<u8>, count: u8) {
             report.pop();
         }
         let _ignored = writeln!(report, " suspend_resumes={count}");
+    }
+}
+
+/// Append bounded start-record names without breaking the 4096-byte report reader.
+pub fn annotate_session_load(report: &mut Vec<u8>, evidence: &serde_json::Value, written: bool) {
+    let state = if written {
+        evidence["state"].as_str().unwrap_or("unmeasured")
+    } else {
+        "unwritten"
+    };
+    let fields = ["plugins", "mcp_servers"];
+    let labels = ["loaded_plugins", "loaded_mcp_servers"];
+    let mut selected = [Vec::<String>::new(), Vec::<String>::new()];
+    let mut totals = [0_usize; 2];
+    for (index, field) in fields.iter().enumerate() {
+        if let Some(names) = evidence[field].as_array() {
+            totals[index] = names.len();
+            for name in names {
+                let Some(name) = name.as_str() else { continue };
+                if name.is_empty() || selected[index].len() == MAX_SESSION_STATUS_NAMES {
+                    continue;
+                }
+                let encoded = execution_settings::token(name);
+                if encoded.len() <= MAX_SESSION_STATUS_NAME_BYTES {
+                    selected[index].push(encoded);
+                }
+            }
+        }
+    }
+    let base_len = report.len() - usize::from(report.last() == Some(&b'\n'));
+    loop {
+        let mut suffix = format!(" session_load={state}");
+        for (index, label) in labels.iter().enumerate() {
+            if !selected[index].is_empty() {
+                let _ignored = write!(suffix, " {label}={}", selected[index].join(","));
+            }
+            let omitted = totals[index] - selected[index].len();
+            if omitted > 0 {
+                let _ignored = write!(suffix, " {label}_omitted={omitted}");
+            }
+        }
+        if suffix.len() <= MAX_SESSION_STATUS_BYTES
+            && base_len + suffix.len() < MAX_RUN_REPORT_BYTES
+        {
+            report.truncate(base_len);
+            report.extend_from_slice(suffix.as_bytes());
+            report.push(b'\n');
+            return;
+        }
+        if selected[1].pop().is_none() && selected[0].pop().is_none() {
+            return;
+        }
     }
 }
 
@@ -2777,6 +2855,11 @@ fn prepare_resume_with_size<F: FnOnce(&Path) -> io::Result<u64>>(
     archive_optional(
         &run_dir.join("backend-settings.json"),
         &history.join("backend-settings.json"),
+    )
+    .map_err(|_error| PreparationFailure::Runtime { live: false })?;
+    archive_optional(
+        &run_dir.join(SESSION_LOAD_FILE),
+        &history.join(SESSION_LOAD_FILE),
     )
     .map_err(|_error| PreparationFailure::Runtime { live: false })?;
     archive_optional(
@@ -4934,7 +5017,12 @@ pub fn publish<W: io::Write>(output: &mut W, result: &LaneResult) -> io::Result<
     output.flush()
 }
 
-fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
+/// Replace a run-local file through a new sibling without following its old link.
+///
+/// # Errors
+///
+/// Returns an I/O error if creation, writing, synchronization or rename fails.
+pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let parent = path
         .parent()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "missing parent"))?;

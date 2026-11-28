@@ -30,6 +30,27 @@ fn member(value: &Value) -> Placement {
     Placement::decode(value["compute_placement"].clone(), &grant).unwrap()
 }
 
+/// ´test:unit:conversion-reader-keeps-placement-checks´
+#[test]
+fn conversion_reader_keeps_placement_checks() {
+    let mut old = record();
+    old["rounds"] = json!([{"step":"dispatch"}]);
+    let decode = |value: &Value| {
+        super::reader::conversion_reservation_bytes(
+            &serde_json::to_vec(value).expect("JSON"),
+            |error| LaneError::input("fixture-json", error.to_string()),
+        )
+    };
+    assert_eq!(decode(&old).expect("old row with valid placement"), old);
+    old["plan"]["compute_placement"]["grant_digest"] = json!("f".repeat(64));
+    assert_eq!(
+        decode(&old)
+            .expect_err("changed placement must refuse")
+            .kind,
+        "door-workspace-context-differs"
+    );
+}
+
 /// ´test:unit:placement-record-fields-bind-the-grant´
 #[test]
 fn placement_record_fields_bind_the_grant() {
@@ -177,7 +198,8 @@ fn placement_absent_keeps_legacy_byte_decoding() {
         serde_json::from_str(include_str!("../../tests/fixtures/plan.json")).unwrap();
     let mut values = vec![
         json!({"schema":1,"phase":"preparing","worker_uid":2001}),
-        json!({"schema":1,"phase":"settled","worker_uid":2001,"plan":fixture}),
+        json!({"schema":1,"phase":"settled","worker_uid":2001,"plan":fixture,
+            "rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]}),
     ];
     for phase in ["started", "failed", "retiring", "retired"] {
         values.push(json!({"schema":1,"phase":phase,"worker_uid":2001}));
@@ -322,7 +344,8 @@ fn placement_root_handle_survives_rename_not_recreation() {
 /// ´test:unit:placement-rewrite-journal-checks-embedded-reservations´
 #[test]
 fn placement_rewrite_journal_checks_embedded_reservations() {
-    let record = record();
+    let mut record = record();
+    record["rounds"] = json!([{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]);
     let journal = json!({"plan":{"files":[{"before":record,"after":record}]}});
     assert_eq!(
         journal_bytes(journal.to_string().as_bytes(), |e| refusal(e.to_string())).unwrap(),

@@ -767,6 +767,7 @@ fn resume_plan(home: &Path, runtime: &Path) -> (PathBuf, Vec<u8>) {
     record["thread_id"] = "fixture-thread".into();
     record["active_round"] = "dispatch".into();
     record["rounds"] = serde_json::json!([{"step":"dispatch", "phase":"settled",
+        "reply_designation":{"state":"unmeasured"},
         "driver_dir":home.join("runs/R/fixture-dispatch")}]);
     let output = namespace(
         home,

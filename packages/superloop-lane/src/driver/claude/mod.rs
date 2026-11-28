@@ -8,6 +8,8 @@ use std::os::unix::fs::symlink;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+use serde_json::{Value, json};
+
 pub use lane_lifecycle::Backend;
 pub use lane_lifecycle::{
     BudgetMonitor, ClockSample, Config, DEFAULT_POOL_THRESHOLD, LaneResult, MonitorDecision,
@@ -26,6 +28,9 @@ use lane_lifecycle::{
 pub struct ClaudeBackend {
     home: Option<PathBuf>,
 }
+
+const SESSION_SETTINGS: &str =
+    "{\"syncClaudeAiPlugins\":false,\"disableClaudeAiConnectors\":true}\n";
 
 /// A shared argument refusal or a Claude home-selection refusal.
 #[derive(Debug)]
@@ -71,11 +76,23 @@ impl Backend for ClaudeBackend {
         lane_lifecycle::execution_settings::evidence("claude").map(Some)
     }
 
-    fn command(&self, config: &Config, _run_dir: &Path) -> Result<Command, String> {
+    fn command(&self, config: &Config, run_dir: &Path) -> Result<Command, String> {
+        let session_settings = run_dir.join("claude-session-settings.json");
+        lane_lifecycle::atomic_write(&session_settings, SESSION_SETTINGS.as_bytes())
+            .map_err(|error| format!("session settings: {error}"))?;
         let mut command = lane_lifecycle::execution_settings::command("claude")?;
         command
-            .args(["-p", "--output-format", "stream-json", "--verbose"])
+            .args([
+                "-p",
+                "--output-format",
+                "stream-json",
+                "--verbose",
+                "--strict-mcp-config",
+                "--settings",
+            ])
+            .arg(&session_settings)
             .current_dir(config.workdir())
+            .env("ENABLE_CLAUDEAI_MCP_SERVERS", "false")
             .env(
                 "CLAUDE_CONFIG_DIR",
                 self.home.as_ref().ok_or("claude-home-unregistered-loop")?,
@@ -166,6 +183,38 @@ impl Backend for ClaudeBackend {
             .filter(|message| !message.is_empty())
             .map(String::into_bytes)
             .or(assistant)
+    }
+
+    fn session_start_evidence(&self, events: &[u8]) -> Option<Value> {
+        let init = events.split(|byte| *byte == b'\n').find_map(|line| {
+            let event: Value = serde_json::from_slice(line).ok()?;
+            (event["type"] == "system" && event["subtype"] == "init").then_some(event)
+        });
+        let Some(init) = init else {
+            return Some(json!({"state": "unmeasured", "reason": "start-record-absent"}));
+        };
+        let names = |field: &str| -> Option<Vec<String>> {
+            init.get(field)?
+                .as_array()?
+                .iter()
+                .map(|item| {
+                    item.as_str()
+                        .or_else(|| item.get("name").and_then(Value::as_str))
+                        .map(str::to_owned)
+                })
+                .collect()
+        };
+        let plugins = names("plugins");
+        let mcp_servers = names("mcp_servers");
+        let skills = names("skills");
+        let state = if plugins.is_some() && mcp_servers.is_some() {
+            "measured"
+        } else {
+            "partial"
+        };
+        Some(
+            json!({"state": state, "plugins": plugins, "mcp_servers": mcp_servers, "skills": skills}),
+        )
     }
 
     fn terminal_result(&self, events: &[u8]) -> Option<TerminalResult> {

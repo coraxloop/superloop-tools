@@ -267,6 +267,23 @@ pub(super) fn read_record_bound(
     run: &str,
     owner: u32,
 ) -> Result<(Value, String), LaneError> {
+    read_record_bound_with(root, run, owner, false)
+}
+
+pub(super) fn read_record_bound_for_conversion(
+    root: &OwnedFd,
+    run: &str,
+    owner: u32,
+) -> Result<(Value, String), LaneError> {
+    read_record_bound_with(root, run, owner, true)
+}
+
+fn read_record_bound_with(
+    root: &OwnedFd,
+    run: &str,
+    owner: u32,
+    conversion: bool,
+) -> Result<(Value, String), LaneError> {
     let name = format!(".reservation-{run}.json");
     let fd = openat2(
         root,
@@ -295,9 +312,12 @@ pub(super) fn read_record_bound(
         .take(MAX_RESERVATION_BYTES + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| LaneError::input("checkout-record", error.to_string()))?;
-    let record = crate::placement::reservation_bytes(&bytes, |error| {
-        LaneError::input("checkout-record", error.to_string())
-    })?;
+    let syntax = |error: serde_json::Error| LaneError::input("checkout-record", error.to_string());
+    let record = if conversion {
+        crate::placement::conversion_reservation_bytes(&bytes, syntax)?
+    } else {
+        crate::placement::reservation_bytes(&bytes, syntax)?
+    };
     if record["schema"] != 1 || record["worker_uid"].as_u64().is_none() {
         return Err(LaneError::input(
             "checkout-record",
@@ -2045,7 +2065,8 @@ os._exit(0)"
                 .kind,
             "checkout-record"
         );
-        let mut record = json!({"schema":1,"worker_uid":3000,"checkouts":[],"checkouts_omitted":0,"checkout_attempts":[],"checkout_next_index":1,"imports":[]});
+        let mut record = json!({"schema":1,"worker_uid":3000,"checkouts":[],"checkouts_omitted":0,"checkout_attempts":[],"checkout_next_index":1,"imports":[],
+            "rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]});
         super::append_checkout(
             &mut record,
             1,
@@ -2065,6 +2086,10 @@ os._exit(0)"
         )
         .expect("second source");
         assert_eq!(record["checkouts"].as_array().expect("checkouts").len(), 2);
+        assert_eq!(
+            record["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
         assert_eq!(record["checkouts_omitted"], 0);
         assert_eq!(
             super::append_checkout(
@@ -2129,7 +2154,8 @@ os._exit(0)"
         let source = crate::home::pin_parent(&bad_source, owner).expect("source descriptor");
         let target = crate::home::pin_parent(&destination, owner).expect("target descriptor");
         let first = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
-        let mut record = json!({"schema":1,"worker_uid":3000,"checkouts":[],"checkouts_omitted":0,"checkout_attempts":[],"checkout_next_index":2,"checkout_pending":{"index":1,"token":first,"checkpoint_index":1,"repo":"tools","directory":destination,"object":"1".repeat(40),"preexisting":false,"attempt_instant_unix_ns":super::instant().expect("attempt instant")}});
+        let mut record = json!({"schema":1,"worker_uid":3000,"checkouts":[],"checkouts_omitted":0,"checkout_attempts":[],"checkout_next_index":2,"checkout_pending":{"index":1,"token":first,"checkpoint_index":1,"repo":"tools","directory":destination,"object":"1".repeat(40),"preexisting":false,"attempt_instant_unix_ns":super::instant().expect("attempt instant")},
+            "rounds":[{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]});
         super::publish_record(&root_fd, "R", &record, first).expect("pending before clone");
         let error = super::clone_checkout(&source, &target, "R", &"1".repeat(40))
             .expect_err("bad source interrupts clone");
@@ -2169,6 +2195,10 @@ os._exit(0)"
         );
         assert_eq!(saved["checkout_attempts"][1]["token"], second);
         assert_eq!(saved["checkout_attempts"][1]["created_observed"], "unknown");
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
         assert!(destination.join(".git").exists());
     }
 

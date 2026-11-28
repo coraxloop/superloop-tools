@@ -3134,6 +3134,12 @@ pattern = "packages/superloop-lint/tests/support/git.rs"
 pattern = "packages/superloop-node-status/Cargo.toml"
 
 [[include.rows]]
+pattern = "packages/superloop-node-status/data/superloop-node-storage.service.in"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/data/superloop-node-storage.timer.in"
+
+[[include.rows]]
 pattern = "packages/superloop-node-status/README.md"
 
 [[include.rows]]
@@ -3144,6 +3150,12 @@ pattern = "packages/superloop-node-status/src/main.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-node-status/src/ssh.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/src/storage.rs"
+
+[[include.rows]]
+pattern = "packages/superloop-node-status/src/storage_tests.rs"
 
 [[include.rows]]
 pattern = "packages/superloop-node-status/tests/subprocess_contract.rs"

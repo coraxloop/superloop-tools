@@ -1516,7 +1516,7 @@ fn resume_with_program(
         .ok_or_else(|| LaneError::input("round-step", "round is absent"))?;
     let config = owner_home.join(".config/loops").join(&request.loop_name);
     let _admission = crate::install::lock_loop_config(&config, true)?;
-    admission::ensure_open(&config, caller)?;
+    admission::ensure_open(&config, caller, &request.loop_name)?;
     let (mut plan, settings) = crate::load_plan_for_record_with_door(
         owner_home,
         &request.loop_name,
@@ -1749,6 +1749,10 @@ fn resume_with_program(
         (&root, &verified_runs),
         lane_bin,
     )?;
+    if record["plan"]["vendor_mode"].is_null() {
+        let generation = super::installed_generation(owner_home, &request.loop_name)?;
+        crate::install::require_proxy_unit_agreement(owner_home, &request.loop_name, &generation)?;
+    }
     if request.dry_run {
         let saved_box = plan.document["runtime_argv"]
             .as_array()
@@ -2712,7 +2716,7 @@ pub(crate) mod rollback {
             let mut next = record;
             next["phase"] = json!("preparing");
             next["active_round"] = json!("review");
-            next["rounds"] = json!([{"step":"review","phase":"running"}]);
+            next["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"running"}]);
             let nonce = prepare(&mut next, &bytes, "expected\n").expect("before-image");
             publish_reservation(&path, &next).expect("preparing");
             (root, path, bytes, nonce)
@@ -2742,7 +2746,7 @@ pub(crate) mod rollback {
             assert_eq!(raw, bytes, "raw placed reservation preserved");
             next["phase"] = json!("preparing");
             next["active_round"] = json!("review");
-            next["rounds"] = json!([{"step":"review","phase":"running"}]);
+            next["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"running"}]);
             let nonce = prepare(&mut next, &raw, "expected\n").expect("placed prepare");
             publish_reservation(&path, &next).expect("placed preparing");
             assert_eq!(
@@ -3303,8 +3307,8 @@ mod tests {
     fn awaiting_round_recovery_requires_completed_driver() {
         let good = json!({"phase":"started","active_round":"review",
             "driver_end":{"state":"completed","successful":true},
-            "rounds":[{"step":"dispatch","phase":"settled"},
-                {"step":"review","phase":"awaiting-settlement"}]});
+            "rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled"},
+                {"reply_designation":{"state":"unmeasured"},"step":"review","phase":"awaiting-settlement"}]});
         assert!(super::interrupted_round(&good, "review"));
         for end in [
             serde_json::Value::Null,
@@ -3339,7 +3343,7 @@ mod tests {
         assert!(!super::interrupted_round(&record, "review"));
         record = good;
         record["active_round"] = json!("dispatch");
-        record["rounds"] = json!([{"step":"dispatch","phase":"awaiting-settlement"}]);
+        record["rounds"] = json!([{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"awaiting-settlement"}]);
         assert!(
             !super::interrupted_round(&record, "dispatch"),
             "first dispatch uses its own recovery"
@@ -3469,7 +3473,7 @@ mod tests {
         let metadata = fs::metadata(&runtime).expect("environment inode");
         let mut record = json!({"phase":"preparing","active_round":"review",
             "thread_id":"thread","worker_uid":0,
-            "rounds":[{"step":"review","budget_seconds":900}],"mail":[]});
+            "rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","budget_seconds":900}],"mail":[]});
         let names = || {
             let mut names = fs::read_dir(&plan.driver_dir)
                 .expect("run entries")
@@ -3588,7 +3592,7 @@ mod tests {
         let owner = nix::unistd::Uid::effective().as_raw();
         let old = fs::File::open(&root).expect("old root descriptor");
         let old_stat = nix::sys::stat::fstat(&old).expect("old identity");
-        let mut record = json!({"phase":"preparing","active_round":"work-1","thread_id":"thread-1","worker_uid":owner,"rounds":[{"step":"work-1","budget_seconds":900}],"mail":[{"step":"work-1","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter"},{"step":"work-2","inbox_name":"alpha.2026-01-01T00:00:00.001Z.letter"}]});
+        let mut record = json!({"phase":"preparing","active_round":"work-1","thread_id":"thread-1","worker_uid":owner,"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"work-1","budget_seconds":900}],"mail":[{"step":"work-1","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter"},{"step":"work-2","inbox_name":"alpha.2026-01-01T00:00:00.001Z.letter"}]});
         let before = fs::read(runtime.join("runtime.env")).expect("saved environment");
         for name in ["runtime.argv", "container.argv", "container.env"] {
             fs::write(runtime.join(name), name.as_bytes()).expect("saved command file");
@@ -3868,7 +3872,7 @@ mod tests {
             .expect("restore archive directory");
         let record = json!({"phase":"preparing","active_round":"review",
             "thread_id":"held-thread","worker_uid":3000,
-            "rounds":[{"step":"review","budget_seconds":900}],
+            "rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","budget_seconds":900}],
             "mail":[{"step":"review","inbox_name":"fixture-letter"}]});
         inspect_loaded_round(&plan, &record, Some(("review", 900))).expect("held publication");
         let published: serde_json::Value = serde_json::from_slice(
@@ -3930,7 +3934,7 @@ mod tests {
         fs::rename(&root, fixture.path().join("retained-runs")).expect("retain root");
         fs::create_dir_all(root.join("R")).expect("replacement root");
         fs::write(&path, b"not a directory").expect("replacement step");
-        let record = json!({"rounds":[{"step":"dispatch","driver_dir":path}]});
+        let record = json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","driver_dir":path}]});
         assert_eq!(
             super::recorded_step_dir(&plan, &record, &record["rounds"][0])
                 .expect("held recorded directory"),
@@ -3947,7 +3951,7 @@ mod tests {
         let held = fs::File::open(&root).expect("root descriptor");
         let owner = nix::unistd::Uid::effective().as_raw();
         let _anchor = crate::home::activate_handed_home(&root, &held, owner).expect("root anchor");
-        let record = json!({"phase":"preparing","active_round":"review","thread_id":"thread-1","worker_uid":3000,"rounds":[{"step":"review","budget_seconds":900}],"mail":[{"step":"review","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter"}]});
+        let record = json!({"phase":"preparing","active_round":"review","thread_id":"thread-1","worker_uid":3000,"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"review","budget_seconds":900}],"mail":[{"step":"review","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter"}]});
         assert_ne!(plan.document["paths"][1]["uid"], record["worker_uid"]);
         inspect_loaded_round(&plan, &record, Some(("review", 900)))
             .expect("private inspector publishes request");
@@ -3989,7 +3993,7 @@ mod tests {
             None,
         )
         .expect("round letter selection");
-        let dispatch = json!({"rounds":[{"step":"dispatch","phase":"settled","driver_dir":"/runs/R/20261007T093830Z-dispatch"}]});
+        let dispatch = json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","driver_dir":"/runs/R/20261007T093830Z-dispatch"}]});
         let words = entry_argv_round(
             PathBuf::from("/bin/driver").as_path(),
             &plan,
@@ -4042,7 +4046,7 @@ mod tests {
                 "Read /mail/inbox/alpha.2026-01-01T00:00:00.000Z.letter. Step review."
             ]
         );
-        let second = json!({"rounds":[{"step":"dispatch","phase":"settled","driver_dir":"/runs/R/20261007T093830Z-dispatch"},{"step":"review","phase":"settled","driver_dir":"/runs/R/20261007T093830Z-dispatch"}]});
+        let second = json!({"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"settled","driver_dir":"/runs/R/20261007T093830Z-dispatch"},{"reply_designation":{"state":"unmeasured"},"step":"review","phase":"settled","driver_dir":"/runs/R/20261007T093830Z-dispatch"}]});
         assert_eq!(
             prior_round_dir(&second).expect("second round source"),
             PathBuf::from("/runs/R/20261007T093830Z-dispatch")
@@ -4122,7 +4126,7 @@ mod tests {
             "mail":[{"step":"review","inbox_name":"alpha.2026-01-01T00:00:00.000Z.letter","evidence_digest":"a".repeat(64)}],
             "driver_end":{"state":"completed", "successful":false},
             "helper_end":{"state":"completed"},
-            "rounds":[{"step":"dispatch", "phase":"failed", "ended_by":"by-report",
+            "rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch", "phase":"failed", "ended_by":"by-report",
                 "reply":null, "driver_dir":plan.driver_dir.join("prior-dispatch"),
                 "settle_attempts":[{"phase":"complete"}]}]
         });
@@ -4227,7 +4231,7 @@ mod tests {
             letter: PathBuf::new(),
             document: json!({"backend":"codex","worker_uid":3000}),
         };
-        let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"started","active_round":"dispatch","worker_uid":3000,"plan":{"backend":"codex","worker_uid":3000,"home":plan.home,"driver_dir":plan.driver_dir},"mail":[],"rounds":[{"step":"dispatch","phase":"running","driver_dir":step_dir}]});
+        let record = json!({"schema":1,"loop":"alpha","run":"R","phase":"started","active_round":"dispatch","worker_uid":3000,"plan":{"backend":"codex","worker_uid":3000,"home":plan.home,"driver_dir":plan.driver_dir},"mail":[],"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running","driver_dir":step_dir}]});
         super::publish_reservation(&super::reservation_path(fixture.path(), "R"), &record)
             .expect("reservation");
         (fixture, plan)
@@ -4536,7 +4540,7 @@ mod tests {
         record["rounds"]
             .as_array_mut()
             .expect("rounds")
-            .push(json!({"step":"review","phase":"running","driver_dir":prior}));
+            .push(json!({"reply_designation":{"state":"unmeasured"},"step":"review","phase":"running","driver_dir":prior}));
         record["active_round"] = json!("review");
         super::publish_reservation(&path, &record).expect("review reservation");
         let wrong = format!(
@@ -4701,7 +4705,7 @@ mod tests {
             record["rounds"]
                 .as_array_mut()
                 .expect("rounds")
-                .push(json!({"step":"review","phase":"running","driver_dir":directory}));
+                .push(json!({"reply_designation":{"state":"unmeasured"},"step":"review","phase":"running","driver_dir":directory}));
             record["mail"] = json!([{"step":"review","stop":true,"state":"placed"}]);
             record["active_round"] = json!("review");
             super::publish_reservation(&path, &record).expect("review reservation");
@@ -4874,7 +4878,7 @@ mod choice_tests {
         json!({"schema":1,"loop":"alpha","run":"R","worker_uid":3000,
             "phase":"settled","active_round":"dispatch","readback_end":"completed",
             "thread_id":"old-thread","driver_end":{"state":"completed","successful":false},
-            "helper_end":{"state":"completed"},"rounds":[{"step":"dispatch","phase":"failed",
+            "helper_end":{"state":"completed"},"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"failed",
                 "driver_dir":"/fixture/R/prior-dispatch","reply":null,"ended_by":"by-budget",
                 "thread":{"id":"old-thread","provenance":"observed"},
                 "settle_attempts":[{"phase":"complete"}]}],

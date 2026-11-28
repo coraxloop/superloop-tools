@@ -483,11 +483,125 @@ fn fresh_workspace_write_has_exact_argv_and_result() {
     );
     assert_eq!(
         argv(&harness),
-        "-p\n--output-format\nstream-json\n--verbose\n--permission-mode\nacceptEdits\n--model\nmodel-x\n--effort\nhigh\n"
+        format!(
+            "-p\n--output-format\nstream-json\n--verbose\n--strict-mcp-config\n--settings\n{}\n--permission-mode\nacceptEdits\n--model\nmodel-x\n--effort\nhigh\n",
+            harness
+                .run_dir("normal")
+                .join("claude-session-settings.json")
+                .display()
+        )
+    );
+    assert_eq!(
+        fs::read(
+            harness
+                .run_dir("normal")
+                .join("claude-session-settings.json")
+        )
+        .expect("run-local settings"),
+        b"{\"syncClaudeAiPlugins\":false,\"disableClaudeAiConnectors\":true}\n"
+    );
+    let environment = String::from_utf8(harness.read("environment")).expect("UTF-8 environment");
+    assert!(
+        environment
+            .lines()
+            .any(|line| line == "ENABLE_CLAUDEAI_MCP_SERVERS=false")
+    );
+    assert!(
+        environment
+            .lines()
+            .any(|line| { line == format!("CLAUDE_CONFIG_DIR={}", harness.config().display()) })
     );
     assert_eq!(
         fs::read(harness.run_dir("normal").join("last-message.txt"))
             .expect("read recovered result"),
+        b"final text"
+    );
+}
+
+/// The first stream record names extensions, while an absent record remains unmeasured.
+/// # Panics
+/// Panics only if the fixture or its evidence cannot be read, or the driver loses a record.
+/// ´test:integration:session-start-names-extensions-and-absence´
+#[test]
+fn session_start_names_extensions_and_absence() {
+    let loaded = Harness::new("session-load");
+    let mut command = loaded.command();
+    command.env("ORACLE_MODE", "session-load");
+    let result = output(
+        &mut command,
+        &[
+            OsStr::new("-t60"),
+            OsStr::new("-nloaded"),
+            OsStr::new("prompt"),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(0));
+    let report = String::from_utf8_lossy(&result.stdout);
+    assert!(report.contains("session_load=measured"), "{report}");
+    assert!(
+        report.contains("loaded_plugins=bundled-one,other-one"),
+        "{report}"
+    );
+    assert!(report.contains("loaded_mcp_servers=remote-one"), "{report}");
+    let evidence: serde_json::Value = serde_json::from_slice(
+        &fs::read(loaded.run_dir("loaded").join("session-load.json")).expect("session load"),
+    )
+    .expect("JSON evidence");
+    assert_eq!(
+        evidence["plugins"],
+        serde_json::json!(["bundled-one", "other-one"])
+    );
+    assert_eq!(evidence["mcp_servers"], serde_json::json!(["remote-one"]));
+    assert_eq!(
+        evidence["skills"],
+        serde_json::json!(["local-skill", "second-skill"])
+    );
+
+    let absent = Harness::new("no-init");
+    let mut command = absent.command();
+    command.env("ORACLE_MODE", "no-init");
+    let result = output(
+        &mut command,
+        &[
+            OsStr::new("-t60"),
+            OsStr::new("-nabsent"),
+            OsStr::new("prompt"),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("session_load=unmeasured"));
+    let evidence: serde_json::Value = serde_json::from_slice(
+        &fs::read(absent.run_dir("absent").join("session-load.json")).expect("session load"),
+    )
+    .expect("JSON evidence");
+    assert_eq!(evidence["state"], "unmeasured");
+    assert!(evidence.get("plugins").is_none());
+}
+
+/// A failed start-record sidecar leaves the child's completed verdict intact.
+/// # Panics
+/// Panics only if the fixture fails or a sidecar write replaces the child's result.
+/// ´test:integration:session-load-sidecar-failure-keeps-child-result´
+#[test]
+fn session_load_sidecar_failure_keeps_child_result() {
+    let harness = Harness::new("session-sidecar-blocked");
+    let mut command = harness.command();
+    command.env("ORACLE_MODE", "normal").env(
+        "ORACLE_BLOCK_PATH",
+        harness.run_dir("blocked").join("session-load.json"),
+    );
+    let result = output(
+        &mut command,
+        &[
+            OsStr::new("-t60"),
+            OsStr::new("-nblocked"),
+            OsStr::new("prompt"),
+        ],
+    );
+    assert_eq!(result.status.code(), Some(0));
+    assert!(String::from_utf8_lossy(&result.stdout).contains("session_load=unwritten"));
+    assert_eq!(
+        fs::read(harness.run_dir("blocked").join("last-message.txt")).expect("child result"),
         b"final text"
     );
 }
@@ -905,6 +1019,13 @@ fn a_prior_steps_rejection_leaves_a_natural_failure_failed() {
 fn resume_has_exact_argv_and_refuses_thread_mismatch() {
     let harness = Harness::new("resume");
     let run_dir = harness.seed_resume("run", "session-1");
+    let settings_target = harness.home().join("settings-target");
+    fs::write(&settings_target, b"unchanged").expect("target outside run");
+    std::os::unix::fs::symlink(
+        &settings_target,
+        run_dir.join("claude-session-settings.json"),
+    )
+    .expect("old settings link");
     fs::write(run_dir.join(".started-at"), b"2026-09-24T21:35:27Z\n")
         .expect("seed prior step start");
     let prior_start = fs::read_to_string(run_dir.join(".started-at")).expect("read prior start");
@@ -925,9 +1046,19 @@ fn resume_has_exact_argv_and_refuses_thread_mismatch() {
     let after = now_epoch();
 
     assert_eq!(result.status.code(), Some(0));
+    assert_eq!(fs::read(&settings_target).expect("target"), b"unchanged");
+    assert!(
+        !fs::symlink_metadata(run_dir.join("claude-session-settings.json"))
+            .expect("new settings")
+            .file_type()
+            .is_symlink()
+    );
     assert_eq!(
         argv(&harness),
-        "-p\n--output-format\nstream-json\n--verbose\n--permission-mode\nacceptEdits\n--resume\nsession-1\n"
+        format!(
+            "-p\n--output-format\nstream-json\n--verbose\n--strict-mcp-config\n--settings\n{}\n--permission-mode\nacceptEdits\n--resume\nsession-1\n",
+            run_dir.join("claude-session-settings.json").display()
+        )
     );
     assert_eq!(
         fs::read(run_dir.join("last-message.txt")).expect("read resume result"),
@@ -2498,7 +2629,13 @@ fn pure_mode_constructs_and_refuses_contaminated_homes() {
     );
     assert_eq!(
         argv(&harness),
-        "-p\n--output-format\nstream-json\n--verbose\n--tools\n\n--setting-sources\n\n--permission-mode\nplan\n"
+        format!(
+            "-p\n--output-format\nstream-json\n--verbose\n--strict-mcp-config\n--settings\n{}\n--tools\n\n--setting-sources\n\n--permission-mode\nplan\n",
+            harness
+                .run_dir("pure")
+                .join("claude-session-settings.json")
+                .display()
+        )
     );
     let environment = String::from_utf8(harness.read("environment")).expect("UTF-8 environment");
     assert!(

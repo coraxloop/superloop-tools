@@ -3,20 +3,53 @@ use std::path::Path;
 
 use superloop_lane::door::final_line;
 
+struct CommandStderr<W> {
+    writer: W,
+    last_byte: Option<u8>,
+}
+
+impl<W: io::Write> io::Write for CommandStderr<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let written = self.writer.write(bytes)?;
+        if written != 0 {
+            self.last_byte = Some(bytes[written - 1]);
+        }
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.writer.flush()
+    }
+}
+
+impl<W: io::Write> CommandStderr<W> {
+    fn final_line(&mut self, line: &str, completed: bool) -> io::Result<()> {
+        if completed && self.last_byte.is_some_and(|byte| byte != b'\n') {
+            self.writer.write_all(b"\n")?;
+        }
+        writeln!(self.writer, "{line}")
+    }
+}
+
 fn main() {
     superloop_cli_common::version_or_exit("door-ssh", env!("CARGO_PKG_VERSION"), None);
     let args = std::env::args_os().skip(1).collect::<Vec<_>>();
     let socket = Path::new("/home/worker/.local/door/capability.sock");
+    let errors = io::stderr();
+    let mut errors = CommandStderr {
+        writer: errors.lock(),
+        last_byte: None,
+    };
     let status = match superloop_lane::door::stub_call_stream(
         socket,
         &args,
         io::stdin(),
         io::stdout().lock(),
-        io::stderr().lock(),
+        &mut errors,
     ) {
         Ok(reply) => {
             if let Some(line) = final_line(&args, &reply) {
-                let _written = writeln!(io::stderr().lock(), "{line}");
+                let _written = errors.final_line(&line, reply["reason"] == "door-complete");
             }
             reply["status"]
                 .as_i64()
@@ -26,9 +59,9 @@ fn main() {
         Err(error) => {
             let detail = error.to_string();
             if detail.starts_with("door-workspace-") {
-                let _written = writeln!(io::stderr().lock(), "{detail}");
+                let _written = writeln!(errors.writer, "{detail}");
             } else {
-                let _written = writeln!(io::stderr().lock(), "door-socket: {error}");
+                let _written = writeln!(errors.writer, "door-socket: {error}");
             }
             125
         }
@@ -46,7 +79,52 @@ mod tests {
 
     use serde_json::json;
 
-    use super::final_line;
+    use super::{CommandStderr, final_line};
+
+    /// ´test:unit:door-ssh-closing-line-is-separate-from-command-stderr´
+    #[test]
+    fn door_ssh_closing_line_is_separate_from_command_stderr() {
+        for command in [
+            b"partial".as_slice(),
+            b"complete\n".as_slice(),
+            b"".as_slice(),
+        ] {
+            let mut output = CommandStderr {
+                writer: Vec::new(),
+                last_byte: None,
+            };
+            output.write_all(command).expect("command stderr");
+            output
+                .final_line("door-complete stdout_bytes=0 stderr_bytes=7", true)
+                .expect("closing line");
+            let mut expected = command.to_vec();
+            if !command.is_empty() && !command.ends_with(b"\n") {
+                expected.push(b'\n');
+            }
+            expected.extend_from_slice(b"door-complete stdout_bytes=0 stderr_bytes=7\n");
+            assert_eq!(output.writer, expected);
+        }
+    }
+
+    /// ´test:unit:door-ssh-completed-compute-counts-follow-verified-final´
+    #[test]
+    fn door_ssh_completed_compute_counts_follow_verified_final() {
+        let reply = json!({"reason":"door-complete","status":0,
+            "stdout_bytes":1536,"stderr_bytes":7});
+        let expected = Some("door-complete stdout_bytes=1536 stderr_bytes=7".to_owned());
+        assert_eq!(
+            final_line(&["node".into(), "printf hello".into()], &reply),
+            expected
+        );
+        assert_eq!(
+            final_line(&["--workspace-json".into(), "{}".into()], &reply),
+            expected
+        );
+        assert_eq!(
+            final_line(&["node".into(), "git-upload-pack repo".into()], &reply),
+            None
+        );
+    }
 
     /// ´test:unit:door-output-limit-diagnostic-names-budget-and-observation´
     #[test]

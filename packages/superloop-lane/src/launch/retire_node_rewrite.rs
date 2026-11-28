@@ -128,7 +128,7 @@ fn inventory(root: &Path, loop_name: &str) -> Result<Vec<Value>, LaneError> {
     paths.sort();
     let mut files = Vec::new();
     for path in paths {
-        let before = super::super::read_reservation_checked(&path, false)?
+        let before = super::super::read_reservation_for_conversion_checked(&path, false)?
             .ok_or_else(|| refusal("reservation vanished"))?;
         if before["loop"] != loop_name || !before["run"].as_str().is_some_and(valid_run_name) {
             return Err(refusal("reservation identity differs"));
@@ -292,8 +292,9 @@ fn resume_plan(
         }
         previous = Some(name);
         let bytes = absences::read_bytes(path)?.ok_or_else(|| refusal("reservation vanished"))?;
-        let mut before: Value =
-            crate::placement::reservation_bytes(&bytes, |error| refusal(error.to_string()))?;
+        let mut before: Value = crate::placement::conversion_reservation_bytes(&bytes, |error| {
+            refusal(error.to_string())
+        })?;
         if absences::hash(&bytes) != row["before_sha256"] {
             validate(&before)?;
             let original = before["node_retirement_rewrite"]["original"].clone();
@@ -383,13 +384,13 @@ pub fn run(home: &Path, args: &[String]) -> Result<Value, LaneError> {
         .as_deref()
         .ok_or_else(|| refusal("runs_root absent"))?;
     let _runs = lock_runs_root(root, true, Uid::effective().as_raw())?;
-    // Scan and validate the entire inventory before writing even a journal.
-    let files = inventory(root, loop_name)?;
     let journal_path = root.join(".retire-node-rewrite.json");
     let prior = read_journal(&journal_path)?;
     let resuming = prior
         .as_ref()
         .is_some_and(|journal| journal["phase"] == "pending");
+    // Scan and validate the entire inventory before writing even a journal.
+    let files = inventory(root, loop_name)?;
     let pending = prior.as_ref().filter(|_| resuming);
     let plan = if let Some(journal) = pending {
         if journal["schema"] == 1 {

@@ -1,13 +1,14 @@
 //! The registered socket boundary for outward worker calls.
 
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{self, Read as _, Write as _};
 use std::net::Shutdown;
 use std::os::fd::{AsFd, AsRawFd as _, OwnedFd};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::Path;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::thread;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -48,6 +49,7 @@ pub fn workspace_digests(owner_home: &Path, loop_name: &str) -> Result<String, L
 
 /// Format the final door reply for the SSH command boundary.
 #[must_use]
+#[allow(clippy::too_many_lines)] // Keep the reply reason branches in their established order.
 pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Option<String> {
     let reason = reply["reason"].as_str().unwrap_or("door-response-refusal");
     if args.len() == 1
@@ -59,6 +61,22 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
         )
     {
         Some(reply.to_string())
+    } else if reason == "door-complete"
+        && (args.first().is_some_and(|word| word == "--workspace-json")
+            || (args.len() == 2
+                && args[0] != "door-shape-probe"
+                && !args[1].as_encoded_bytes().starts_with(b"git-")))
+        && let (Some(stdout), Some(stderr)) = (
+            reply["stdout_bytes"].as_u64(),
+            reply["stderr_bytes"].as_u64(),
+        )
+    {
+        let diagnostic = reply["request_record_error"]
+            .as_str()
+            .map_or_else(String::new, |cause| format!("; {cause}"));
+        Some(format!(
+            "door-complete stdout_bytes={stdout} stderr_bytes={stderr}{diagnostic}"
+        ))
     } else if let Some(next) = reply["next_step"].as_str() {
         let bounds = if reply["registered_deadline_ms"].is_u64() {
             format!(
@@ -116,8 +134,19 @@ pub fn final_line(args: &[std::ffi::OsString], reply: &serde_json::Value) -> Opt
             reply["registered_deadline_ms"], reply["request_deadline_ms"]
         ))
     } else if reason == "door-request-concurrent" {
+        let holder = if reply["waiting_slots_full"] == true {
+            " waiting_slots=2/2; two workspace requests of this box are already waiting".to_owned()
+        } else if let (Some(id), Some(class), Some(held)) = (
+            reply["holder_request_id"].as_str(),
+            reply["holder_class"].as_str(),
+            reply["holder_held_seconds"].as_f64(),
+        ) {
+            format!(" holder_request_id={id} holder_class={class} held={held:.3}s")
+        } else {
+            String::new()
+        };
         Some(format!(
-            "{reason}: waited={}s retry_after={}s; {}",
+            "{reason}: waited={}s retry_after={}s{holder}; {}",
             reply["waited_seconds"],
             reply["retry_after_seconds"],
             admission_window()
@@ -573,6 +602,30 @@ impl AdmissionClock for RealAdmissionClock {
 // The service and host exercises share this inode; never unlink a lock on release.
 struct RequestGuard {
     _held: Vec<nix::fcntl::Flock<File>>,
+    holder_key: (PathBuf, String, u32, &'static str),
+    held_since: Instant,
+}
+
+struct AdmissionHolder {
+    request_id: String,
+    class: String,
+    held_since: Instant,
+}
+
+type HolderKey = (PathBuf, String, u32, &'static str);
+static ADMISSION_HOLDERS: OnceLock<Mutex<HashMap<HolderKey, AdmissionHolder>>> = OnceLock::new();
+
+fn admission_holders() -> &'static Mutex<HashMap<HolderKey, AdmissionHolder>> {
+    ADMISSION_HOLDERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+impl Drop for RequestGuard {
+    fn drop(&mut self) {
+        admission_holders()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.holder_key);
+    }
 }
 
 // These locks count waiting workspace calls without retaining either admission
@@ -594,6 +647,20 @@ impl WorkspaceWaitSlot {
 }
 
 impl RequestGuard {
+    fn note(&self, id: &str, class: &str) {
+        admission_holders()
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(
+                self.holder_key.clone(),
+                AdmissionHolder {
+                    request_id: id.to_owned(),
+                    class: class.to_owned(),
+                    held_since: self.held_since,
+                },
+            );
+    }
+
     fn acquire_wait(
         home: &Path,
         registration: &Registration,
@@ -702,7 +769,21 @@ impl RequestGuard {
             };
             held.push(slot);
         }
-        Ok(Some(Self { _held: held }))
+        let kind = match operation {
+            Some(transport::Operation::Compute) => "compute",
+            Some(transport::Operation::GitReceive) => "receive",
+            _ => "exclusive",
+        };
+        Ok(Some(Self {
+            _held: held,
+            holder_key: (
+                home.to_path_buf(),
+                registration.loop_name.clone(),
+                registration.worker_uid,
+                kind,
+            ),
+            held_since: Instant::now(),
+        }))
     }
 
     fn acquire_lock(
@@ -920,14 +1001,48 @@ fn concurrent_fields(reply: &mut Value, waited: Duration) {
     reply["retry_after_seconds"] = json!(RETRY_AFTER_SECONDS);
 }
 
+fn concurrent_holder(
+    reply: &mut Value,
+    home: &Path,
+    registration: &Registration,
+    operation: Option<transport::Operation>,
+) {
+    let kinds: &[&str] = match operation {
+        Some(transport::Operation::Compute) => &["compute", "exclusive"],
+        Some(transport::Operation::GitReceive) => &["receive", "exclusive"],
+        _ => &["exclusive", "compute", "receive"],
+    };
+    let holders = admission_holders()
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for kind in kinds {
+        let key = (
+            home.to_path_buf(),
+            registration.loop_name.clone(),
+            registration.worker_uid,
+            *kind,
+        );
+        if let Some(holder) = holders.get(&key) {
+            reply["holder_request_id"] = json!(holder.request_id);
+            reply["holder_class"] = json!(holder.class);
+            reply["holder_held_seconds"] =
+                json!((holder.held_since.elapsed().as_secs_f64() * 1000.0).round() / 1000.0);
+            break;
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)] // The refusal keeps the request's admission evidence together.
 fn concurrent_refusal(
     wait: &RequestWait,
+    home: Option<&Path>,
     registration: &Registration,
     peer: u32,
     started: Instant,
     waited: Duration,
     deadline: Instant,
     schema: u64,
+    operation: Option<transport::Operation>,
 ) -> io::Result<(Value, Vec<u8>)> {
     let _logged = writeln!(
         io::stderr().lock(),
@@ -937,6 +1052,9 @@ fn concurrent_refusal(
     let mut reply = transport::refusal(registration, peer, "door-request-concurrent", started);
     reply["schema"] = json!(schema);
     concurrent_fields(&mut reply, waited);
+    if let Some(home) = home {
+        concurrent_holder(&mut reply, home, registration, operation);
+    }
     wait.write_final(&reply, deadline)?;
     Ok((reply, Vec::new()))
 }
@@ -2494,8 +2612,18 @@ fn root_refusal_at(
         match RequestGuard::acquire_wait(owner_home, registration, request, None, started) {
             Ok((Some(guard), _)) => (Some(guard), None),
             Ok((None, waited)) => {
-                return concurrent_refusal(&wait, registration, peer, started, waited, deadline, 2)
-                    .map(|_| ());
+                return concurrent_refusal(
+                    &wait,
+                    Some(owner_home),
+                    registration,
+                    peer,
+                    started,
+                    waited,
+                    deadline,
+                    2,
+                    None,
+                )
+                .map(|_| ());
             }
             Err(error) => (None, Some(error)),
         }
@@ -3073,6 +3201,7 @@ fn run_claimed_workspace(
 #[allow(clippy::too_many_arguments)]
 fn finish_waiting_without_run(
     registration: &Registration,
+    home: &Path,
     peer: u32,
     store: &Store,
     wait: &RequestWait,
@@ -3101,6 +3230,12 @@ fn finish_waiting_without_run(
     reply["request_record_error"] = json!(detail);
     if reason == "door-request-concurrent" {
         concurrent_fields(&mut reply, waited);
+        concurrent_holder(
+            &mut reply,
+            home,
+            registration,
+            Some(transport::Operation::Compute),
+        );
     }
     wait.report(&mut reply);
     wait.write_final(&reply, deadline)
@@ -3212,12 +3347,14 @@ fn serve_request_with_agent_at_context(
                     }
                     return concurrent_refusal(
                         &wait,
+                        Some(home),
                         registration,
                         peer,
                         started,
                         waited,
                         admission_deadline,
                         if is_workspace_request { 3 } else { 2 },
+                        admission_operation,
                     );
                 }
                 Err(error) => (None, Some(error)),
@@ -3325,6 +3462,7 @@ fn serve_request_with_agent_at_context(
                         "two workspace requests of this box are already waiting; nothing was run"
                     );
                     concurrent_fields(&mut reply, Duration::ZERO);
+                    reply["waiting_slots_full"] = json!(true);
                     wait.report(&mut reply);
                     wait.write_final(&reply, admission_deadline)
                         .map_err(|error| {
@@ -3350,6 +3488,9 @@ fn serve_request_with_agent_at_context(
                     LaneError::input("door-workspace-context-differs", error.to_string())
                 })?;
                 let id = record.id().to_owned();
+                if let Some(guard) = request_guard.as_ref() {
+                    guard.note(&id, "compute");
+                }
                 let effect = record.value()["effect"].clone();
                 let ending = crate::requests::unobserved_ending();
                 let lease = store.file_active(record)?;
@@ -3386,6 +3527,7 @@ fn serve_request_with_agent_at_context(
                     Err(error) => {
                         completed_reply = Some(finish_waiting_without_run(
                             registration,
+                            home,
                             peer,
                             store,
                             &wait,
@@ -3405,6 +3547,7 @@ fn serve_request_with_agent_at_context(
                 let Some(runner) = agent else {
                     completed_reply = Some(finish_waiting_without_run(
                         registration,
+                        home,
                         peer,
                         store,
                         &wait,
@@ -3455,6 +3598,7 @@ fn serve_request_with_agent_at_context(
                 if let Some(stop) = wait.stop(admission_deadline) {
                     completed_reply = Some(finish_waiting_without_run(
                         registration,
+                        home,
                         peer,
                         store,
                         &wait,
@@ -3478,6 +3622,7 @@ fn serve_request_with_agent_at_context(
                     };
                     completed_reply = Some(finish_waiting_without_run(
                         registration,
+                        home,
                         peer,
                         store,
                         &wait,
@@ -3511,6 +3656,7 @@ fn serve_request_with_agent_at_context(
                 let Some(guard) = retaken else {
                     completed_reply = Some(finish_waiting_without_run(
                         registration,
+                        home,
                         peer,
                         store,
                         &wait,
@@ -3527,6 +3673,9 @@ fn serve_request_with_agent_at_context(
                     return Ok(String::new());
                 };
                 request_guard = Some(guard);
+                if let Some(guard) = request_guard.as_ref() {
+                    guard.note(&id, "compute");
+                }
                 let fresh = workspace_request(
                     context.runs,
                     registration,
@@ -3539,6 +3688,7 @@ fn serve_request_with_agent_at_context(
                 if let Some(stop) = wait.stop(admission_deadline) {
                     completed_reply = Some(finish_waiting_without_run(
                         registration,
+                        home,
                         peer,
                         store,
                         &wait,
@@ -3560,6 +3710,7 @@ fn serve_request_with_agent_at_context(
                     Err(error) => {
                         completed_reply = Some(finish_waiting_without_run(
                             registration,
+                            home,
                             peer,
                             store,
                             &wait,
@@ -3588,6 +3739,7 @@ fn serve_request_with_agent_at_context(
                     Err(error) => {
                         completed_reply = Some(finish_waiting_without_run(
                             registration,
+                            home,
                             peer,
                             store,
                             &wait,
@@ -3704,6 +3856,9 @@ fn serve_request_with_agent_at_context(
                     record = RequestRecord::decode(value)?;
                 }
                 let id = record.id().to_owned();
+                if let Some(guard) = request_guard.as_ref() {
+                    guard.note(&id, "compute");
+                }
                 let mut effect = record.value()["effect"].clone();
                 effect["state"] = json!("refused");
                 effect["reason"] = json!(if disposition
@@ -4241,6 +4396,9 @@ fn serve_request_with_agent_at_context(
     }
     let record = RequestRecord::decode(value).map_err(io::Error::other)?;
     let id = record.id().to_owned();
+    if let Some(guard) = request_guard.as_ref() {
+        guard.note(&id, class);
+    }
     let store = store.with_request_id(&id);
     let binding_source = record.value().clone();
     let activity = store.file_active(record);
@@ -4270,6 +4428,39 @@ fn serve_request_with_agent_at_context(
         return Ok((reply, Vec::new()));
     }
     let _publication_activity = activity.map_err(io::Error::other)?;
+    if miss && rubric.is_none() && !registered_receive {
+        let mut event = json!({"class":class,"operation":operation.name(),
+            "shape_key":shape_key,"reason":would_do["reason"],
+            "run":registration.run,"request_id":id});
+        if let Some(reason) = would_do["reason"].as_str() {
+            if reason.starts_with("requests-learned-index: index capacity exhausted") {
+                event["remedy"] = json!(format!(
+                    "superloop-lane requests status {}; rebuilding unchanged custody cannot reduce this limit",
+                    registration.loop_name
+                ));
+            } else if reason.starts_with("requests-learned-index: index rebuild refused") {
+                event["remedy"] = json!(format!(
+                    "superloop-lane requests status {}; correct the named custody or read failure before rebuilding",
+                    registration.loop_name
+                ));
+            } else if reason.starts_with("requests-learned-index: index unavailable")
+                || reason.starts_with("requests-learned-index: index damaged")
+            {
+                event["remedy"] = json!(format!(
+                    "stop the door service; superloop-lane requests rebuild-index {}",
+                    registration.loop_name
+                ));
+            }
+        }
+        let line = format!("door learned lookup: {event}");
+        let reported = writeln!(io::stderr().lock(), "{line}");
+        #[cfg(test)]
+        if reported.is_ok() {
+            LEGACY_MISS_JOURNAL.with(|slot| slot.borrow_mut().push(line));
+        }
+        #[cfg(not(test))]
+        drop(reported);
+    }
     let _ending = RequestEnding {
         store: &store,
         wait: &wait,
@@ -4933,6 +5124,20 @@ pub fn run_service(loop_name: &str) -> Result<(), LaneError> {
     })
 }
 
+fn heal_index_for_service(home: &Path, loop_name: &str) -> Result<Value, LaneError> {
+    let started = Instant::now();
+    let outcome =
+        Store::open(home, loop_name, true).and_then(|store| store.heal_learned_at_start());
+    let report = match &outcome {
+        Ok(status) => json!({"state":status["state"],"reason":status["reason"],
+            "wall_ms":started.elapsed().as_secs_f64() * 1000.0}),
+        Err(error) => json!({"state":"unavailable","reason":error.line(),
+            "wall_ms":started.elapsed().as_secs_f64() * 1000.0}),
+    };
+    let _reported = writeln!(io::stderr().lock(), "door learned index startup: {report}");
+    outcome
+}
+
 #[allow(clippy::too_many_lines)]
 fn run_service_with_snapshot(
     loop_name: &str,
@@ -5059,6 +5264,8 @@ fn run_service_with_snapshot(
         .and_then(|value| u32::try_from(value).ok())
         .ok_or_else(|| LaneError::input("door-registration", "row uid is absent"))?;
     recover_at_start(&owner_home, loop_name);
+    // The service owns the door idle lock; repair before binding its socket.
+    let _healed = heal_index_for_service(&owner_home, loop_name);
     let mut peer_map = None;
     let (listener, _bound_socket) = bind_socket_slot(&slot, |listener, before| {
         peer_map = Some(socket_group_child(
@@ -5311,6 +5518,7 @@ pub(crate) fn exercise_mode_fixture(
 #[cfg(test)]
 std::thread_local! {
     static EXERCISE_CAT_RUNNER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static LEGACY_MISS_JOURNAL: std::cell::RefCell<Vec<String>> = const { std::cell::RefCell::new(Vec::new()) };
     static FIXTURE_ABORT_AFTER_BIND: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FIXTURE_ABORT_AFTER_RELAX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     static FIXTURE_FAIL_RESTORE_WRITE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
@@ -6863,6 +7071,18 @@ mod tests {
         assert_eq!(reply["reason"], "door-complete", "{reply}");
         assert_eq!(reply["status"], 0);
         assert_eq!(stdout, b"fixture-ok");
+        assert_eq!(reply["stdout_bytes"], json!(stdout.len()));
+        assert_eq!(reply["stderr_bytes"], json!(stderr.len()));
+        assert_eq!(
+            super::final_line(
+                &[
+                    OsString::from("fixture-node"),
+                    OsString::from("/usr/bin/printf fixture-ok")
+                ],
+                &reply,
+            ),
+            Some("door-complete stdout_bytes=10 stderr_bytes=0".to_owned())
+        );
         assert_eq!(second["reason"], "door-complete");
         assert_eq!(second_stdout, b"fixture-ok");
         assert_eq!(faulted_stdout, b"fixture-ok");
@@ -6883,6 +7103,19 @@ mod tests {
             faulted["request_record_error"]
                 .as_str()
                 .is_some_and(|text| { text.contains("fixture effect write failure") })
+        );
+        assert_eq!(
+            super::final_line(
+                &[
+                    OsString::from("fixture-node"),
+                    OsString::from("/usr/bin/printf fixture-ok")
+                ],
+                &faulted,
+            ),
+            Some(format!(
+                "door-complete stdout_bytes=10 stderr_bytes=0; {}",
+                faulted["request_record_error"].as_str().unwrap_or_default()
+            ))
         );
         assert_eq!(stderr, b"");
         assert_eq!(missed["reason"], "door-workspace-referred");
@@ -7088,6 +7321,11 @@ mod tests {
                         assert_eq!(third["waited_seconds"], 0.0);
                         assert_eq!(third["retry_after_seconds"], 30);
                         assert_eq!(third["admission_window"], super::admission_window());
+                        assert_eq!(third["waiting_slots_full"], true);
+                        let third_line =
+                            super::final_line(&["--workspace-json".into(), "{}".into()], &third)
+                                .expect("third waiter line");
+                        assert!(third_line.contains("waiting_slots=2/2"), "{third_line}");
                         assert_eq!(store.list_run("R").expect("filed records").len(), 1);
                         if self.hold_second_slot {
                             *self.held_slot.lock().expect("held waiter slot") = Some(second);
@@ -8664,6 +8902,59 @@ mod tests {
         );
     }
 
+    /// ´test:unit:door-concurrent-refusal-names-current-box-holder´
+    #[test]
+    fn door_concurrent_refusal_names_current_box_holder() {
+        let fixture = Fixture::new();
+        let registration = concurrent_registration(3000);
+        let holder = super::RequestGuard::acquire_operation(
+            &fixture.home,
+            &registration,
+            Some(Operation::Compute),
+        )
+        .expect("admission lock")
+        .expect("first holder");
+        holder.note("S:holder", "compute");
+        assert!(
+            super::RequestGuard::acquire_operation(
+                &fixture.home,
+                &registration,
+                Some(Operation::Compute),
+            )
+            .expect("contended admission")
+            .is_none()
+        );
+        let (_worker, server) = FixtureClient::pair().expect("refused peer");
+        let wait = super::RequestWait::new(&server).expect("request wait");
+        let (reply, _) = super::concurrent_refusal(
+            &wait,
+            Some(&fixture.home),
+            &registration,
+            3000,
+            Instant::now(),
+            Duration::from_secs(1),
+            Instant::now() + Duration::from_secs(2),
+            2,
+            Some(Operation::Compute),
+        )
+        .expect("named refusal");
+        assert_eq!(reply["holder_request_id"], "S:holder");
+        assert_eq!(reply["holder_class"], "compute");
+        assert!(reply["holder_held_seconds"].as_f64().is_some());
+        let line = super::final_line(&["fixture".into(), "cargo test".into()], &reply)
+            .expect("holder line");
+        assert!(line.contains("holder_request_id=S:holder holder_class=compute held="));
+        drop(holder);
+        let mut after = json!({});
+        super::concurrent_holder(
+            &mut after,
+            &fixture.home,
+            &registration,
+            Some(Operation::Compute),
+        );
+        assert!(after.get("holder_request_id").is_none());
+    }
+
     /// ´test:unit:door-stop-guidance-distinguishes-unstarted-and-unconfirmed´
     #[test]
     fn door_stop_guidance_distinguishes_unstarted_and_unconfirmed() {
@@ -9771,6 +10062,96 @@ mod tests {
     }
 
     /// # Panics
+    /// Panics if a learned miss has the wrong journal remedy, leaks it into the worker frame, or fails to file the request.
+    /// ´test:unit:door-legacy-learned-miss-journals-filed-request´
+    #[test]
+    fn door_legacy_learned_miss_journals_filed_request() {
+        for (index_bytes, reason_prefix, remedy) in [
+            (
+                b"{\"unavailable\":true}".as_slice(),
+                "requests-learned-index: index unavailable",
+                "stop the door service; superloop-lane requests rebuild-index alpha",
+            ),
+            (
+                b"{\"unavailable\":true,\"reason\":\"shape index capacity\"}".as_slice(),
+                "requests-learned-index: index capacity exhausted (shape index capacity)",
+                "superloop-lane requests status alpha; rebuilding unchanged custody cannot reduce this limit",
+            ),
+            (
+                b"{\"unavailable\":true,\"reason\":\"index byte capacity\"}".as_slice(),
+                "requests-learned-index: index capacity exhausted (index byte capacity)",
+                "superloop-lane requests status alpha; rebuilding unchanged custody cannot reduce this limit",
+            ),
+            (
+                b"{\"unavailable\":true,\"reason\":\"index rebuild refused: requests-rewrite-refusal\"}".as_slice(),
+                "requests-learned-index: index rebuild refused: requests-rewrite-refusal",
+                "superloop-lane requests status alpha; correct the named custody or read failure before rebuilding",
+            ),
+            (
+                b"bad JSON".as_slice(),
+                "requests-learned-index: index damaged:",
+                "stop the door service; superloop-lane requests rebuild-index alpha",
+            ),
+        ] {
+            let fixture = Fixture::new();
+            fixture.set_floor("allow");
+            let store = fixture.store();
+            set_fixture_mode(&store, Mode::Allow);
+            let registration = Registration::from_row(
+                &json!({"name":"alpha","uid":41001}),
+                "alpha",
+                "R",
+                3000,
+                Scope::Work,
+            )
+            .expect("registration");
+            let route = route_for(&fixture.home);
+            let (runner, _, _) = counting_runner(&fixture);
+            let index_path = fixture.home.join(".config/loops/alpha/door-learned.json");
+            fs::write(&index_path, index_bytes).expect("index fixture");
+            fs::set_permissions(&index_path, fs::Permissions::from_mode(0o600))
+                .expect("index mode");
+            let (mut peer, mut stream) = FixtureClient::pair().expect("socket pair");
+            peer.shutdown(Shutdown::Write).expect("end input");
+            super::LEGACY_MISS_JOURNAL.with(|slot| slot.borrow_mut().clear());
+            let (reply, _) = super::serve_request_with_agent(
+                &mut stream,
+                &registration,
+                3000,
+                &json!({"schema":2,"argv":[b"door-attribution-probe"],"deadline_ms":120_000}),
+                Some(&route),
+                Some(&runner),
+                Some(&fixture.home),
+                None,
+                Some(&store),
+                None,
+                None,
+                Instant::now(),
+            )
+            .expect("service reply");
+            let frame = peer.answer();
+            let rows = store.list_run("R").expect("filed request");
+            assert_eq!(rows.len(), 1);
+            assert_eq!(frame["reason"], reply["reason"]);
+            assert!(!frame.to_string().contains("door learned lookup"));
+            assert!(!frame.to_string().contains(remedy));
+            let events =
+                super::LEGACY_MISS_JOURNAL.with(|slot| std::mem::take(&mut *slot.borrow_mut()));
+            assert_eq!(events.len(), 1);
+            let event: Value = serde_json::from_str(
+                events[0]
+                    .strip_prefix("door learned lookup: ")
+                    .expect("journal prefix"),
+            )
+            .expect("journal JSON");
+            assert_eq!(event["run"], "R");
+            assert_eq!(event["request_id"], rows[0].id());
+            assert_eq!(event["remedy"], remedy);
+            assert!(event["reason"].as_str().expect("miss reason").starts_with(reason_prefix));
+        }
+    }
+
+    /// # Panics
     /// Panics if a learned hit invokes the agent, changes its cited decision or repeats an effect.
     /// ´test:unit:door-repeated-learned-hits-skip-agent´
     #[test]
@@ -9808,6 +10189,13 @@ mod tests {
         let seed_id = seed.id().to_owned();
         store.file(seed).expect("seed filing");
         label(&store, &seed_id, "allow");
+        let index_path = fixture.home.join(".config/loops/alpha/door-learned.json");
+        std::fs::write(&index_path, b"{\"unavailable\":true}").expect("interrupted index");
+        assert_eq!(store.learned_status()["state"], "unavailable");
+        assert_eq!(
+            super::heal_index_for_service(&fixture.home, "alpha").expect("service startup heal")["state"],
+            "current"
+        );
         let route = route_for(&fixture.home);
         let (runner, effects, _) = counting_runner(&fixture);
         let agent = Agent(AtomicUsize::new(0));

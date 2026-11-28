@@ -25,6 +25,14 @@ struct Fixture {
     runs: PathBuf,
 }
 
+fn sha256_hex(bytes: impl AsRef<[u8]>) -> String {
+    let mut digest = String::with_capacity(64);
+    for byte in sha2::Sha256::digest(bytes) {
+        write!(&mut digest, "{byte:02x}").expect("string write");
+    }
+    digest
+}
+
 /// ´test:integration:lane-retired-setting-names-the-driver-vector´
 #[test]
 fn lane_retired_setting_names_the_driver_vector() {
@@ -325,7 +333,8 @@ fn rewrite_fixture(worker: u32, refused: bool) -> Fixture {
         "plan":{"driver_dir":fixture.runs.join("R"),"home":fixture.home.path().join(".cache/tmp/lane-alpha-R"),"runtime_argv":[runtime]},
         "launcher_pid":dead,"launcher_start":worker,"driver_entry_pid":dead,"driver_entry_start":worker,
         "helper_pid":dead,"helper_start":worker,"helper_parent_pid":dead,"helper_parent_start":worker,
-        "observer_state":"ended","observer_pid":dead,"observer_start":worker});
+        "observer_state":"ended","observer_pid":dead,"observer_start":worker,
+        "rounds":[{"step":"dispatch","phase":"settled","reply_designation":{"state":"unmeasured"}}]});
     write(
         &fixture.runs.join(".reservation-R.json"),
         record.to_string(),
@@ -436,6 +445,9 @@ fn retirement_node_absence_through_built_entry() {
         record["run"] = json!(run);
         record["launcher_pid"] = Value::Null;
         record["launcher_start"] = Value::Null;
+        if shape == "absent" {
+            record["rounds"] = json!([{"step":"dispatch","phase":"settled"}]);
+        }
         record["plan"]["home"] = json!(home.join(format!(".cache/tmp/lane-alpha-{run}")));
         record["plan"]["driver_dir"] = json!(fixture.runs.join(&run));
         record["plan"]["paths"][0]["path"] = record["plan"]["home"].clone();
@@ -532,13 +544,34 @@ finally:
             assert_eq!(proof["lock"], "absent");
             assert!(proof["host_wall_seconds"].as_f64().expect("wall") > 0.0);
             assert!(!node.join("lanes").exists());
-            success(&invoke(&[
+            let done = success(&invoke(&[
                 "retire",
                 "alpha",
                 &run,
                 "--expect-digest",
                 preview["preview_sha256"].as_str().expect("digest"),
             ]));
+            let retired = Path::new(done["retirement"]["record"].as_str().expect("archive"));
+            let saved: Value = serde_json::from_slice(&fs::read(retired).expect("archive bytes"))
+                .expect("archive JSON");
+            assert!(saved["rounds"][0].get("reply_designation").is_none());
+            fs::remove_file(fixture.runs.join(".reservation-S.json"))
+                .expect("remove unrelated peer");
+            success(&fixture.invoke(&["pause", "alpha"]));
+            let rewrite =
+                success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+            success(&fixture.invoke(&[
+                "census",
+                "rewrite-replies",
+                "alpha",
+                "--expect-digest",
+                rewrite["preview_sha256"].as_str().expect("rewrite digest"),
+            ]));
+            let census = success(&fixture.invoke(&["census", "alpha"]));
+            assert_eq!(
+                census["reply_designation_readiness"]["rows_without_member"]["retired"],
+                0
+            );
             let calls = fs::read_to_string(home.join("ssh-calls")).expect("calls");
             assert_eq!(
                 calls
@@ -697,8 +730,8 @@ fn retirement_after_report_rewrite_keeps_both_inode_generations() {
         record[format!("{role}_start")] = json!(1);
     }
     record["rounds"] = json!([
-        {"step":"work-1","phase":"settled","report":".report=R.json"},
-        {"step":"work-2","phase":"running"}
+        {"step":"work-1","phase":"settled","report":".report=R.json","reply_designation":{"state":"unmeasured"}},
+        {"step":"work-2","phase":"running","reply_designation":{"state":"unmeasured"}}
     ]);
     write(&reservation, record.to_string());
     let active = fixture.runs.join(".report=R.json");
@@ -708,6 +741,9 @@ fn retirement_after_report_rewrite_keeps_both_inode_generations() {
     let archive = PathBuf::from(first["retirement"]["record"].as_str().expect("archive"));
     let mut archived: Value =
         serde_json::from_slice(&fs::read(&archive).expect("archive bytes")).expect("archive JSON");
+    for round in archived["rounds"].as_array().expect("retired rounds") {
+        assert_eq!(round["reply_designation"], json!({"state":"unmeasured"}));
+    }
     let retired = PathBuf::from(
         archived["current_retirement"]["planned_paths"]
             .as_array()
@@ -880,6 +916,7 @@ fn launch_report_rewrite_entry_refuses_launchers_and_unknown_shapes() {
     );
 }
 
+#[allow(clippy::too_many_lines)] // One public retirement and conversion scenario.
 fn resumed_dead_driver_retirement(missing: bool) {
     let fixture = preparing_retirement_fixture();
     let path = fixture.runs.join(".reservation-R.json");
@@ -896,9 +933,18 @@ fn resumed_dead_driver_retirement(missing: bool) {
         }
     }
     record["rounds"] = json!([
-        {"step":"work-1","phase":"settled","report":".report=R.json"},
-        {"step":"work-2","phase":"running"}
+        {"step":"work-1","phase":"settled","report":".report=R.json",
+            "reply_designation":{"state":"unmeasured"}},
+        {"step":"work-2","phase":"running","reply_designation":{"state":"unmeasured"}}
     ]);
+    if missing {
+        for round in record["rounds"].as_array_mut().expect("rounds") {
+            round
+                .as_object_mut()
+                .expect("round")
+                .remove("reply_designation");
+        }
+    }
     write(
         &fixture.runs.join(".report=R.json"),
         first_round_report(&fixture).to_string(),
@@ -975,6 +1021,24 @@ fn resumed_dead_driver_retirement(missing: bool) {
     assert_eq!(archived["rounds"][1]["step"], "work-2");
     assert_eq!(archived["rounds"][1]["phase"], "failed");
     assert_eq!(archived["rounds"][1]["settlement_error"], "driver-death");
+    if missing {
+        fs::remove_file(fixture.runs.join(".reservation-S.json")).expect("remove unrelated peer");
+        success(&fixture.invoke(&["pause", "alpha"]));
+        let rewrite =
+            success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+        success(&fixture.invoke(&[
+            "census",
+            "rewrite-replies",
+            "alpha",
+            "--expect-digest",
+            rewrite["preview_sha256"].as_str().expect("rewrite digest"),
+        ]));
+        let census = success(&fixture.command());
+        assert_eq!(
+            census["reply_designation_readiness"]["rows_without_member"]["retired"],
+            0
+        );
+    }
 }
 
 /// ´test:integration:retirement-entry-measures-resumed-missing-identities´
@@ -1072,6 +1136,185 @@ fn retirement_entry_preserves_interrupted_settlement() {
 }
 
 /// # Panics
+/// Panics only if the census points an interrupted settlement away from conversion.
+/// ´test:integration:interrupted-settlement-census-names-conversion´
+#[test]
+fn interrupted_settlement_census_names_conversion() {
+    let fixture = preparing_retirement_fixture();
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("reservation")).expect("JSON");
+    record["phase"] = json!("started");
+    record["rounds"] = json!([{"step":"work-2","phase":"running"}]);
+    record["driver_end"] = json!({"state":"completed"});
+    for role in ["driver_entry", "helper", "helper_parent", "observer"] {
+        record[format!("{role}_pid")] = json!(u32::MAX);
+        record[format!("{role}_start")] = json!(1);
+    }
+    write(&path, record.to_string());
+    let before = success(&fixture.command());
+    assert!(
+        before["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|row| row["kind"] == "rounds-without-member"
+                && row["run"] == "R"
+                && row["next_command"] == "superloop-lane census rewrite-replies alpha --dry-run")
+    );
+    let retired = fixture.invoke(&["retire", "alpha", "R", "--dry-run"]);
+    assert!(String::from_utf8_lossy(&retired.stderr).contains("interrupted-settlement"));
+    success(&fixture.invoke(&["pause", "alpha"]));
+    let preview = success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+    success(&fixture.invoke(&[
+        "census",
+        "rewrite-replies",
+        "alpha",
+        "--expect-digest",
+        preview["preview_sha256"].as_str().expect("digest"),
+    ]));
+    let after = success(&fixture.command());
+    assert_eq!(
+        after["reply_designation_readiness"]["rows_without_member"]["live"],
+        0
+    );
+    success(&fixture.invoke(&["resume", "alpha"]));
+}
+
+/// # Panics
+/// Panics only if public census and conversion disagree on an unrecorded writer.
+/// ´test:integration:unrecorded-started-writer-retirement-route´
+#[test]
+fn unrecorded_started_writer_retirement_route() {
+    for evidence in ["absent", "recorded", "report-file", "unreadable"] {
+        let fixture = preparing_retirement_fixture();
+        let path = fixture.runs.join(".reservation-R.json");
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+        record["phase"] = json!("started");
+        record["rounds"] = json!([{"step":"work-2","phase":"running"}]);
+        record["launcher_pid"] = Value::Null;
+        record["launcher_start"] = Value::Null;
+        if evidence == "recorded" {
+            record["driver_end"] = json!({"state":"completed"});
+        }
+        write(&path, record.to_string());
+        if evidence == "report-file" {
+            write(
+                &fixture.runs.join(".report=R.json"),
+                first_round_report(&fixture).to_string(),
+            );
+        } else if evidence == "unreadable" {
+            std::os::unix::fs::symlink("missing-report", fixture.runs.join(".report=R.json"))
+                .expect("unreadable report");
+        }
+        let census = success(&fixture.command());
+        let blocker = census["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .find(|row| row["kind"] == "rounds-without-member" && row["run"] == "R")
+            .expect("old row blocker");
+        if evidence == "absent" {
+            assert_eq!(
+                blocker["next_command"],
+                "superloop-lane retire alpha R --dry-run"
+            );
+        } else {
+            assert!(blocker["next_command"].is_null(), "{blocker}");
+            assert!(
+                blocker["then"]
+                    .as_str()
+                    .expect("text")
+                    .contains("no command")
+            );
+            if evidence == "unreadable" {
+                assert!(
+                    blocker["then"]
+                        .as_str()
+                        .expect("text")
+                        .contains(".report=R.json")
+                );
+            }
+        }
+        success(&fixture.invoke(&["pause", "alpha"]));
+        let refusal = fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]);
+        assert_eq!(refusal.status.code(), Some(2));
+        let text = String::from_utf8_lossy(&refusal.stderr);
+        assert!(
+            text.contains("a started writer identity was not recorded"),
+            "{text}"
+        );
+        if evidence == "absent" {
+            assert!(
+                text.contains("superloop-lane retire alpha R --dry-run"),
+                "{text}"
+            );
+        } else {
+            assert!(
+                text.contains("no command of this program converts it"),
+                "{text}"
+            );
+            if evidence == "unreadable" {
+                assert!(text.contains(".report=R.json"), "{text}");
+            }
+        }
+    }
+}
+
+/// # Panics
+/// Panics only if the public census disagrees with a pending confirmed retirement.
+/// ´test:integration:pending-absence-census-repeats-retirement-flags´
+#[test]
+fn pending_absence_census_repeats_retirement_flags() {
+    let fixture = preparing_retirement_fixture();
+    let path = fixture.runs.join(".reservation-R.json");
+    fs::remove_file(fixture.runs.join(".prepare-R.lock")).expect("missing lease");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    record
+        .as_object_mut()
+        .expect("record")
+        .remove("harvest_agreement");
+    record.as_object_mut().expect("record").remove("collection");
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled"}]);
+    write(&path, record.to_string());
+    let flags = [
+        "--confirm-missing-lease",
+        "--confirm-missing-harvest-fields",
+    ];
+    let preview =
+        success(&fixture.invoke(&["retire", "alpha", "R", flags[0], flags[1], "--dry-run"]));
+    let mut pending = preview["plan"]["after"].clone();
+    pending["current_retirement"]["accepted_absences"]["preview_sha256"] =
+        preview["preview_sha256"].clone();
+    pending["retirement_absence_plan"] = preview["plan"].clone();
+    assert_eq!(pending["phase"], "retiring");
+    write(&path, pending.to_string());
+    let census = success(&fixture.command());
+    let blockers = census["reply_designation_readiness"]["blockers"]
+        .as_array()
+        .expect("blockers");
+    let rounds = blockers
+        .iter()
+        .find(|row| row["kind"] == "rounds-without-member" && row["run"] == "R")
+        .expect("rounds row");
+    let absence = blockers
+        .iter()
+        .find(|row| row["kind"] == "pending-absence-plan" && row["run"] == "R")
+        .expect("plan row");
+    assert_eq!(rounds["next_command"], absence["next_command"]);
+    assert_eq!(rounds["apply_command"], absence["apply_command"]);
+    assert_eq!(
+        rounds["next_command"],
+        "superloop-lane retire alpha R --confirm-missing-lease --confirm-missing-harvest-fields --dry-run"
+    );
+    let resumed =
+        success(&fixture.invoke(&["retire", "alpha", "R", flags[0], flags[1], "--dry-run"]));
+    assert_eq!(resumed["resuming"], true);
+}
+
+/// # Panics
 /// Panics only if fixture custody cannot be built or registration refusal changes shape.
 /// ´test:integration:retirement-entry-names-refused-registration´
 #[test]
@@ -1084,7 +1327,8 @@ fn retirement_entry_names_refused_registration() {
         record["phase"] = json!(phase);
         record["launcher_pid"] = Value::Null;
         record["launcher_start"] = Value::Null;
-        record["rounds"] = json!([{"step":"work-2","phase":"running"}]);
+        record["rounds"] = json!([{"step":"work-2","phase":"running",
+            "reply_designation":{"state":"unmeasured"}}]);
         write(&path, record.to_string());
         let original = fs::read(&path).expect("original");
         write(
@@ -1124,7 +1368,8 @@ fn retirement_entry_measures_missing_identities() {
         record["phase"] = json!(phase);
         record["launcher_pid"] = Value::Null;
         record["launcher_start"] = Value::Null;
-        record["rounds"] = json!([{"step":"work-2","phase":"running"}]);
+        record["rounds"] = json!([{"step":"work-2","phase":"running",
+            "reply_designation":{"state":"unmeasured"}}]);
         write(&path, record.to_string());
         let original = fs::read(&path).expect("original");
         let driver = fixture.runs.join("R");
@@ -1409,6 +1654,7 @@ fn retirement_entry_remeasures_proof_after_partial_custody_move() {
         serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
     record["launcher_pid"] = Value::Null;
     record["launcher_start"] = Value::Null;
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled"}]);
     write(&path, record.to_string());
     let driver = fixture.runs.join("R");
     directory(&driver);
@@ -1428,6 +1674,16 @@ fn retirement_entry_remeasures_proof_after_partial_custody_move() {
     record["retirement_absence_proof"] = journal["settlement"].clone();
     record["node_retirement"] = preview["retirement"]["node_retirement"].clone();
     write(&path, record.to_string());
+    let census = success(&fixture.command());
+    assert!(
+        census["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|row| row["kind"] == "rounds-without-member"
+                && row["run"] == "R"
+                && row["next_command"] == "superloop-lane retire alpha R --dry-run")
+    );
     let mut tampered = record.clone();
     tampered["current_retirement"]["reservation_path"]["target"] =
         json!(fixture.home.path().join(".retired-outside"));
@@ -1797,6 +2053,185 @@ fn reply_row_rewrite_entry_pauses_previews_applies_and_recounts() {
         census["reply_designation_readiness"]["rows_without_member"],
         json!({"live":0,"retired":0})
     );
+    for run in ["R", "S"] {
+        let path = fixture.runs.join(format!(".reservation-{run}.json"));
+        let saved: Value = serde_json::from_slice(&fs::read(path).expect("converted reservation"))
+            .expect("converted JSON");
+        assert_eq!(
+            saved["rounds"][0]["reply_designation"],
+            json!({"state":"unmeasured"})
+        );
+    }
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut stranded: Value =
+        serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    stranded["phase"] = json!("preparing");
+    stranded["rounds"][0]
+        .as_object_mut()
+        .expect("round")
+        .remove("reply_designation");
+    write(&path, stranded.to_string());
+    let census = success(&fixture.command());
+    assert!(
+        census["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|row| row["kind"] == "preparing-without-lease-or-launcher"
+                && row["run"] == "R"
+                && row["next_command"].is_null())
+    );
+    assert!(
+        census["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|row| row["kind"] == "rounds-without-member"
+                && row["run"] == "R"
+                && row["next_command"].is_null())
+    );
+}
+
+/// ´test:integration:strict-reply-row-reader-retains-preparation-recovery´
+#[test]
+fn strict_reply_row_reader_retains_preparation_recovery() {
+    let fixture = preparing_retirement_fixture();
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("reservation")).expect("JSON");
+    record["rounds"] = json!([{"step":"dispatch","phase":"preparing"}]);
+    write(&path, record.to_string());
+    let other = fixture.runs.join(".reservation-S.json");
+    let mut settled: Value =
+        serde_json::from_slice(&fs::read(&other).expect("other reservation")).expect("JSON");
+    settled["phase"] = json!("settled");
+    write(&other, settled.to_string());
+    fs::remove_file(fixture.runs.join(".prepare-R.lock")).expect("missing lease");
+    let before = success(&fixture.command());
+    assert_eq!(
+        before["reply_designation_readiness"]["rows_without_member"]["live"],
+        1
+    );
+    assert!(
+        before["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|row| row["kind"] == "preparing-without-launch" && row["run"] == "R")
+    );
+    success(&fixture.invoke(&["pause", "alpha"]));
+    let retirement = success(&fixture.invoke(&[
+        "retire",
+        "alpha",
+        "R",
+        "--confirm-missing-lease",
+        "--dry-run",
+    ]));
+    let retired = success(
+        &fixture.invoke(&[
+            "retire",
+            "alpha",
+            "R",
+            "--confirm-missing-lease",
+            "--expect-digest",
+            retirement["preview_sha256"]
+                .as_str()
+                .expect("retirement digest"),
+        ]),
+    );
+    assert_eq!(retired["retirement"]["state"], "retired");
+    let preview = success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+    assert_eq!(preview["plan"]["changed_rows"], 1);
+    let converted = success(&fixture.invoke(&[
+        "census",
+        "rewrite-replies",
+        "alpha",
+        "--expect-digest",
+        preview["preview_sha256"].as_str().expect("rewrite digest"),
+    ]));
+    assert_eq!(converted["complete"], true);
+    let after = success(&fixture.command());
+    assert_eq!(
+        after["reply_designation_readiness"]["rows_without_member"],
+        json!({"live":0,"retired":0})
+    );
+    success(&fixture.invoke(&["resume", "alpha"]));
+}
+
+/// ´test:integration:strict-reply-row-reader-names-conversion´
+#[test]
+fn strict_reply_row_reader_names_conversion() {
+    let fixture = Fixture::new();
+    let path = fixture.runs.join(".reservation-R.json");
+    let original: Value =
+        serde_json::from_slice(&fs::read(&path).expect("reservation")).expect("JSON");
+    for (member, issue) in [
+        (None, "reply_designation is missing"),
+        (Some(Value::Null), "reply_designation is null"),
+        (
+            Some(json!("unmeasured")),
+            "reply_designation must be an object",
+        ),
+        (Some(json!([])), "reply_designation must be an object"),
+        (
+            Some(json!({"state":"unmeasured","extra":true})),
+            "reply_designation has extra keys",
+        ),
+        (
+            Some(json!({"state":"issued"})),
+            "reply_designation has an unknown state",
+        ),
+    ] {
+        let mut record = original.clone();
+        let mut round = json!({"step":"dispatch"});
+        if let Some(member) = member {
+            round["reply_designation"] = member;
+        }
+        record["rounds"] = json!([round]);
+        write(&path, record.to_string());
+        let refused = fixture.invoke(&[
+            "set-door-scope",
+            "alpha",
+            "R",
+            "--to",
+            "review",
+            "--dry-run",
+        ]);
+        assert_eq!(refused.status.code(), Some(2));
+        let text = String::from_utf8_lossy(&refused.stderr);
+        assert!(text.contains("reply-designation-row"), "{text}");
+        assert!(text.contains("run R"), "{text}");
+        assert!(text.contains(issue), "{text}");
+        assert!(
+            text.contains("superloop-lane census rewrite-replies alpha --dry-run"),
+            "{text}"
+        );
+    }
+    let mut record = original;
+    record["rounds"] = json!([{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]);
+    let serialized = record.to_string();
+    let duplicate = serialized.replacen(
+        "\"reply_designation\":{\"state\":\"unmeasured\"}",
+        "\"reply_designation\":{\"state\":\"unmeasured\"},\"reply_designation\":{\"state\":\"unmeasured\"}",
+        1,
+    );
+    assert_ne!(serialized, duplicate);
+    write(&path, duplicate);
+    let refused = fixture.invoke(&[
+        "set-door-scope",
+        "alpha",
+        "R",
+        "--to",
+        "review",
+        "--dry-run",
+    ]);
+    assert_eq!(refused.status.code(), Some(2));
+    let text = String::from_utf8_lossy(&refused.stderr);
+    assert!(text.contains("reply_designation appears twice"), "{text}");
+    assert!(
+        text.contains("superloop-lane census rewrite-replies alpha --dry-run"),
+        "{text}"
+    );
 }
 
 /// ´test:integration:door-scope-entry-previews-applies-and-census-reads-current-scope´
@@ -1808,6 +2243,7 @@ fn door_scope_entry_previews_applies_and_census_reads_current_scope() {
     let mut record: Value =
         serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
     record["door_scope"] = json!("review");
+    record["rounds"] = json!([{"step":"dispatch","reply_designation":{"state":"unmeasured"}}]);
     record["plan"]["door"] = json!({"mirror_ref":"refs/heads/lane/R"});
     write(&path, record.to_string());
     let before = fs::read(&path).expect("before");
@@ -2267,9 +2703,16 @@ fn door_scope_entry_refuses_absent_route_history_and_oversize() {
 #[test]
 fn retirement_root_rewrite_entry_precedes_reconciliation() {
     let fixture = Fixture::new();
+    let peer = fixture.runs.join(".reservation-S.json");
+    let mut old_peer: Value =
+        serde_json::from_slice(&fs::read(&peer).expect("peer")).expect("JSON");
+    old_peer["phase"] = json!("settled");
+    old_peer["rounds"] = json!([{"step":"dispatch","phase":"settled"}]);
+    write(&peer, old_peer.to_string());
     let path = fixture.runs.join(".retired-R-20-1-2");
     let mut record: Value =
         serde_json::from_slice(&fs::read(&path).expect("record")).expect("JSON");
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled"}]);
     record["node_retirement"] = json!({"schema":1,"plan":{
         "schema":1,"loop":"alpha","run":"R","deadline_seconds":120,
         "policy":"host-completes-node-owed","reason":"node-retirement-pending",
@@ -2304,6 +2747,9 @@ fn retirement_root_rewrite_entry_precedes_reconciliation() {
         "--expect-digest",
         preview["preview_sha256"].as_str().expect("digest"),
     ]));
+    let rewritten: Value = serde_json::from_slice(&fs::read(&path).expect("rewritten record"))
+        .expect("rewritten JSON");
+    assert!(rewritten["rounds"][0].get("reply_designation").is_none());
     assert_eq!(applied["changed"], preview["changed"]);
     assert_eq!(applied["plan"], preview["plan"]);
     let converted: Value =
@@ -2316,10 +2762,97 @@ fn retirement_root_rewrite_entry_precedes_reconciliation() {
         converted["node_retirement_rewrite"]["original"],
         record["node_retirement"]
     );
+    success(&fixture.invoke(&["pause", "alpha"]));
+    let reply = success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+    success(&fixture.invoke(&[
+        "census",
+        "rewrite-replies",
+        "alpha",
+        "--expect-digest",
+        reply["preview_sha256"].as_str().expect("reply digest"),
+    ]));
     let census = success(&fixture.command());
+    assert_eq!(
+        census["reply_designation_readiness"]["rows_without_member"],
+        json!({"live":0,"retired":0})
+    );
     assert_eq!(
         census["retired_records"][0]["node_retirement"],
         converted["node_retirement"]
+    );
+}
+
+/// # Panics
+/// Panics only if a pending node rewrite cannot resume with an old-form round row.
+/// ´test:integration:node-retirement-rewrite-entry-resumes-old-reply-rows´
+#[test]
+fn node_retirement_rewrite_entry_resumes_old_reply_rows() {
+    let fixture = Fixture::new();
+    let path = fixture.runs.join(".retired-R-20-1-2");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("retired record")).expect("JSON");
+    record["rounds"] = json!([{"step":"dispatch","phase":"settled",
+        "reply_designation":{"state":"unmeasured"}}]);
+    record["node_retirement"] = json!({"schema":1,"plan":{
+        "schema":1,"loop":"alpha","run":"R","deadline_seconds":120,
+        "policy":"host-completes-node-owed","reason":"node-retirement-pending",
+        "helper_sha256":"a".repeat(64),"route":{"alias":"fixture","mirror_root":"~/mirrors",
+            "key_path":"/fixture/key","ssh_config_sha256":"b".repeat(64)},
+        "paths":["~/lanes/R","~/lanes/R-build","~/lanes/R-tmp","~/lanes/R.lock"],
+        "marker":"~/lanes/R.retired"},"outcome":{"state":"unmeasured",
+        "reason":"node-retirement-unreachable","owed":true,"host_wall_seconds":0.1,
+        "helper_exit":null,"remote_completion":"unknown","evidence":null},
+        "attempts":[],"attempts_omitted":0});
+    write(&path, record.to_string());
+    let full = success(&fixture.invoke(&[
+        "retire",
+        "rewrite-node",
+        "alpha",
+        "--dry-run",
+        "--full-plan",
+    ]));
+    record["rounds"][0]
+        .as_object_mut()
+        .expect("round")
+        .remove("reply_designation");
+    write(&path, record.to_string());
+    let mut plan = full["plan"].clone();
+    plan["files"][0]["before"] = record;
+    plan["files"][0]["before_sha256"] = json!(sha256_hex(fs::read(&path).expect("old bytes")));
+    plan["files"][0]["after"]["rounds"][0]
+        .as_object_mut()
+        .expect("round")
+        .remove("reply_designation");
+    let digest = sha256_hex(plan.to_string());
+    write(
+        &fixture.runs.join(".retire-node-rewrite.json"),
+        json!({"schema":1,"phase":"pending","digest":digest,"plan":plan}).to_string(),
+    );
+    let resumed = success(&fixture.invoke(&["retire", "rewrite-node", "alpha", "--dry-run"]));
+    assert_eq!(resumed["resuming"], true);
+    assert_eq!(resumed["preview_sha256"], digest);
+    success(&fixture.invoke(&[
+        "retire",
+        "rewrite-node",
+        "alpha",
+        "--expect-digest",
+        &digest,
+    ]));
+    fs::remove_file(fixture.runs.join(".reservation-R.json")).expect("remove unrelated live run");
+    fs::remove_file(fixture.runs.join(".reservation-S.json")).expect("remove unrelated peer");
+    success(&fixture.invoke(&["pause", "alpha"]));
+    let reply = success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+    success(&fixture.invoke(&[
+        "census",
+        "rewrite-replies",
+        "alpha",
+        "--expect-digest",
+        reply["preview_sha256"].as_str().expect("reply digest"),
+    ]));
+    let census = success(&fixture.command());
+    assert_eq!(
+        census["reply_designation_readiness"]["rows_without_member"]["retired"],
+        0
     );
 }
 
@@ -2420,6 +2953,14 @@ fn census_rewrite_entry_preserves_both_historical_shapes_and_identities() {
             assert_eq!(success(&apply(&fixture, digest))["complete"], true);
             let target = fs::read(fixture.path()).expect("rewritten evidence");
             let converted: Value = serde_json::from_slice(&target).expect("converted JSON");
+            let reservation: Value = serde_json::from_slice(
+                &fs::read(fixture.runs.join(".reservation-R.json")).expect("reservation"),
+            )
+            .expect("reservation JSON");
+            assert_eq!(
+                reservation["rounds"][0]["reply_designation"],
+                json!({"state":"unmeasured"})
+            );
             assert_eq!(
                 converted["credential_rewrite"]["original_bytes"]
                     .as_str()
@@ -2468,7 +3009,19 @@ fn census_rewrite_entry_preserves_both_historical_shapes_and_identities() {
 fn census_rewrite_entry_recovers_only_original_or_exact_target() {
     for target_published in [false, true] {
         let fixture = rewrite_fixture(3000, false);
-        let plan = preview(&fixture);
+        let mut plan = preview(&fixture);
+        let reservation_path = fixture.runs.join(".reservation-R.json");
+        let mut record: Value =
+            serde_json::from_slice(&fs::read(&reservation_path).expect("reservation"))
+                .expect("reservation JSON");
+        record["rounds"][0]
+            .as_object_mut()
+            .expect("round")
+            .remove("reply_designation");
+        write(&reservation_path, record.to_string());
+        let old_bytes = fs::read(&reservation_path).expect("old reservation bytes");
+        plan["plan"]["reservation_sha256"] = json!(sha256_hex(&old_bytes));
+        plan["preview_sha256"] = json!(sha256_hex(plan["plan"].to_string()));
         let digest = plan["preview_sha256"].as_str().expect("digest");
         let journal = fixture.runs.join(".census-rewrite-R.json");
         write(
@@ -2508,6 +3061,71 @@ fn census_rewrite_entry_recovers_only_original_or_exact_target() {
     assert_eq!(
         fs::read(fixture.path()).expect("changed bytes retained"),
         changed.as_bytes()
+    );
+}
+
+/// # Panics
+/// Panics only if the fixture or the public rewrite loses its pending journal binding.
+/// ´test:integration:retirement-rewrite-entry-resumes-old-reply-rows´
+#[test]
+fn retirement_rewrite_entry_resumes_old_reply_rows() {
+    let fixture = rewrite_fixture(3000, false);
+    let path = fixture.runs.join(".reservation-R.json");
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&path).expect("reservation")).expect("JSON");
+    record["imports"] = json!([]);
+    record["harvest_agreement"] = json!({"checkpoint_index":1,
+        "preserved_object":"a".repeat(40),"gate_object":"a".repeat(40),"instant_unix_ns":1});
+    record["collection"] = json!({"checkpoint_index":1,"state":"collected",
+        "instant_unix_ns":2,"planned":["."],"remaining":[],"refusal":null,
+        "component":null,"token":"a".repeat(32),
+        "parent_identity":{"device":1,"inode":2},"home_identity":{"device":1,"inode":3}});
+    write(&path, record.to_string());
+    let preview = success(&fixture.invoke(&["retire", "rewrite", "alpha", "R", "--dry-run"]));
+    record["rounds"][0]
+        .as_object_mut()
+        .expect("round")
+        .remove("reply_designation");
+    write(&path, record.to_string());
+    let hash = sha256_hex(fs::read(&path).expect("old bytes"));
+    let mut plan = preview["plan"].clone();
+    plan["files"][0]["before"] = record;
+    plan["files"][0]["before_sha256"] = json!(&hash);
+    plan["files"][0]["after"]["rounds"][0]
+        .as_object_mut()
+        .expect("round")
+        .remove("reply_designation");
+    plan["files"][0]["after"]["retirement_rewrite"]["before_sha256"] = json!(hash);
+    let digest = sha256_hex(plan.to_string());
+    write(
+        &fixture.runs.join(".retire-rewrite-R.json"),
+        json!({"schema":1,"phase":"pending","digest":digest,"plan":plan}).to_string(),
+    );
+    let resumed = success(&fixture.invoke(&["retire", "rewrite", "alpha", "R", "--dry-run"]));
+    assert_eq!(resumed["resuming"], true);
+    assert_eq!(resumed["preview_sha256"], digest);
+    success(&fixture.invoke(&[
+        "retire",
+        "rewrite",
+        "alpha",
+        "R",
+        "--expect-digest",
+        &digest,
+    ]));
+    fs::remove_file(fixture.runs.join(".reservation-S.json")).expect("remove unrelated peer");
+    success(&fixture.invoke(&["pause", "alpha"]));
+    let reply = success(&fixture.invoke(&["census", "rewrite-replies", "alpha", "--dry-run"]));
+    success(&fixture.invoke(&[
+        "census",
+        "rewrite-replies",
+        "alpha",
+        "--expect-digest",
+        reply["preview_sha256"].as_str().expect("reply digest"),
+    ]));
+    let census = success(&fixture.command());
+    assert_eq!(
+        census["reply_designation_readiness"]["rows_without_member"]["live"],
+        0
     );
 }
 

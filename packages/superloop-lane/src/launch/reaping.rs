@@ -1199,10 +1199,11 @@ fn record_reconciliation(record: &mut Value, cause: &str, unit: &str, reaping: &
     }
 }
 
-/// Leave launch's started and preparing reservations to its existing recovery readers.
+/// Leave launch's started and preparing reservations to its existing recovery readers,
+/// and a changing rotation's reconciliation to its own configuration hold.
 #[must_use]
 pub fn reconciles_before_command(command: &str) -> bool {
-    command != "launch"
+    !matches!(command, "launch" | "rotate")
 }
 
 /// Identify a started run whose launcher is gone so its reply can be read without a new unit.
@@ -1722,7 +1723,12 @@ fn reconcile_public_with(
         .as_deref()
         .ok_or_else(|| LaneError::input("run-scope-record", "runs root is absent from settings"))?;
     let reservation = reservation_path(root, run);
-    let Some(record) = read_reservation(&reservation)? else {
+    let read = if retirement {
+        super::read_reservation_for_conversion
+    } else {
+        read_reservation
+    };
+    let Some(record) = read(&reservation)? else {
         return Ok(());
     };
     if record["loop"] != loop_name || record["run"] != run {
@@ -1739,7 +1745,7 @@ fn reconcile_public_with(
         return Ok(());
     }
     let _mailbox = lock_mailbox(root, run, Uid::effective().as_raw())?;
-    let Some(mut record) = read_reservation(&reservation)? else {
+    let Some(mut record) = read(&reservation)? else {
         return Ok(());
     };
     if retirement
@@ -1851,7 +1857,7 @@ mod tests {
     fn retirement_measures_scope_before_either_driver_death_transition() {
         for missing in [false, true] {
             let reports = tempfile::tempdir().expect("reports root");
-            let mut record = json!({"phase":"started","run":"R","plan":{"driver_dir":reports.path().join("R")},"rounds":[{"step":"work-1","phase":"running"}]});
+            let mut record = json!({"phase":"started","run":"R","plan":{"driver_dir":reports.path().join("R")},"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"work-1","phase":"running"}]});
             if !missing {
                 for role in [
                     "launcher",
@@ -1942,7 +1948,7 @@ mod tests {
     }
 
     fn reservation() -> Value {
-        json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":{"loop_uid":41001,"worker_uid":3000},"launcher_pid":crate::dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"rounds":[{"step":"dispatch","phase":"running"}],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/superloop-lane-run-fixture.service/work","device":1,"inode":1,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture-invocation"}})
+        json!({"schema":1,"phase":"started","loop":"alpha","run":"R","worker_uid":3000,"plan":{"loop_uid":41001,"worker_uid":3000},"launcher_pid":crate::dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":crate::dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"running"}],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/superloop-lane-run-fixture.service/work","device":1,"inode":1,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture-invocation"}})
     }
 
     /// ´test:unit:scope-command-retains-proxy-pin-and-caller-environment´
@@ -2151,6 +2157,7 @@ mod tests {
         assert_eq!(preparing["pre_driver_failure"], "driver-death");
         assert_eq!(preparing["driver_end"]["state"], "not-started");
         assert!(!reconciles_before_command("launch"));
+        assert!(!reconciles_before_command("rotate"));
         assert!(reconciles_before_command("checkpoint"));
         assert!(
             started_recovery_state(&reservation(), "alpha", "R", |_, _| {

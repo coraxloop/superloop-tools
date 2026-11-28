@@ -1260,6 +1260,10 @@ fn container_states(
         30,
         "install-door-presence",
     )?;
+    parse_container_states(&output)
+}
+
+fn parse_container_states(output: &str) -> Result<Vec<String>, LaneError> {
     output
         .lines()
         .map(|line| {
@@ -1516,6 +1520,62 @@ fn door_inventory(
     Ok(inventory)
 }
 
+/// Conservatively report work that a vendor-service restart could end.
+pub(crate) fn proxy_move_busy(
+    owner_home: &Path,
+    loop_name: &str,
+) -> Result<Vec<String>, LaneError> {
+    use crate::container_helper::ProcessPresence;
+    let registry_path = loop_home::registry_path(
+        std::env::var_os("ENTER_LOOP_REGISTRY").as_deref(),
+        owner_home,
+    );
+    let registry = loop_home::load_registry(&registry_path)
+        .map_err(|error| LaneError::input("install-door-presence", error.message()))?;
+    if registry.runs_root(loop_name).is_none() {
+        return Err(LaneError::input(
+            "install-door-presence",
+            "loop has no registered runs root",
+        ));
+    }
+    pinned::owner_executable(Path::new("/usr/bin/podman"), Uid::effective().as_raw())?;
+    let output = build::run_checked(
+        Path::new("/usr/bin/podman"),
+        vec![
+            "ps".into(),
+            "--all".into(),
+            "--no-trunc".into(),
+            "--format".into(),
+            "{{.State}}".into(),
+            "--filter".into(),
+            format!("label=org.superloop.loop={loop_name}"),
+        ],
+        &build::podman_environment(owner_home)?,
+        owner_home,
+        30,
+        "install-door-presence",
+    )?;
+    let all_states = parse_container_states(&output)?;
+    let inventory = door_inventory(owner_home, loop_name, None, Path::new("/usr/bin/podman"))?;
+    let mut busy = inventory.busy;
+    if all_states
+        .iter()
+        .any(|state| !matches!(state.as_str(), "exited" | "stopped"))
+    {
+        busy.push("loop has a live or uncertain container outside a settled reservation".into());
+    }
+    for (run, record) in inventory.reservations {
+        match door_launcher_presence(&record) {
+            ProcessPresence::Present => busy.push(format!("run {run} has a live launcher")),
+            ProcessPresence::Unknown => busy.push(format!("run {run} launcher is uncertain")),
+            ProcessPresence::Absent => {}
+        }
+    }
+    busy.sort();
+    busy.dedup();
+    Ok(busy)
+}
+
 pub(crate) fn busy_holder_with_program(
     owner_home: &Path,
     loop_name: &str,
@@ -1583,7 +1643,7 @@ pub(crate) fn busy_holder_with_program(
     }
     holders.sort();
     if holders.is_empty() {
-        vec!["a shared configuration reader (launch planning, a starting round, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run)".into()]
+        vec!["a shared configuration reader (launch planning, a starting round, a changing rotation, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run)".into()]
     } else {
         holders
     }
@@ -2133,6 +2193,25 @@ mod tests {
         private_run_with_identity, read_checked_beneath, run_private_entry_fixture, run_with,
         set_directory_metadata,
     };
+
+    /// ´test:unit:proxy-move-container-inventory-refuses-unknown-state´
+    #[test]
+    fn proxy_move_container_inventory_refuses_unknown_state() {
+        assert_eq!(
+            super::parse_container_states("exited\nstopped\n").expect("idle"),
+            ["exited", "stopped"]
+        );
+        assert_eq!(
+            super::parse_container_states("running\n").expect("live"),
+            ["running"]
+        );
+        assert_eq!(
+            super::parse_container_states("mystery\n")
+                .expect_err("uncertain state")
+                .kind,
+            "install-door-presence"
+        );
+    }
 
     fn directory(path: &std::path::Path, mode: u32) {
         fs::create_dir_all(path).expect("fixture directory");
@@ -3054,7 +3133,7 @@ mod tests {
         assert!(
             shared
                 .detail
-                .contains("launch planning, a starting round, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run"),
+                .contains("launch planning, a starting round, a changing rotation, census, exercise, install --pilot --refresh-proxy, record-hosts --list, or a dry run"),
             "{shared:?}"
         );
         drop(reader);

@@ -294,7 +294,7 @@ fn fixture() -> Fixture {
         fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("retained mode");
     }
     let reservation = runs.join(".reservation-R.json");
-    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3001,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"helper_pid":dead_pid::DEAD_LOCK_PID + 2,"helper_start":1,"helper_parent_pid":dead_pid::DEAD_LOCK_PID + 3,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
+    let record = json!({"schema":1,"phase":"failed","loop":"alpha","run":"R","worker_uid":3001,"plan":plan.document,"model_selection":selection,"letter_source":letter,"active_round":"dispatch","launcher_pid":dead_pid::DEAD_LOCK_PID,"launcher_start":1,"driver_entry_pid":dead_pid::DEAD_LOCK_PID + 1,"driver_entry_start":1,"helper_pid":dead_pid::DEAD_LOCK_PID + 2,"helper_start":1,"helper_parent_pid":dead_pid::DEAD_LOCK_PID + 3,"helper_parent_start":1,"observer_state":"not-started","settlement_uncertain":false,"rounds":[{"reply_designation":{"state":"unmeasured"},"step":"dispatch","phase":"failed","settlement_error":"settle-evidence: reply absent"}],"mail":[],"mail_replies":[],"run_scope":{"unit":"superloop-lane-run-fixture.service","cgroup":"/user.slice/superloop-lane-run-fixture.service/work","device":1,"inode":2,"proxy_unit":"superloop-lane-vendor@alpha.service","proxy_invocation":"fixture"}});
     fs::write(&reservation, serde_json::to_vec(&record).expect("JSON")).expect("reservation");
     fs::set_permissions(&reservation, fs::Permissions::from_mode(0o600)).expect("record mode");
     let mailbox = runs.join(".letter-R.lock");
@@ -390,7 +390,8 @@ impl ReportFixture {
         record["phase"] = json!("started");
         record["driver_end"] = Value::Null;
         record["helper_spawn_state"] = json!("started");
-        record["rounds"][0] = json!({"step":"dispatch","phase":"running","driver_dir":directory});
+        record["rounds"][0] = json!({"step":"dispatch","phase":"running","driver_dir":directory,
+            "reply_designation":{"state":"unmeasured"}});
         record["plan"]["door"]["stub_sha256"] = json!("b".repeat(64));
         fs::write(
             &fixture.reservation,
@@ -608,6 +609,130 @@ fn repin_and_recovery_read_loop_custody_through_private_entry() {
         *end,
         "{}",
         String::from_utf8_lossy(&applied.stderr)
+    );
+    assert_eq!(
+        saved["rounds"][0]["reply_designation"],
+        json!({"state":"unmeasured"})
+    );
+}
+
+/// # Panics
+/// Panics only if the public conversion cannot hand an old interrupted round to strict recovery.
+/// ´test:integration:old-reply-row-converts-before-interrupted-settlement-recovery´
+#[test]
+#[allow(clippy::too_many_lines)] // One public scenario carries conversion through recovery and final census.
+fn old_reply_row_converts_before_interrupted_settlement_recovery() {
+    let fixture = ReportFixture::new();
+    let preview = successful_json(&fixture.repin(None, false));
+    successful_json(&fixture.repin(
+        Some(preview["preview_sha256"].as_str().expect("repin digest")),
+        false,
+    ));
+    let mut record: Value =
+        serde_json::from_slice(&fs::read(&fixture.fixture.reservation).expect("reservation"))
+            .expect("JSON");
+    record["rounds"][0]
+        .as_object_mut()
+        .expect("round")
+        .remove("reply_designation");
+    fs::write(&fixture.fixture.reservation, record.to_string()).expect("old reservation");
+    let census = successful_json(
+        &fixture
+            .command()
+            .args(["census", "alpha"])
+            .output()
+            .expect("census"),
+    );
+    assert!(
+        census["reply_designation_readiness"]["blockers"]
+            .as_array()
+            .expect("blockers")
+            .iter()
+            .any(|row| row["kind"] == "rounds-without-member"
+                && row["run"] == "R"
+                && row["next_command"] == "superloop-lane census rewrite-replies alpha --dry-run")
+    );
+    successful_json(
+        &fixture
+            .command()
+            .args(["pause", "alpha"])
+            .output()
+            .expect("pause"),
+    );
+    let paused = fixture.recovery(None);
+    assert_eq!(paused.status.code(), Some(2));
+    let paused_text = String::from_utf8_lossy(&paused.stderr);
+    assert!(paused_text.contains("launch-paused"), "{paused_text}");
+    assert!(
+        paused_text.contains("superloop-lane resume alpha"),
+        "{paused_text}"
+    );
+    let conversion = successful_json(
+        &fixture
+            .command()
+            .args(["census", "rewrite-replies", "alpha", "--dry-run"])
+            .output()
+            .expect("conversion preview"),
+    );
+    successful_json(
+        &fixture
+            .command()
+            .args([
+                "census",
+                "rewrite-replies",
+                "alpha",
+                "--expect-digest",
+                conversion["preview_sha256"]
+                    .as_str()
+                    .expect("conversion digest"),
+            ])
+            .output()
+            .expect("conversion apply"),
+    );
+    let zero = successful_json(
+        &fixture
+            .command()
+            .args(["census", "alpha"])
+            .output()
+            .expect("zero census"),
+    );
+    assert_eq!(
+        zero["reply_designation_readiness"]["rows_without_member"],
+        json!({"live":0,"retired":0})
+    );
+    successful_json(
+        &fixture
+            .command()
+            .args(["resume", "alpha"])
+            .output()
+            .expect("resume"),
+    );
+    let recovery = successful_json(&fixture.recovery(None));
+    assert_eq!(
+        recovery["interrupted_settlement"]["state"],
+        "would-complete-interrupted-settlement"
+    );
+    let complete = successful_json(
+        &fixture.recovery(Some(
+            recovery["interrupted_settlement"]["preview_sha256"]
+                .as_str()
+                .expect("recovery digest"),
+        )),
+    );
+    assert_eq!(
+        complete["interrupted_settlement"]["state"],
+        "completed-interrupted-settlement"
+    );
+    let final_census = successful_json(
+        &fixture
+            .command()
+            .args(["census", "alpha"])
+            .output()
+            .expect("final census"),
+    );
+    assert_eq!(
+        final_census["reply_designation_readiness"]["rows_without_member"],
+        json!({"live":0,"retired":0})
     );
 }
 

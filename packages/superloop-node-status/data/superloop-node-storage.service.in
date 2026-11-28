@@ -1,0 +1,13 @@
+[Unit]
+Description=Keep one daily compute-node storage observation
+After=local-fs.target
+
+[Service]
+Type=oneshot
+StateDirectory=superloop-node-status
+StateDirectoryMode=0755
+User=root
+Group=root
+ExecStart=@BINDIR@/superloop-node-status storage sample --config @SYSCONFDIR@/superloop/node-storage.json --state-dir /var/lib/superloop-node-status/storage
+TimeoutStartSec=10min
+UMask=0027
