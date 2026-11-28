@@ -1607,6 +1607,18 @@ struct ProxyService {
 }
 
 fn parse_proxy_service(text: &str, unit: &Path) -> Result<ProxyService, LaneError> {
+    parse_proxy_service_with(text, unit, Path::new("/usr/lib/systemd/user"), |path| {
+        loop_home::workers_settings::platform_file(path, nix::unistd::Uid::effective().as_raw())
+            .is_ok()
+    })
+}
+
+fn parse_proxy_service_with(
+    text: &str,
+    unit: &Path,
+    distribution_root: &Path,
+    mut platform_file: impl FnMut(&Path) -> bool,
+) -> Result<ProxyService, LaneError> {
     let mut fields = std::collections::BTreeMap::new();
     for line in text.lines() {
         let (key, value) = line.split_once('=').ok_or_else(|| {
@@ -1625,16 +1637,37 @@ fn parse_proxy_service(text: &str, unit: &Path) -> Result<ProxyService, LaneErro
             .copied()
             .ok_or_else(|| LaneError::input("proxy-unit", format!("system manager omitted {name}")))
     };
-    if fields.len() != 7
-        || field("LoadState")? != "loaded"
-        || field("FragmentPath")? != unit.to_string_lossy()
-        || !field("DropInPaths")?.is_empty()
-    {
+    if fields.len() != 7 || field("LoadState")? != "loaded" {
         return Err(LaneError::input(
             "proxy-unit",
-            "vendor unit is not the recognized loaded file without overrides; preview install --pilot LOOP --move-proxy --dry-run",
+            "vendor unit is not a recognized loaded file; preview install --pilot LOOP --move-proxy --dry-run",
         ));
     }
+    let fragment = field("FragmentPath")?;
+    let unit_name = unit
+        .file_name()
+        .and_then(|name| name.to_str())
+        .unwrap_or("vendor unit");
+    let loop_name = unit_name
+        .strip_prefix("superloop-lane-vendor@")
+        .and_then(|name| name.strip_suffix(".service"))
+        .unwrap_or("LOOP");
+    if fragment != unit.to_string_lossy() {
+        return Err(LaneError::input(
+            "proxy-unit",
+            format!(
+                "vendor unit loads from {fragment} instead of the recorded {}; restore the recorded unit with superloop-lane repair {loop_name}",
+                unit.display()
+            ),
+        ));
+    }
+    check_proxy_drop_ins(
+        field("DropInPaths")?,
+        unit_name,
+        loop_name,
+        distribution_root,
+        &mut platform_file,
+    )?;
     let state = field("ActiveState")?;
     let active = match state {
         "active" => true,
@@ -1676,6 +1709,51 @@ fn parse_proxy_service(text: &str, unit: &Path) -> Result<ProxyService, LaneErro
         bound_by,
         reload_pending,
     })
+}
+
+fn check_proxy_drop_ins(
+    drop_ins: &str,
+    unit_name: &str,
+    loop_name: &str,
+    distribution_root: &Path,
+    platform_file: &mut impl FnMut(&Path) -> bool,
+) -> Result<(), LaneError> {
+    let drop_ins = drop_ins
+        .split_ascii_whitespace()
+        .map(Path::new)
+        .collect::<Vec<_>>();
+    let outside = drop_ins
+        .iter()
+        .filter(|path| {
+            !path.starts_with(distribution_root)
+                || path.as_os_str() == distribution_root.as_os_str()
+        })
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if !outside.is_empty() {
+        return Err(LaneError::input(
+            "proxy-unit",
+            format!(
+                "vendor unit {unit_name} loads drop-in {}, which lies outside the distribution's /usr/lib/systemd/user and can change what the service starts; remove that file or move its setting elsewhere at an idle moment, run systemctl --user daemon-reload, then repeat install --pilot {loop_name} --move-proxy --dry-run",
+                outside.join(", ")
+            ),
+        ));
+    }
+    let replaceable = drop_ins
+        .iter()
+        .filter(|path| !platform_file(path))
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>();
+    if !replaceable.is_empty() {
+        return Err(LaneError::input(
+            "proxy-unit",
+            format!(
+                "drop-in {} lies under /usr/lib/systemd/user but this user could replace it or a directory above it",
+                replaceable.join(", ")
+            ),
+        ));
+    }
+    Ok(())
 }
 
 fn proxy_manager(owner_home: &Path, loop_name: &str, action: &str) -> Result<String, LaneError> {
@@ -3348,6 +3426,164 @@ mod tests {
             unit.display(),
             if reload_pending { "yes" } else { "no" },
         )
+    }
+
+    fn recorded_manager_answer(
+        state: &str,
+        invocation: &str,
+        bound_by: &str,
+        drop_ins: &str,
+        fragment: &Path,
+    ) -> String {
+        format!(
+            "BoundBy={bound_by}\nLoadState=loaded\nActiveState={state}\nFragmentPath={}\nDropInPaths={drop_ins}\nNeedDaemonReload=no\nInvocationID={invocation}\n",
+            fragment.display()
+        )
+    }
+
+    /// ´test:unit:proxy-move-reads-system-manager-properties-with-a-distribution-drop-in´
+    #[test]
+    fn proxy_move_reads_system_manager_properties_with_a_distribution_drop_in() {
+        let drop_in = Path::new("/usr/lib/systemd/user/service.d/10-timeout-abort.conf");
+        if !drop_in.exists() {
+            use std::io::Write as _;
+            std::io::stderr()
+                .write_all(b"SKIP: distribution service drop-in is absent on this test host\n")
+                .expect("skip notice");
+            return;
+        }
+        let rows = [
+            ("inactive", "", "", false),
+            (
+                "active",
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "superloop-lane-run-one.service superloop-lane-run-two.service",
+                true,
+            ),
+        ];
+        for (state, invocation, bound_by, active) in rows {
+            let (fixture, request, unit) = move_fixture();
+            let output = recorded_manager_answer(
+                state,
+                invocation,
+                bound_by,
+                drop_in.to_str().expect("platform path"),
+                &unit,
+            );
+            let service = super::parse_proxy_service(&output, &unit)
+                .expect("distribution drop-in is admitted");
+            assert_eq!(service.active, active);
+            let mut manager = |action: &str| -> Result<String, crate::error::LaneError> {
+                assert_eq!(action, "show");
+                Ok(output.clone())
+            };
+            let preview = super::run_proxy_move_with(
+                fixture.path(),
+                &request,
+                &mut manager,
+                &mut || Ok(Vec::new()),
+                &mut |_| Ok(()),
+                &mut |_| Ok(()),
+            )
+            .expect("recorded manager output reaches a preview");
+            assert_eq!(preview["blocked"], active);
+            if active {
+                assert_eq!(
+                    preview["busy"],
+                    serde_json::json!([
+                        "vendor BoundBy=superloop-lane-run-one.service",
+                        "vendor BoundBy=superloop-lane-run-two.service"
+                    ])
+                );
+            } else {
+                assert_eq!(preview["busy"], serde_json::json!([]));
+                assert_eq!(
+                    preview["actions"],
+                    serde_json::json!([
+                        "replace vendor unit",
+                        "daemon-reload",
+                        "publish generation"
+                    ])
+                );
+            }
+        }
+    }
+
+    /// ´test:unit:proxy-move-refuses-untrusted-drop-ins-and-wrong-fragment´
+    #[test]
+    fn proxy_move_refuses_untrusted_drop_ins_and_wrong_fragment() {
+        let fixture = tempfile::tempdir().expect("path fixture");
+        let root = fixture.path();
+        let distribution = root.join("usr/lib/systemd/user");
+        let owner = root.join("home/owner/.config/systemd/user/service.d/owner.conf");
+        let administrator = root.join("etc/systemd/user/service.d/admin.conf");
+        let platform = distribution.join("service.d/platform.conf");
+        let unit = root.join("home/owner/.config/systemd/user/superloop-lane-vendor@alpha.service");
+        for path in [&owner, &administrator, &platform] {
+            fs::create_dir_all(path.parent().expect("parent")).expect("drop-in directory");
+            fs::write(path, b"[Service]\n").expect("drop-in");
+        }
+        let uid = nix::unistd::Uid::effective().as_raw();
+        let other_uid = if uid == 3000 { 3001 } else { 3000 };
+        let check = |text: &str| {
+            super::parse_proxy_service_with(text, &unit, &distribution, |path| {
+                loop_home::workers_settings::platform_file_at(path, root, uid, other_uid).is_ok()
+            })
+        };
+        for outside in [&owner, &administrator] {
+            let output = recorded_manager_answer(
+                "inactive",
+                "",
+                "",
+                outside.to_str().expect("fixture path"),
+                &unit,
+            );
+            let error = check(&output).expect_err("non-distribution drop-in refuses");
+            assert_eq!(error.kind, "proxy-unit");
+            assert!(error.detail.contains(&outside.display().to_string()));
+            assert!(error.detail.contains("lies outside the distribution"));
+        }
+        let both = format!("{} {}", owner.display(), administrator.display());
+        let output = recorded_manager_answer("inactive", "", "", &both, &unit);
+        let error = check(&output).expect_err("every outside drop-in is named");
+        assert!(error.detail.contains(&owner.display().to_string()));
+        assert!(error.detail.contains(&administrator.display().to_string()));
+
+        fs::set_permissions(&platform, fs::Permissions::from_mode(0o666))
+            .expect("replaceable platform file");
+        let output = recorded_manager_answer(
+            "inactive",
+            "",
+            "",
+            platform.to_str().expect("fixture path"),
+            &unit,
+        );
+        let error = check(&output).expect_err("writable platform file refuses");
+        assert_eq!(error.kind, "proxy-unit");
+        assert!(error.detail.contains(&platform.display().to_string()));
+        assert!(
+            error
+                .detail
+                .contains("this user could replace it or a directory above it")
+        );
+
+        fs::set_permissions(&platform, fs::Permissions::from_mode(0o644))
+            .expect("protected platform file");
+        let parent = platform.parent().expect("parent");
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o777))
+            .expect("replaceable platform parent");
+        let error = check(&output).expect_err("writable platform parent refuses");
+        assert!(error.detail.contains(&platform.display().to_string()));
+        fs::set_permissions(parent, fs::Permissions::from_mode(0o755))
+            .expect("restore platform parent");
+
+        let other_fragment = unit.with_file_name("different.service");
+        let output = recorded_manager_answer("inactive", "", "", "", &other_fragment);
+        let error = check(&output).expect_err("fragment mismatch refuses");
+        assert_eq!(error.kind, "proxy-unit");
+        assert!(error.detail.contains(&other_fragment.display().to_string()));
+        assert!(error.detail.contains(&unit.display().to_string()));
+        assert!(error.detail.contains("superloop-lane repair alpha"));
     }
 
     /// ´test:unit:proxy-move-previews-and-applies-an-installer-generation´
